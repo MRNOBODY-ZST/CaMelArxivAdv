@@ -9,6 +9,8 @@ declare module 'vue-router' {
     publicLayout?: boolean
     requiresAuth?: boolean
     permissions?: readonly Permission[]
+    pageTitle?: string
+    pageSection?: string
   }
 }
 
@@ -17,29 +19,36 @@ export const routes: RouteRecordRaw[] = [
     path: '/login', name: 'login', component: () => import('@/modules/auth/LoginView.vue'),
     meta: { publicLayout: true },
   },
-  { path: '/', name: 'dashboard', component: DashboardView, meta: { requiresAuth: true } },
+  {
+    path: '/', name: 'dashboard', component: DashboardView,
+    meta: { requiresAuth: true, pageTitle: '数据总览', pageSection: '概览' },
+  },
   {
     path: '/change-password', name: 'change-password',
-    component: () => import('@/modules/auth/ChangePasswordView.vue'), meta: { requiresAuth: true },
+    component: () => import('@/modules/auth/ChangePasswordView.vue'),
+    meta: { requiresAuth: true, pageTitle: '修改密码', pageSection: '账号安全' },
   },
   {
-    path: '/admin/users', name: 'admin-users', component: () => import('@/views/PhasePlaceholderView.vue'),
-    props: { title: '用户管理', description: '创建、启停、分配角色及重置用户密码。' },
-    meta: { requiresAuth: true, permissions: ['user:read'] },
+    path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
+    meta: {
+      requiresAuth: true, permissions: ['user:read'], pageTitle: '用户管理', pageSection: '系统管理',
+    },
   },
   {
-    path: '/admin/roles', name: 'admin-roles', component: () => import('@/views/PhasePlaceholderView.vue'),
-    props: { title: '角色与权限', description: '维护自定义角色并查看权限目录。' },
-    meta: { requiresAuth: true, permissions: ['role:read'] },
+    path: '/admin/roles', name: 'admin-roles', component: () => import('@/modules/admin/RolesView.vue'),
+    meta: {
+      requiresAuth: true, permissions: ['role:read'], pageTitle: '角色与权限', pageSection: '系统管理',
+    },
   },
   {
-    path: '/admin/audit', name: 'admin-audit', component: () => import('@/views/PhasePlaceholderView.vue'),
-    props: { title: '审计日志', description: '按操作者、动作、资源、结果和时间追溯敏感操作。' },
-    meta: { requiresAuth: true, permissions: ['audit:read'] },
+    path: '/admin/audit', name: 'admin-audit', component: () => import('@/modules/admin/AuditLogsView.vue'),
+    meta: {
+      requiresAuth: true, permissions: ['audit:read'], pageTitle: '审计日志', pageSection: '系统管理',
+    },
   },
   {
     path: '/forbidden', name: 'forbidden', component: () => import('@/views/ForbiddenView.vue'),
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, pageTitle: '无权访问', pageSection: '访问控制' },
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

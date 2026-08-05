@@ -83,7 +83,8 @@ public final class RefreshSessionService {
 				.switchIfEmpty(Mono.just(RotationOutcome.invalid()));
 		return transactions.transactional(work)
 				.flatMap(outcome -> outcome.value() == null
-						? Mono.error(new InvalidRefreshTokenException())
+						? Mono.error(new InvalidRefreshTokenException(
+								outcome.userId(), outcome.familyId(), outcome.replay()))
 						: Mono.just(outcome.value()));
 	}
 
@@ -112,16 +113,16 @@ public final class RefreshSessionService {
 		Instant now = clock.instant();
 		if (session.rotatedAt() != null || session.replacedBy() != null) {
 			return repository.revokeFamily(session.familyId(), now)
-					.thenReturn(RotationOutcome.invalid());
+					.thenReturn(RotationOutcome.invalid(session, true));
 		}
 		if (session.revokedAt() != null || !session.expiresAt().isAfter(now)) {
-			return Mono.just(RotationOutcome.invalid());
+			return Mono.just(RotationOutcome.invalid(session, false));
 		}
 		return identityRepository.findById(session.userId())
 				.filter(account -> account.status() == UserStatus.ACTIVE)
 				.flatMap(account -> createReplacement(session, account, context, now))
 				.switchIfEmpty(repository.revokeFamily(session.familyId(), now)
-						.thenReturn(RotationOutcome.invalid()));
+						.thenReturn(RotationOutcome.invalid(session, false)));
 	}
 
 	private Mono<RotationOutcome> createReplacement(
@@ -156,13 +157,22 @@ public final class RefreshSessionService {
 	) {
 	}
 
-	private record RotationOutcome(RotatedRefreshSession value) {
+	private record RotationOutcome(
+			RotatedRefreshSession value,
+			UUID userId,
+			UUID familyId,
+			boolean replay
+	) {
 		static RotationOutcome success(RotatedRefreshSession value) {
-			return new RotationOutcome(value);
+			return new RotationOutcome(value, value.account().id(), value.familyId(), false);
 		}
 
 		static RotationOutcome invalid() {
-			return new RotationOutcome(null);
+			return new RotationOutcome(null, null, null, false);
+		}
+
+		static RotationOutcome invalid(RefreshSession session, boolean replay) {
+			return new RotationOutcome(null, session.userId(), session.familyId(), replay);
 		}
 	}
 }

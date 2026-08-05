@@ -5,6 +5,11 @@ project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose_file="$project_root/docker-compose.yml"
 development_compose_file="$project_root/docker-compose.dev.yml"
 
+# Contract rendering uses deterministic non-production values. The Compose file itself
+# must reject missing runtime authentication keys.
+export JWT_SIGNING_KEY_BASE64=${JWT_SIGNING_KEY_BASE64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+export AUTH_FINGERPRINT_HMAC_KEY_BASE64=${AUTH_FINGERPRINT_HMAC_KEY_BASE64:-YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=}
+
 if [[ ! -f "$compose_file" ]]; then
   echo "Missing root docker-compose.yml" >&2
   exit 1
@@ -48,6 +53,21 @@ for backend_service in backend-api mail-worker; do
     exit 1
   fi
 done
+
+if ! grep -Fq 'JWT_SIGNING_KEY_BASE64: ${JWT_SIGNING_KEY_BASE64:?' "$compose_file"; then
+  echo "Production Compose must require JWT signing key material" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'AUTH_FINGERPRINT_HMAC_KEY_BASE64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:?' "$compose_file"; then
+  echo "Production Compose must require authentication fingerprint key material" >&2
+  exit 1
+fi
+
+if grep -Fq '$proxy_add_x_forwarded_for' "$project_root/infra/nginx/default.conf"; then
+  echo "Edge Nginx must not trust a client-supplied X-Forwarded-For chain" >&2
+  exit 1
+fi
 
 for internal_service in postgres redis rabbitmq minio backend-api mail-worker arxiv-worker mailpit; do
   if [[ $(jq -r --arg service "$internal_service" '.services[$service] | has("ports")' <<<"$compose_json") == "true" ]]; then

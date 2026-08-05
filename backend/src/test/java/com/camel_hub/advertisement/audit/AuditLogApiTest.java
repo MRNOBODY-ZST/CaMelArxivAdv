@@ -30,7 +30,7 @@ class AuditLogApiTest {
 	void setUp() {
 		service = mock(AuditQueryService.class);
 		webTestClient = WebTestClient.bindToController(new AuditLogController(service))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.build();
 	}
 

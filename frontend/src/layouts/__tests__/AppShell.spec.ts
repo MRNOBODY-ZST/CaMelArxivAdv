@@ -27,6 +27,42 @@ describe('AppShell', () => {
     expect(wrapper.text()).not.toContain('审计日志')
     expect(wrapper.text()).not.toContain('SMTP 账户')
   })
+
+  it('derives the header title and breadcrumb from route metadata', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().acceptSession({
+      accessToken: 'memory-token',
+      tokenType: 'Bearer',
+      expiresInSeconds: 600,
+      user: {
+        id: '5d3a9802-375f-42ee-9739-d419299bc4a8',
+        username: 'admin',
+        displayName: 'Administrator',
+        roles: ['SUPER_ADMIN'],
+        permissions: ['user:read'],
+        mustChangePassword: false,
+      },
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }, {
+        path: '/admin/users',
+        component: { template: '<div />' },
+        meta: { pageTitle: '用户管理', pageSection: '系统管理' },
+      }],
+    })
+    await router.push('/admin/users')
+    await router.isReady()
+
+    const wrapper = mount(AppShell, {
+      slots: { default: '<div />' },
+      global: { plugins: [pinia, router] },
+    })
+
+    expect(wrapper.get('[data-testid="page-title"]').text()).toBe('用户管理')
+    expect(wrapper.get('[data-testid="page-breadcrumb"]').text()).toBe('系统管理 / 用户管理')
+  })
 })
 
 function mountShell(grantedPermissions: Permission[]) {

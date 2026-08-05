@@ -70,6 +70,18 @@ class IdentityRepositoryTest {
 		assertThat(repository.findByPrincipal("admin").block().roles()).containsExactly("SUPER_ADMIN");
 	}
 
+	@Test
+	void passwordUpdateIsConditionalOnTheVerifiedCredentialState() {
+		UUID userId = insertUser("password-user", "password-user@example.edu", "ACTIVE");
+		var account = repository.findById(userId).block();
+		assertThat(account).isNotNull();
+
+		assertThat(repository.updatePasswordIfUnchanged(
+				userId, account.passwordHash(), account.tokenVersion(), "$2a$12$new-hash").block()).isTrue();
+		assertThat(repository.updatePasswordIfUnchanged(
+				userId, account.passwordHash(), account.tokenVersion(), "$2a$12$stale-overwrite").block()).isFalse();
+	}
+
 	private UUID insertUser(String username, String email, String status) {
 		return databaseClient.sql("""
 				INSERT INTO users (username, email, password_hash, display_name, status)

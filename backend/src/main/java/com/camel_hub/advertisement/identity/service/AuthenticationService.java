@@ -106,7 +106,25 @@ public class AuthenticationService {
 							Map.of(), Map.of("status", "ROTATED"), AuditResult.SUCCESS, null))
 							.thenReturn(new AuthenticationResult(
 									accessTokenService.issue(user), user, rotated.rawToken()));
-				});
+				})
+				.onErrorResume(InvalidRefreshTokenException.class, exception ->
+						auditRefreshFailure(exception, context).then(Mono.error(exception)));
+	}
+
+	private Mono<Void> auditRefreshFailure(
+			InvalidRefreshTokenException exception,
+			AuthenticationRequestContext context
+	) {
+		if (exception.userId() == null || exception.familyId() == null) {
+			return Mono.empty();
+		}
+		String action = exception.replay() ? "AUTH_REFRESH_REPLAY" : "AUTH_REFRESH_FAILURE";
+		AuditResult result = exception.replay() ? AuditResult.DENIED : AuditResult.FAILURE;
+		return auditService.record(new AuditEvent(
+				exception.userId(), action, "REFRESH_FAMILY", exception.familyId().toString(),
+				rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
+				Map.of(), Map.of("status", "REJECTED"), result,
+				exception.replay() ? "TOKEN_REPLAY" : "INVALID_SESSION"));
 	}
 
 	public Mono<Void> logout(String rawToken, AuthenticationRequestContext context) {
@@ -148,8 +166,11 @@ public class AuthenticationService {
 		}).subscribeOn(Schedulers.boundedElastic());
 
 		return encodedPassword.flatMap(encoded -> transactions.transactional(
-				identityRepository.updatePassword(account.id(), encoded)
-						.then(refreshSessions.revokeAll(account.id()))
+				identityRepository.updatePasswordIfUnchanged(
+							account.id(), account.passwordHash(), account.tokenVersion(), encoded)
+						.flatMap(updated -> updated
+								? refreshSessions.revokeAll(account.id())
+								: Mono.error(new AuthenticationFailedException()))
 						.then(auditService.record(new AuditEvent(
 								account.id(), "AUTH_PASSWORD_CHANGE", "USER", account.id().toString(),
 								rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
@@ -178,8 +199,16 @@ public class AuthenticationService {
 				? "USER_NOT_ACTIVE"
 				: "BAD_CREDENTIALS";
 		return rateLimiter.record(principal, context.ipAddress(), false, reason)
-				.then(auditFailure(account, principal, context, reason, AuditResult.FAILURE))
-				.then(Mono.error(new AuthenticationFailedException()));
+				.then(rateLimiter.isBlocked(principal, context.ipAddress()))
+				.flatMap(blocked -> {
+					String auditedReason = blocked ? "RATE_LIMITED" : reason;
+					AuditResult result = blocked ? AuditResult.DENIED : AuditResult.FAILURE;
+					RuntimeException failure = blocked
+							? new LoginRateLimitedException()
+							: new AuthenticationFailedException();
+					return auditFailure(account, principal, context, auditedReason, result)
+							.then(Mono.error(failure));
+				});
 	}
 
 	private Mono<Void> auditFailure(

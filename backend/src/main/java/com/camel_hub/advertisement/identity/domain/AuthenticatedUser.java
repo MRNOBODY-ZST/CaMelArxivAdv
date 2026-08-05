@@ -15,12 +15,15 @@ public record AuthenticatedUser(
 ) implements Principal {
 
 	public static AuthenticatedUser from(UserAccount account) {
+		Set<String> effectivePermissions = account.forcePasswordChange()
+				? Set.of()
+				: account.permissions();
 		return new AuthenticatedUser(
 				account.id(),
 				account.username(),
 				account.displayName(),
 				account.roles(),
-				account.permissions(),
+				effectivePermissions,
 				account.forcePasswordChange(),
 				account.tokenVersion());
 	}

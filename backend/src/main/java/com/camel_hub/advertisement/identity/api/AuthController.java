@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.identity.api;
 
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
+import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import com.camel_hub.advertisement.identity.security.RefreshCookieFactory;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import com.camel_hub.advertisement.identity.service.AuthenticationResult;
@@ -19,7 +20,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
-import java.net.InetSocketAddress;
 import java.security.Principal;
 import java.util.UUID;
 
@@ -107,10 +107,7 @@ public class AuthController {
 	}
 
 	private String clientAddress(ServerWebExchange exchange) {
-		InetSocketAddress remoteAddress = exchange.getRequest().getRemoteAddress();
-		return remoteAddress == null || remoteAddress.getAddress() == null
-				? "unknown"
-				: remoteAddress.getAddress().getHostAddress();
+		return ClientAddressResolver.resolve(exchange.getRequest());
 	}
 
 	private String userAgent(ServerWebExchange exchange) {

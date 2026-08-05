@@ -372,7 +372,7 @@ Run: `cd frontend && npm test -- --run && npm run typecheck && npm run lint && n
 
 Expected: all commands pass with zero warnings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src/modules/auth frontend/src/api frontend/src/router frontend/src/layouts
@@ -398,21 +398,21 @@ git commit -m "feat: add in-memory Vue authentication"
 - Consumes: administration APIs and DesignSkill primitives.
 - Produces: responsive user/role/audit pages, documented role matrix, test account/bootstrap procedure and Phase 2 evidence.
 
-- [ ] **Step 1: Write failing view authorization and state tests**
+- [x] **Step 1: Write failing view authorization and state tests**
 
 Verify Skeleton/Empty/Error states, user disable confirmation, role permission checkbox labeling, no password/hash rendering, audit filters, 403 handling, and buttons hidden without the exact write permission.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd frontend && npm test -- --run src/modules/admin`
 
 Expected: FAIL because administration views are absent.
 
-- [ ] **Step 3: Implement DesignSkill-based administration pages and documentation**
+- [x] **Step 3: Implement DesignSkill-based administration pages and documentation**
 
 Use existing `DsTable`, `DsBadge`, `DsModal`, `DsEmptyState`, `DsSkeleton` and `DsAlert`. Document the complete role-permission matrix, initial admin environment flow, forced password change, refresh replay response, lockout recovery and audit fields.
 
-- [ ] **Step 4: Rebuild images and run Phase 2 end-to-end acceptance**
+- [x] **Step 4: Rebuild images and run Phase 2 end-to-end acceptance**
 
 Run: `cd backend && ./gradlew clean check bootJar`
 
@@ -426,7 +426,7 @@ Verify with HTTP/browser: initial admin login, forced change, refresh rotation, 
 
 Expected: all automated commands pass; all nine services remain healthy; no token appears in browser storage/logs; browser console has zero warnings/errors.
 
-- [ ] **Step 5: Commit Phase 2 acceptance**
+- [x] **Step 5: Commit Phase 2 acceptance**
 
 ```bash
 git add frontend/src/modules/admin docs README.md IMPLEMENTATION_PLAN.md TASKS.md

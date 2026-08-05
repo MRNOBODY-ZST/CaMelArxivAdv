@@ -8,6 +8,7 @@ import DsAlert from '@/components/design-skill/DsAlert.vue'
 import DsButton from '@/components/design-skill/DsButton.vue'
 import DsInput from '@/components/design-skill/DsInput.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
+import { safePostLoginRedirect } from '@/modules/auth/loginRedirect'
 import type { ApiErrorResponse } from '@/modules/auth/auth.types'
 
 const auth = useAuthStore()
@@ -25,9 +26,7 @@ async function submit(): Promise<void> {
       await router.replace({ name: 'change-password' })
       return
     }
-    const requested = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
-    const safeRedirect = requested.startsWith('/') && !requested.startsWith('//') ? requested : '/'
-    await router.replace(safeRedirect)
+    await router.replace(safePostLoginRedirect(route.query.redirect))
   } catch (error) {
     if (axios.isAxiosError<ApiErrorResponse>(error)) {
       errorMessage.value = error.response?.data.detail ?? '登录失败，请稍后重试。'

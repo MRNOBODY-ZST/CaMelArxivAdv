@@ -10,6 +10,7 @@ import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import io.r2dbc.spi.Row;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
@@ -104,6 +105,7 @@ public class UserAdministrationService {
 				command.initialPassword(), command.username(), command.email());
 		return encoded.flatMap(passwordHash -> transactions.transactional(
 				validateRoleCodes(roles)
+						.then(requireSuperAdminActorForProtectedRoles(actorId, Set.of(), roles))
 						.then(databaseClient.sql("""
 								INSERT INTO users (
 								    username, email, password_hash, display_name, status, force_password_change
@@ -122,7 +124,9 @@ public class UserAdministrationService {
 										Map.of(), Map.of("status", "ACTIVE", "roles", roles)))
 								.then(findView(userId)))))
 				.onErrorMap(DataIntegrityViolationException.class,
-						exception -> new AdministrationConflictException("Username or email is already in use"));
+						exception -> new AdministrationConflictException("Username or email is already in use"))
+				.onErrorResume(AccessDeniedException.class,
+						exception -> authorizationDenied(actorId, "new-user", context, exception));
 	}
 
 	public Mono<UserView> update(
@@ -136,6 +140,7 @@ public class UserAdministrationService {
 				.switchIfEmpty(Mono.error(new AdministrationNotFoundException("User")))
 				.flatMap(locked -> rolesForUser(userId)
 						.flatMap(currentRoles -> validateRoleCodes(newRoles)
+								.then(requireSuperAdminActorForProtectedRoles(actorId, currentRoles, newRoles))
 								.then(protectLastSuperAdmin(locked, currentRoles, newRoles, false))
 								.then(databaseClient.sql("""
 										UPDATE users
@@ -155,7 +160,9 @@ public class UserAdministrationService {
 								.then(findView(userId))));
 		return transactions.transactional(work)
 				.onErrorMap(DataIntegrityViolationException.class,
-						exception -> new AdministrationConflictException("Email is already in use"));
+						exception -> new AdministrationConflictException("Email is already in use"))
+				.onErrorResume(AccessDeniedException.class,
+						exception -> authorizationDenied(actorId, userId.toString(), context, exception));
 	}
 
 	public Mono<UserView> setEnabled(
@@ -168,21 +175,27 @@ public class UserAdministrationService {
 		Mono<UserView> work = lockUser(userId)
 				.switchIfEmpty(Mono.error(new AdministrationNotFoundException("User")))
 				.flatMap(locked -> rolesForUser(userId)
-						.flatMap(currentRoles -> protectLastSuperAdmin(
-								locked, currentRoles, currentRoles, !enabled)
-								.then(databaseClient.sql("""
-										UPDATE users
-										SET status = :status, token_version = token_version + 1, updated_at = now()
-										WHERE id = :userId
-										""")
-										.bind("status", targetStatus)
-										.bind("userId", userId)
-										.fetch().rowsUpdated().then())
-								.then(refreshSessions.revokeAll(userId))
-								.then(audit(actorId, enabled ? "USER_ENABLED" : "USER_DISABLED", userId, context,
-										Map.of("status", locked.status().name()), Map.of("status", targetStatus)))
-								.then(findView(userId))));
-		return transactions.transactional(work);
+						.flatMap(currentRoles -> {
+							Mono<UserView> mutation = protectLastSuperAdmin(
+									locked, currentRoles, currentRoles, !enabled)
+									.then(databaseClient.sql("""
+											UPDATE users
+											SET status = :status, token_version = token_version + 1, updated_at = now()
+											WHERE id = :userId
+											""")
+											.bind("status", targetStatus)
+											.bind("userId", userId)
+											.fetch().rowsUpdated().then())
+									.then(refreshSessions.revokeAll(userId))
+									.then(audit(actorId, enabled ? "USER_ENABLED" : "USER_DISABLED", userId, context,
+											Map.of("status", locked.status().name()), Map.of("status", targetStatus)))
+									.then(findView(userId));
+							return requireSuperAdminActorForProtectedRoles(actorId, currentRoles, currentRoles)
+									.then(mutation);
+						}));
+		return transactions.transactional(work)
+				.onErrorResume(AccessDeniedException.class,
+						exception -> authorizationDenied(actorId, userId.toString(), context, exception));
 	}
 
 	public Mono<Void> resetPassword(
@@ -197,20 +210,27 @@ public class UserAdministrationService {
 						.flatMap(encoded -> transactions.transactional(
 								lockUser(userId)
 										.switchIfEmpty(Mono.error(new AdministrationNotFoundException("User")))
-										.flatMap(current -> databaseClient.sql("""
-												UPDATE users
-												SET password_hash = :passwordHash, force_password_change = true,
-												    token_version = token_version + 1,
-												    password_changed_at = now(), updated_at = now()
-												WHERE id = :userId
-												""")
-												.bind("passwordHash", encoded)
-												.bind("userId", userId)
-												.fetch().rowsUpdated().then()
-												.then(refreshSessions.revokeAll(userId))
-												.then(audit(actorId, "USER_PASSWORD_RESET", userId, context,
-														Map.of("forcePasswordChange", current.forcePasswordChange()),
-														Map.of("forcePasswordChange", true, "sessions", "REVOKED")))))));
+										.flatMap(current -> rolesForUser(userId)
+												.flatMap(currentRoles -> {
+													Mono<Void> mutation = databaseClient.sql("""
+															UPDATE users
+															SET password_hash = :passwordHash, force_password_change = true,
+															    token_version = token_version + 1,
+															    password_changed_at = now(), updated_at = now()
+															WHERE id = :userId
+															""")
+															.bind("passwordHash", encoded)
+															.bind("userId", userId)
+															.fetch().rowsUpdated().then()
+															.then(refreshSessions.revokeAll(userId))
+															.then(audit(actorId, "USER_PASSWORD_RESET", userId, context,
+																	Map.of("forcePasswordChange", current.forcePasswordChange()),
+																	Map.of("forcePasswordChange", true, "sessions", "REVOKED")));
+													return requireSuperAdminActorForProtectedRoles(
+															actorId, currentRoles, currentRoles).then(mutation);
+												})))))
+				.onErrorResume(AccessDeniedException.class,
+						exception -> authorizationDenied(actorId, userId.toString(), context, exception));
 	}
 
 	private Mono<Void> validateRoleCodes(Set<String> roleCodes) {
@@ -224,6 +244,45 @@ public class UserAdministrationService {
 				.flatMap(total -> total == roleCodes.size()
 						? Mono.empty()
 						: Mono.error(new AdministrationValidationException("One or more role codes are unknown")));
+	}
+
+	private Mono<Void> requireSuperAdminActorForProtectedRoles(
+			UUID actorId,
+			Set<String> currentRoles,
+			Set<String> newRoles
+	) {
+		if (!currentRoles.contains("SUPER_ADMIN") && !newRoles.contains("SUPER_ADMIN")) {
+			return Mono.empty();
+		}
+		return databaseClient.sql("""
+				SELECT EXISTS (
+				  SELECT 1 FROM users u
+				  JOIN user_roles ur ON ur.user_id = u.id
+				  JOIN roles r ON r.id = ur.role_id
+				  WHERE u.id = :actorId AND u.status = 'ACTIVE' AND r.code = 'SUPER_ADMIN'
+				) AS allowed
+				""")
+				.bind("actorId", actorId)
+				.map((row, metadata) -> Boolean.TRUE.equals(row.get("allowed", Boolean.class)))
+				.one()
+				.flatMap(allowed -> allowed
+						? Mono.empty()
+						: Mono.error(new AccessDeniedException(
+								"Only an active SUPER_ADMIN may manage SUPER_ADMIN accounts or membership")));
+	}
+
+	private <T> Mono<T> authorizationDenied(
+			UUID actorId,
+			String resourceId,
+			AuthenticationRequestContext context,
+			AccessDeniedException exception
+	) {
+		Mono<Void> record = auditService.record(new AuditEvent(
+				actorId, "SUPER_ADMIN_MANAGEMENT_DENIED", "USER", resourceId, ipHash(context.ipAddress()),
+				context.userAgentSummary(), context.traceId(), Map.of(), Map.of("status", "DENIED"),
+				AuditResult.DENIED, "SUPER_ADMIN_PROTECTED"))
+				.onErrorResume(auditFailure -> Mono.empty());
+		return record.then(Mono.error(exception));
 	}
 
 	private Mono<Void> replaceRoles(UUID userId, Set<String> roleCodes, UUID actorId) {

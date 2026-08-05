@@ -106,7 +106,8 @@ public class RoleAdministrationService {
 					if (current.systemRole() && !current.code().equals(normalized.code())) {
 						return Mono.error(new AdministrationConflictException("System role codes cannot be renamed"));
 					}
-					return permissionsForRole(roleId)
+					return protectSuperAdminPermissionInvariant(current, normalized.permissionCodes())
+							.then(permissionsForRole(roleId))
 							.flatMap(currentPermissions -> validatePermissionCodes(normalized.permissionCodes())
 									.then(databaseClient.sql("""
 											UPDATE roles
@@ -137,13 +138,38 @@ public class RoleAdministrationService {
 					if (current.systemRole()) {
 						return Mono.error(new AdministrationConflictException("System roles cannot be deleted"));
 					}
-					return invalidateRoleUsers(roleId)
+					return rejectAssignedRoleDeletion(roleId)
 							.then(databaseClient.sql("DELETE FROM roles WHERE id = :roleId")
 									.bind("roleId", roleId).fetch().rowsUpdated().then())
 							.then(audit(actorId, "ROLE_DELETED", roleId, context,
 									Map.of("code", current.code()), Map.of("status", "DELETED")));
 				});
 		return transactions.transactional(work);
+	}
+
+	private Mono<Void> protectSuperAdminPermissionInvariant(LockedRole role, Set<String> requestedPermissions) {
+		if (!role.code().equals("SUPER_ADMIN")) {
+			return Mono.empty();
+		}
+		return databaseClient.sql("SELECT code FROM permissions ORDER BY code")
+				.map((row, metadata) -> row.get("code", String.class))
+				.all()
+				.collectList()
+				.flatMap(allPermissions -> requestedPermissions.equals(Set.copyOf(allPermissions))
+						? Mono.empty()
+						: Mono.error(new AdministrationConflictException(
+								"SUPER_ADMIN permissions must always include the complete permission catalog")));
+	}
+
+	private Mono<Void> rejectAssignedRoleDeletion(UUID roleId) {
+		return databaseClient.sql("SELECT count(*) AS total FROM user_roles WHERE role_id = :roleId")
+				.bind("roleId", roleId)
+				.map((row, metadata) -> row.get("total", Long.class))
+				.one()
+				.flatMap(total -> total != null && total == 0
+						? Mono.empty()
+						: Mono.error(new AdministrationConflictException(
+								"An assigned role cannot be deleted")));
 	}
 
 	private Mono<Void> validatePermissionCodes(Set<String> permissionCodes) {

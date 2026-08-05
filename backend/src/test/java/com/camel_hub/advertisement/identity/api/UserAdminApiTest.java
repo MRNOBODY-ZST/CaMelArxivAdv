@@ -42,7 +42,7 @@ class UserAdminApiTest {
 		WebFilter principalFilter = (exchange, chain) -> chain.filter(
 				exchange.mutate().principal(Mono.just(authentication)).build());
 		webTestClient = WebTestClient.bindToController(new UserAdminController(service))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.webFilter(principalFilter)
 				.build();
 	}

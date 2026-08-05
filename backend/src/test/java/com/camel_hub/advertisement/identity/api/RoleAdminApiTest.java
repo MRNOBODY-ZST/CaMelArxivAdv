@@ -37,7 +37,7 @@ class RoleAdminApiTest {
 		WebFilter principalFilter = (exchange, chain) -> chain.filter(
 				exchange.mutate().principal(Mono.just(authentication)).build());
 		webTestClient = WebTestClient.bindToController(new RoleAdminController(service))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.webFilter(principalFilter)
 				.build();
 	}

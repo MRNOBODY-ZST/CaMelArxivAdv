@@ -37,7 +37,7 @@ class ChangePasswordApiTest {
 				exchange.mutate().principal(Mono.just(authentication)).build());
 		webTestClient = WebTestClient.bindToController(
 						new AuthController(authenticationService, new RefreshCookieFactory(properties())))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.webFilter(principalFilter)
 				.build();
 	}

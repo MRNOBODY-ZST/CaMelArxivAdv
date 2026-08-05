@@ -37,9 +37,12 @@
 ## 当前进度
 
 - Phase 1（工程基础）：**已完成，2026-08-05 验收**。
-- Phase 2–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
+- Phase 2（认证与 RBAC）：**已完成，2026-08-05 验收**。
+- Phase 3–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
 
 Phase 1 实际证据：后端 `clean check bootJar` 成功；Testcontainers 从空 PostgreSQL 执行 4 个 Flyway 迁移并建立 50 张表；Python 8 tests、Ruff、MyPy strict 成功；前端 7 tests、ESLint、`vue-tsc`、Vite build 成功；Compose/镜像契约成功；九服务均健康，外部健康 API、Mailpit 和 MinIO Console 可达。浏览器验证桌面 1280×720、移动 390×844 均无横向溢出和 console warning/error，移动抽屉焦点恢复正常。
+
+Phase 2 实际证据：Flyway V5 幂等建立 26 项权限和 5 个系统角色；后端全量 `clean check bootJar`、前端 25 项 Vitest/ESLint/`vue-tsc`/Vite build 均通过。真实 HTTP 验证了初始管理员强制改密、改密后 access/refresh 立即失效、refresh 轮换及重放整族撤销、logout、拒绝/重放审计、普通 `ADMIN` 无法接管 `SUPER_ADMIN`、角色不变量以及 `VIEWER` 403。真实 `ForwardedHeaderTransformer` 和容器内 HTTP 验证两个代理客户端形成独立 IP 限流桶。生产 Compose 缺失认证密钥时拒绝渲染，九服务重建后健康；用户、角色、审计页面在桌面与 390×844 下无页面级横向溢出，控制台零 warning/error。
 
 ## 阶段验收规则
 

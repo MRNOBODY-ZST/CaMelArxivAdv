@@ -100,6 +100,9 @@ const visibleNavigation = computed(() => navigation
   }))
   .filter((group) => group.items.length > 0))
 
+const pageTitle = computed(() => route.meta.pageTitle ?? '数据总览')
+const pageSection = computed(() => route.meta.pageSection ?? '概览')
+
 async function logout(): Promise<void> {
   await auth.logout()
   await router.replace({ name: 'login' })
@@ -217,10 +220,16 @@ const SidebarContent = defineComponent({
           aria-hidden="true"
         />
         <div class="min-w-0 flex-1">
-          <p class="truncate text-sm font-semibold text-slate-900">
-            数据总览
-          </p><p class="hidden truncate text-xs text-slate-500 sm:block">
-            概览 / 数据总览
+          <p
+            data-testid="page-title"
+            class="truncate text-sm font-semibold text-slate-900"
+          >
+            {{ pageTitle }}
+          </p><p
+            data-testid="page-breadcrumb"
+            class="hidden truncate text-xs text-slate-500 sm:block"
+          >
+            {{ pageSection }} / {{ pageTitle }}
           </p>
         </div>
         <button

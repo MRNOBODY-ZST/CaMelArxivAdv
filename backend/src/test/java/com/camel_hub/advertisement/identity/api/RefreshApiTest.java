@@ -38,7 +38,7 @@ class RefreshApiTest {
 		authenticationService = mock(AuthenticationService.class);
 		RefreshCookieFactory cookieFactory = new RefreshCookieFactory(properties());
 		webTestClient = WebTestClient.bindToController(new AuthController(authenticationService, cookieFactory))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.build();
 	}
 

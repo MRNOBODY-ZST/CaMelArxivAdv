@@ -92,8 +92,12 @@ class RefreshSessionServiceIntegrationTest {
 	}
 
 	private void assertThatThrownByReplay(String rawToken) {
-		org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.rotate(rawToken, context).block())
-				.isInstanceOf(InvalidRefreshTokenException.class);
+		InvalidRefreshTokenException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+				InvalidRefreshTokenException.class, () -> service.rotate(rawToken, context).block());
+		assertThat(exception).isNotNull();
+		assertThat(exception.replay()).isTrue();
+		assertThat(exception.userId()).isEqualTo(userId);
+		assertThat(exception.familyId()).isNotNull();
 	}
 
 	private UUID insertUser() {

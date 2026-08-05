@@ -35,7 +35,7 @@ class LoginApiTest {
 		authenticationService = mock(AuthenticationService.class);
 		webTestClient = WebTestClient.bindToController(
 						new AuthController(authenticationService, new RefreshCookieFactory(properties())))
-				.controllerAdvice(new GlobalExceptionHandler())
+				.controllerAdvice(new GlobalExceptionHandler(null, null))
 				.build();
 	}
 

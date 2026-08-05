@@ -1,12 +1,12 @@
 package com.camel_hub.advertisement.identity.api;
 
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
+import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.server.ServerWebExchange;
 
-import java.net.InetSocketAddress;
 import java.security.Principal;
 import java.util.UUID;
 
@@ -27,10 +27,7 @@ final class AdminApiSupport {
 	}
 
 	static AuthenticationRequestContext context(ServerWebExchange exchange) {
-		InetSocketAddress remoteAddress = exchange.getRequest().getRemoteAddress();
-		String ipAddress = remoteAddress == null || remoteAddress.getAddress() == null
-				? "unknown"
-				: remoteAddress.getAddress().getHostAddress();
+		String ipAddress = ClientAddressResolver.resolve(exchange.getRequest());
 		String rawUserAgent = exchange.getRequest().getHeaders().getFirst(HttpHeaders.USER_AGENT);
 		String userAgent = rawUserAgent == null || rawUserAgent.isBlank()
 				? "unknown"

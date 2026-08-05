@@ -104,7 +104,12 @@ public final class IdentityRepository {
 				.then();
 	}
 
-	public Mono<Void> updatePassword(UUID userId, String passwordHash) {
+	public Mono<Boolean> updatePasswordIfUnchanged(
+			UUID userId,
+			String expectedPasswordHash,
+			int expectedTokenVersion,
+			String passwordHash
+	) {
 		return databaseClient.sql("""
 				UPDATE users
 				SET password_hash = :passwordHash,
@@ -113,14 +118,17 @@ public final class IdentityRepository {
 				    password_changed_at = now(),
 				    updated_at = now()
 				WHERE id = :userId
+				  AND password_hash = :expectedPasswordHash
+				  AND token_version = :expectedTokenVersion
+				  AND status = 'ACTIVE'
 				""")
 				.bind("passwordHash", passwordHash)
+				.bind("expectedPasswordHash", expectedPasswordHash)
+				.bind("expectedTokenVersion", expectedTokenVersion)
 				.bind("userId", userId)
 				.fetch()
 				.rowsUpdated()
-				.flatMap(updated -> updated == 1
-						? Mono.empty()
-						: Mono.error(new IllegalStateException("user disappeared during password change")));
+				.map(updated -> updated == 1);
 	}
 
 	private UserAccount mapUser(Row row) {

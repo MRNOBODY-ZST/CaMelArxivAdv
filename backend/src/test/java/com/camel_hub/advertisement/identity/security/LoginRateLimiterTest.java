@@ -1,10 +1,13 @@
 package com.camel_hub.advertisement.identity.security;
 
+import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import io.r2dbc.spi.ConnectionFactories;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.web.server.adapter.ForwardedHeaderTransformer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import com.camel_hub.advertisement.identity.config.AuthProperties;
@@ -63,6 +66,26 @@ class LoginRateLimiterTest {
 		}
 
 		assertThat(rateLimiter.isBlocked("admin", "192.0.2.10").block()).isFalse();
+	}
+
+	@Test
+	void forwardedClientsUseIndependentIpFailureBuckets() {
+		String firstClient = forwardedClientAddress("198.51.100.10");
+		String secondClient = forwardedClientAddress("198.51.100.11");
+		for (int attempt = 0; attempt < 5; attempt++) {
+			rateLimiter.record("admin", firstClient, false, "BAD_CREDENTIALS").block();
+		}
+
+		assertThat(rateLimiter.isBlocked("admin", firstClient).block()).isTrue();
+		assertThat(rateLimiter.isBlocked("another-user", secondClient).block()).isFalse();
+	}
+
+	private String forwardedClientAddress(String forwardedFor) {
+		var transformed = new ForwardedHeaderTransformer().apply(MockServerHttpRequest.get("/")
+				.remoteAddress(new java.net.InetSocketAddress("127.0.0.1", 8080))
+				.header("X-Forwarded-For", forwardedFor)
+				.build());
+		return ClientAddressResolver.resolve(transformed);
 	}
 
 	private AuthProperties properties() {

@@ -7,6 +7,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.convert.converter.Converter;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.annotation.method.configuration.EnableReactiveMethodSecurity;
@@ -79,6 +80,19 @@ public class SecurityConfiguration {
 								"/api/docs/**",
 								"/webjars/swagger-ui/**")
 						.permitAll()
+						.pathMatchers(HttpMethod.GET, "/api/v1/users").hasAuthority("user:read")
+						.pathMatchers(HttpMethod.POST, "/api/v1/users").hasAuthority("user:create")
+						.pathMatchers(HttpMethod.PUT, "/api/v1/users/*").hasAuthority("user:update")
+						.pathMatchers(HttpMethod.POST, "/api/v1/users/*/reset-password")
+						.hasAuthority("user:update")
+						.pathMatchers(HttpMethod.POST, "/api/v1/users/*/disable", "/api/v1/users/*/enable")
+						.hasAuthority("user:disable")
+						.pathMatchers(HttpMethod.GET, "/api/v1/roles", "/api/v1/permissions")
+						.hasAuthority("role:read")
+						.pathMatchers(HttpMethod.POST, "/api/v1/roles").hasAuthority("role:manage")
+						.pathMatchers(HttpMethod.PUT, "/api/v1/roles/*").hasAuthority("role:manage")
+						.pathMatchers(HttpMethod.DELETE, "/api/v1/roles/*").hasAuthority("role:manage")
+						.pathMatchers(HttpMethod.GET, "/api/v1/audit-logs").hasAuthority("audit:read")
 						.anyExchange().authenticated())
 				.exceptionHandling(errors -> errors
 						.authenticationEntryPoint((exchange, exception) -> errorWriter.authenticationRequired(exchange))

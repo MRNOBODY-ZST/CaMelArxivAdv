@@ -1,6 +1,14 @@
 package com.camel_hub.advertisement.common.api;
 
+import com.camel_hub.advertisement.audit.AuditEvent;
+import com.camel_hub.advertisement.audit.AuditResult;
+import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
+import com.camel_hub.advertisement.common.security.ClientAddressResolver;
+import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
+import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
 import com.camel_hub.advertisement.identity.service.AdministrationConflictException;
 import com.camel_hub.advertisement.identity.service.AdministrationNotFoundException;
@@ -10,13 +18,17 @@ import com.camel_hub.advertisement.identity.service.LoginRateLimitedException;
 import com.camel_hub.advertisement.identity.service.PasswordPolicyViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.web.bind.support.WebExchangeBindException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.ServerWebInputException;
+import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,6 +36,17 @@ import java.util.Map;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+	private static final Logger LOGGER = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+	private final ObjectProvider<AuditService> auditServiceProvider;
+	private final ObjectProvider<SensitiveValueHasher> hasherProvider;
+
+	public GlobalExceptionHandler(
+			ObjectProvider<AuditService> auditServiceProvider,
+			ObjectProvider<SensitiveValueHasher> hasherProvider
+	) {
+		this.auditServiceProvider = auditServiceProvider;
+		this.hasherProvider = hasherProvider;
+	}
 
 	@ExceptionHandler(WebExchangeBindException.class)
 	ResponseEntity<ApiError> handleValidation(WebExchangeBindException exception, ServerWebExchange exchange) {
@@ -56,9 +79,56 @@ public class GlobalExceptionHandler {
 	}
 
 	@ExceptionHandler(AccessDeniedException.class)
-	ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException exception, ServerWebExchange exchange) {
-		return response(exchange, HttpStatus.FORBIDDEN, "access_denied", "Access denied",
+	Mono<ResponseEntity<ApiError>> handleAccessDenied(AccessDeniedException exception, ServerWebExchange exchange) {
+		ResponseEntity<ApiError> denied = response(
+				exchange, HttpStatus.FORBIDDEN, "access_denied", "Access denied",
 				"You do not have permission to perform this operation", Map.of());
+		return auditAccessDenied(exchange).thenReturn(denied);
+	}
+
+	private Mono<Void> auditAccessDenied(ServerWebExchange exchange) {
+		if (auditServiceProvider == null || hasherProvider == null) {
+			return Mono.empty();
+		}
+		AuditService auditService = auditServiceProvider.getIfAvailable();
+		SensitiveValueHasher hasher = hasherProvider.getIfAvailable();
+		if (auditService == null || hasher == null) {
+			return Mono.empty();
+		}
+		return authenticatedUser(exchange)
+				.flatMap(user -> {
+					String ipAddress = ClientAddressResolver.resolve(exchange.getRequest());
+					String userAgent = exchange.getRequest().getHeaders().getFirst("User-Agent");
+					String summary = userAgent == null
+							? "unknown"
+							: userAgent.substring(0, Math.min(255, userAgent.length()));
+					String resource = exchange.getRequest().getMethod().name() + " "
+							+ exchange.getRequest().getPath().value();
+					return auditService.record(new AuditEvent(
+							user.id(), "AUTHORIZATION_DENIED", "HTTP_ENDPOINT", resource,
+							hasher.hash(ipAddress), summary, TraceIdWebFilter.traceId(exchange),
+							Map.of(), Map.of("status", "DENIED"), AuditResult.DENIED, "ACCESS_DENIED"));
+				})
+				.onErrorResume(auditFailure -> {
+					LOGGER.warn("Controller authorization denial audit could not be recorded", auditFailure);
+					return Mono.empty();
+				});
+	}
+
+	private Mono<AuthenticatedUser> authenticatedUser(ServerWebExchange exchange) {
+		Mono<AuthenticatedUser> exchangeUser = exchange.getPrincipal()
+				.flatMap(principal -> asAuthenticatedUser(principal));
+		Mono<AuthenticatedUser> contextUser = ReactiveSecurityContextHolder.getContext()
+				.map(context -> context.getAuthentication())
+				.flatMap(this::asAuthenticatedUser);
+		return exchangeUser.switchIfEmpty(contextUser);
+	}
+
+	private Mono<AuthenticatedUser> asAuthenticatedUser(Object principal) {
+		Object candidate = principal instanceof Authentication authentication
+				? authentication.getPrincipal()
+				: principal;
+		return candidate instanceof AuthenticatedUser user ? Mono.just(user) : Mono.empty();
 	}
 
 	@ExceptionHandler(AuthenticationFailedException.class)

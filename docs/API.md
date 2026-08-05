@@ -5,11 +5,11 @@
 - 前缀：`/api/v1`
 - 内容：JSON，UTF-8，字段使用 lower camel case。
 - 时间：RFC 3339 UTC，例如 `2026-08-05T13:45:22Z`。
-- 分页：后续列表统一 `page`、`size`、`sort`，响应返回 items 与分页元数据。
-- 追踪：接受 `X-Request-Id`，无值时生成；错误响应返回 `traceId`。
+- 分页：列表统一 `page`（从 1 开始）与 `pageSize`（最大 100），响应返回 `items`、`page`、`pageSize`、`total` 和 `totalPages`。
+- 追踪：接受 `X-Trace-Id`，无值时生成；响应头和错误体均返回同一 `traceId`。
 - OpenAPI：`/api/openapi.json`；Swagger UI：`/api/docs`。
 
-## 当前公开端点
+## 公开端点
 
 ### `GET /api/v1/system/health`
 
@@ -24,18 +24,61 @@
 
 Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩展。
 
+### 认证入口
+
+`POST /api/v1/auth/login` 接受 `{"principal":"用户名或邮箱","password":"..."}`。成功响应包含 10 分钟 Access Token 和当前用户，同时通过 `Set-Cookie` 写入 refresh；refresh 原值不会进入 JSON。
+
+`POST /api/v1/auth/refresh` 仅使用 refresh Cookie，成功时轮换 Cookie 并返回新的 Access Token。已轮换值再次出现时返回 401，并撤销同一 token family。
+
+`POST /api/v1/auth/logout` 撤销当前 refresh family 并清除 Cookie。即使 Cookie 已缺失，调用也保持幂等。
+
+## 已认证端点
+
+### 当前账号
+
+- `GET /api/v1/auth/me`：返回数据库中的实时账号、角色、权限和 `mustChangePassword`，不返回邮箱或凭据。
+- `POST /api/v1/auth/change-password`：接受 `currentPassword`、`newPassword`；成功返回 204，使当前 Access Token 与全部 Refresh Token 立即失效。
+
+初始/重置密码会令 `mustChangePassword=true`，完成改密前业务权限数组为空。
+
+### 用户管理
+
+| 方法与路径 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/users` | `user:read` | `search`、`status`、`page`、`pageSize` 筛选 |
+| `POST /api/v1/users` | `user:create` | 创建账号、初始密码和角色，强制首次改密 |
+| `PUT /api/v1/users/{id}` | `user:update` | 更新邮箱、显示名和角色 |
+| `POST /api/v1/users/{id}/disable` | `user:disable` | 停用并使会话失效 |
+| `POST /api/v1/users/{id}/enable` | `user:disable` | 启用账号 |
+| `POST /api/v1/users/{id}/reset-password` | `user:update` | 重置密码、强制改密并使会话失效 |
+
+用户响应不包含密码哈希或 refresh 数据。只有有效 `SUPER_ADMIN` 能创建、编辑、重置或启停 `SUPER_ADMIN` 账号；最后一个有效 `SUPER_ADMIN` 不允许被停用或剥离角色。
+
+### 角色、权限和审计
+
+| 方法与路径 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/roles` | `role:read` | 角色、用户数及权限集合 |
+| `GET /api/v1/permissions` | `role:read` | 26 项只读权限目录 |
+| `POST /api/v1/roles` | `role:manage` | 创建自定义角色 |
+| `PUT /api/v1/roles/{id}` | `role:manage` | 更新名称、说明和授权 |
+| `DELETE /api/v1/roles/{id}` | `role:manage` | 删除未使用的自定义角色；系统角色不可删除 |
+| `GET /api/v1/audit-logs` | `audit:read` | 支持 `from`、`to`、`actorId`、`action`、`resource`、`result` 和分页筛选 |
+
 ## 统一错误
 
 错误不会返回 Java 类名或堆栈。结构：
 
 ```json
 {
-  "code": "VALIDATION_ERROR",
-  "message": "请求参数无效",
+  "type": "validation_error",
+  "title": "Validation failed",
+  "status": 400,
+  "detail": "Request contains invalid fields",
+  "instance": "/api/v1/users",
   "traceId": "0123456789abcdef0123456789abcdef",
-  "timestamp": "2026-08-05T13:45:22Z",
   "fieldErrors": {
-    "email": "格式无效"
+    "email": ["must be a well-formed email address"]
   }
 }
 ```
@@ -44,9 +87,9 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 ## 安全策略
 
-Phase 1 仅放行健康、Actuator health/info 和 OpenAPI 文档；其余请求默认要求认证。Phase 2 将增加短期 Access JWT、Refresh Token 轮换、方法级权限和登录限速。
+仅登录、refresh、logout、健康、追踪占位和 API 文档公开；其余请求默认要求 Bearer JWT。受保护请求实时校验数据库账号状态与 `tokenVersion`；管理 API 在 HTTP 边界和控制器方法两个层级校验精确权限代码。
 
-Access Token 只保存在前端内存；Refresh Token 使用 HttpOnly/Secure/SameSite Cookie。API 不在 URL、日志或错误信息中返回 Secret。
+Access Token 只保存在前端内存；Refresh Token 使用 HttpOnly/Secure/SameSite Cookie。连续失败默认在 15 分钟窗口内达到 5 次后触发账号与 IP 双维度限流。API 不在 URL、日志或错误信息中返回 Secret。角色矩阵与失效语义见 [RBAC.md](RBAC.md)。
 
 ## 异步任务与消息
 

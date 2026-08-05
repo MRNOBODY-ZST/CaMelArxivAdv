@@ -1,18 +1,22 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1 工程基础：生产形态数据库、统一 API 基线、Python worker、授权 DesignSkill 前端外壳，以及可一键启动的九服务 Docker Compose 栈。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1 工程基础和 Phase 2 认证/RBAC：生产形态数据库、统一 API、Python worker、授权 DesignSkill 管理端、短期 JWT、单次 refresh 轮换、五个默认角色、审计与可一键启动的九服务 Docker Compose 栈。
 
-> 当前业务功能仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 2–9 继续开发。仪表盘使用真实健康接口；尚无业务数据时只显示空状态，不生成演示指标。
+> arXiv、解析、邮件和统计业务仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 3–9 继续开发。仪表盘使用真实健康接口；尚无业务数据时只显示空状态，不生成演示指标。
 
 ## 快速启动
 
-要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板并至少替换所有 `change-this-*` 值：
+要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为两个必填认证密钥分别生成独立的 32 字节 Base64 值：
 
 ```bash
 cp .env.example .env
+openssl rand -base64 32  # 填入 JWT_SIGNING_KEY_BASE64
+openssl rand -base64 32  # 另生成一次，填入 AUTH_FINGERPRINT_HMAC_KEY_BASE64
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 ```
+
+不要复用两次输出，也不要提交 `.env`。其余空白 `*_KEY_BASE64` 应在相应业务阶段启用前同样使用独立随机值填充。
 
 启动后：
 
@@ -20,6 +24,8 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - Mailpit：[http://localhost:8025](http://localhost:8025)
 - MinIO Console：[http://localhost:9001](http://localhost:9001)
 - 健康 API：[http://localhost:8080/api/v1/system/health](http://localhost:8080/api/v1/system/health)
+
+首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
 
 PostgreSQL、Redis、RabbitMQ、后端、Mail Worker 和 arXiv Worker 不发布宿主端口。真实 SMTP 默认强制关闭：`ALLOW_LIVE_SMTP=false`。
 
@@ -60,13 +66,14 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+Phase 1–2 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 ## 文档
 
 - [架构](docs/ARCHITECTURE.md)
 - [数据模型与 ERD](docs/ERD.md)
 - [API 约定](docs/API.md)
+- [认证与 RBAC](docs/RBAC.md)
 - [部署](docs/DEPLOYMENT.md)
 - [运维](docs/OPERATIONS.md)
 - [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)

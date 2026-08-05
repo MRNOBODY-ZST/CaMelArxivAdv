@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.identity.service;
 
 import com.camel_hub.advertisement.audit.AuditEvent;
+import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.identity.domain.UserAccount;
 import com.camel_hub.advertisement.identity.domain.UserStatus;
@@ -25,6 +26,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
@@ -97,7 +99,8 @@ class AuthenticationServiceTest {
 
 	@Test
 	void emailPrincipalUsesTheSameCaseInsensitivePath() {
-		when(rateLimiter.isBlocked("admin@example.org", context.ipAddress())).thenReturn(Mono.just(false));
+		when(rateLimiter.isBlocked("admin@example.org", context.ipAddress()))
+				.thenReturn(Mono.just(false), Mono.just(false));
 		when(identityRepository.findByPrincipal("admin@example.org")).thenReturn(Mono.empty());
 		when(passwordEncoder.matches("wrong", "dummy-hash")).thenReturn(false);
 		when(rateLimiter.record("admin@example.org", context.ipAddress(), false, "BAD_CREDENTIALS"))
@@ -114,7 +117,8 @@ class AuthenticationServiceTest {
 	@Test
 	void disabledAccountAndBadPasswordShareTheSameExternalFailure() {
 		UserAccount account = account(UserStatus.DISABLED);
-		when(rateLimiter.isBlocked("admin", context.ipAddress())).thenReturn(Mono.just(false));
+		when(rateLimiter.isBlocked("admin", context.ipAddress()))
+				.thenReturn(Mono.just(false), Mono.just(false));
 		when(identityRepository.findByPrincipal("admin")).thenReturn(Mono.just(account));
 		when(passwordEncoder.matches("Correct!Password92", account.passwordHash())).thenReturn(true);
 		when(rateLimiter.record("admin", context.ipAddress(), false, "USER_NOT_ACTIVE"))
@@ -143,12 +147,29 @@ class AuthenticationServiceTest {
 	}
 
 	@Test
+	void theFailureThatReachesTheThresholdReturnsRateLimited() {
+		UserAccount account = account(UserStatus.ACTIVE);
+		when(rateLimiter.isBlocked("admin", context.ipAddress())).thenReturn(Mono.just(false), Mono.just(true));
+		when(identityRepository.findByPrincipal("admin")).thenReturn(Mono.just(account));
+		when(passwordEncoder.matches("wrong-password", account.passwordHash())).thenReturn(false);
+		when(rateLimiter.record("admin", context.ipAddress(), false, "BAD_CREDENTIALS"))
+				.thenReturn(Mono.empty());
+		when(auditService.record(any())).thenReturn(Mono.empty());
+
+		StepVerifier.create(service.login("admin", "wrong-password", context))
+				.expectError(LoginRateLimitedException.class)
+				.verify();
+	}
+
+	@Test
 	@SuppressWarnings("unchecked")
 	void passwordChangeUpdatesTheHashInvalidatesAccessTokensAndRevokesEveryRefreshFamily() {
 		UserAccount account = account(UserStatus.ACTIVE);
 		when(identityRepository.findById(account.id())).thenReturn(Mono.just(account));
 		when(passwordEncoder.matches("Current!Password92", account.passwordHash())).thenReturn(true);
-		when(identityRepository.updatePassword(account.id(), "dummy-hash")).thenReturn(Mono.empty());
+		when(identityRepository.updatePasswordIfUnchanged(
+				account.id(), account.passwordHash(), account.tokenVersion(), "dummy-hash"))
+				.thenReturn(Mono.just(true));
 		when(refreshSessions.revokeAll(account.id())).thenReturn(Mono.empty());
 		when(auditService.record(any())).thenReturn(Mono.empty());
 		when(transactions.transactional(any(Mono.class)))
@@ -159,7 +180,8 @@ class AuthenticationServiceTest {
 				.verifyComplete();
 
 		verify(passwordPolicy).validate("Maple!Orbit93", account.username(), account.email());
-		verify(identityRepository).updatePassword(account.id(), "dummy-hash");
+		verify(identityRepository).updatePasswordIfUnchanged(
+				account.id(), account.passwordHash(), account.tokenVersion(), "dummy-hash");
 		verify(refreshSessions).revokeAll(account.id());
 		ArgumentCaptor<AuditEvent> event = ArgumentCaptor.forClass(AuditEvent.class);
 		verify(auditService).record(event.capture());
@@ -179,8 +201,29 @@ class AuthenticationServiceTest {
 				.expectError(PasswordPolicyViolationException.class)
 				.verify();
 
-		verify(identityRepository, never()).updatePassword(any(), anyString());
+		verify(identityRepository, never()).updatePasswordIfUnchanged(any(), anyString(), anyInt(), anyString());
 		verify(refreshSessions, never()).revokeAll(any());
+	}
+
+	@Test
+	void refreshReplayIsAuditedWithoutTokenMaterial() {
+		UUID familyId = UUID.fromString("5ebc4b8c-9e2d-4fa5-9a66-d0a584047b62");
+		InvalidRefreshTokenException replay = new InvalidRefreshTokenException(
+				account(UserStatus.ACTIVE).id(), familyId, true);
+		when(refreshSessions.rotate("replayed-secret", context)).thenReturn(Mono.error(replay));
+		when(auditService.record(any())).thenReturn(Mono.empty());
+
+		StepVerifier.create(service.refresh("replayed-secret", context))
+				.expectError(InvalidRefreshTokenException.class)
+				.verify();
+
+		ArgumentCaptor<AuditEvent> event = ArgumentCaptor.forClass(AuditEvent.class);
+		verify(auditService).record(event.capture());
+		assertThat(event.getValue().action()).isEqualTo("AUTH_REFRESH_REPLAY");
+		assertThat(event.getValue().resourceId()).isEqualTo(familyId.toString());
+		assertThat(event.getValue().result()).isEqualTo(AuditResult.DENIED);
+		assertThat(event.getValue().beforeSummary().toString()).doesNotContain("replayed-secret");
+		assertThat(event.getValue().afterSummary().toString()).doesNotContain("replayed-secret");
 	}
 
 	private UserAccount account(UserStatus status) {

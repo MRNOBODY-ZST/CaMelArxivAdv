@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -154,11 +155,80 @@ class AdministrationServiceIntegrationTest {
 				.isInstanceOf(AdministrationConflictException.class);
 		assertThatThrownBy(() -> roles.delete(systemRoleId, actorId, context).block())
 				.isInstanceOf(AdministrationConflictException.class);
+		assertThatThrownBy(() -> roles.update(systemRoleId, new RoleAdministrationService.RoleCommand(
+				"SUPER_ADMIN", "Super Administrator", "All permissions", Set.of("system:manage")),
+				actorId, context).block())
+				.isInstanceOf(AdministrationConflictException.class)
+				.hasMessageContaining("SUPER_ADMIN permissions");
+		assertThatThrownBy(() -> roles.delete(custom.id(), actorId, context).block())
+				.isInstanceOf(AdministrationConflictException.class)
+				.hasMessageContaining("assigned");
 
 		var auditPage = auditQuery.query(1, 20, null, null, actorId, "ROLE_UPDATED", "ROLE", "SUCCESS").block();
 		assertThat(auditPage).isNotNull();
 		assertThat(auditPage.items()).hasSize(1);
 		assertThat(auditPage.items().getFirst().traceId()).isEqualTo("trace-admin-1");
+	}
+
+	@Test
+	void onlySuperAdminsCanAssignOrRemoveTheSuperAdminRole() {
+		UUID superAdmin = insertUser("root-admin", "root-admin@example.edu");
+		assignRole(superAdmin, "SUPER_ADMIN", superAdmin);
+		UUID ordinaryAdmin = insertUser("ordinary-admin", "ordinary-admin@example.edu");
+		assignRole(ordinaryAdmin, "ADMIN", superAdmin);
+
+		assertThatThrownBy(() -> users.create(new UserAdministrationService.CreateUserCommand(
+				"escalated", "escalated@example.edu", "Escalated", "Maple!Orbit92",
+				Set.of("SUPER_ADMIN")), ordinaryAdmin, context).block())
+				.isInstanceOf(AccessDeniedException.class);
+
+		UUID viewer = insertUser("viewer-target", "viewer-target@example.edu");
+		assignRole(viewer, "VIEWER", superAdmin);
+		assertThatThrownBy(() -> users.update(viewer, new UserAdministrationService.UpdateUserCommand(
+				"viewer-target@example.edu", "Viewer Target", Set.of("SUPER_ADMIN")),
+				ordinaryAdmin, context).block())
+				.isInstanceOf(AccessDeniedException.class);
+
+		UserAdministrationService.UserView promoted = users.update(viewer,
+				new UserAdministrationService.UpdateUserCommand(
+						"viewer-target@example.edu", "Viewer Target", Set.of("SUPER_ADMIN")),
+				superAdmin, context).block();
+		assertThat(promoted).isNotNull();
+		assertThat(promoted.roles()).containsExactly("SUPER_ADMIN");
+	}
+
+	@Test
+	void ordinaryAdminsCannotMutateOrTakeOverSuperAdminAccounts() {
+		UUID superAdmin = insertUser("protected-root", "protected-root@example.edu");
+		assignRole(superAdmin, "SUPER_ADMIN", superAdmin);
+		UUID secondSuperAdmin = insertUser("second-root", "second-root@example.edu");
+		assignRole(secondSuperAdmin, "SUPER_ADMIN", superAdmin);
+		UUID ordinaryAdmin = insertUser("account-admin", "account-admin@example.edu");
+		assignRole(ordinaryAdmin, "ADMIN", superAdmin);
+
+		assertThatThrownBy(() -> users.update(superAdmin,
+				new UserAdministrationService.UpdateUserCommand(
+						"taken-over@example.edu", "Taken Over", Set.of("SUPER_ADMIN")),
+				ordinaryAdmin, context).block())
+				.isInstanceOf(AccessDeniedException.class);
+		assertThatThrownBy(() -> users.resetPassword(
+				superAdmin, "Cedar!Galaxy98", ordinaryAdmin, context).block())
+				.isInstanceOf(AccessDeniedException.class);
+		assertThatThrownBy(() -> users.setEnabled(
+				superAdmin, false, ordinaryAdmin, context).block())
+				.isInstanceOf(AccessDeniedException.class);
+
+		assertThat(scalarString("SELECT email FROM users WHERE id = '" + superAdmin + "'"))
+				.isEqualTo("protected-root@example.edu");
+		assertThat(scalarString("SELECT status FROM users WHERE id = '" + superAdmin + "'"))
+				.isEqualTo("ACTIVE");
+		assertThat(scalarLong("SELECT token_version::bigint FROM users WHERE id = '" + superAdmin + "'"))
+				.isZero();
+		assertThat(scalarLong("""
+				SELECT count(*) FROM audit_logs
+				WHERE actor_user_id = '%s' AND action = 'SUPER_ADMIN_MANAGEMENT_DENIED'
+				  AND resource_type = 'USER' AND resource_id = '%s'
+				""".formatted(ordinaryAdmin, superAdmin).strip())).isEqualTo(3L);
 	}
 
 	private UUID insertUser(String username, String email) {

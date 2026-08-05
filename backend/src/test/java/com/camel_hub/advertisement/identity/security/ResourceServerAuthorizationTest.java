@@ -127,6 +127,38 @@ class ResourceServerAuthorizationTest {
 				.exchange().expectStatus().isOk();
 	}
 
+	@Test
+	void enforcesAdministrativePermissionsAtTheHttpBoundary() {
+		when(identityRepository.findById(USER_ID))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, 1, Set.of("paper:read"))))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, 1, Set.of("user:read"))));
+
+		webTestClient.get().uri("/api/v1/users")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange().expectStatus().isForbidden();
+		webTestClient.get().uri("/api/v1/users")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange().expectStatus().isOk();
+	}
+
+	@Test
+	void deniesBusinessPermissionsUntilTheInitialPasswordIsChanged() {
+		when(identityRepository.findById(USER_ID))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, true, 1, Set.of("contact:read_full"))))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, true, 1, Set.of("contact:read_full"))));
+
+		webTestClient.get().uri("/api/v1/auth/me")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$.mustChangePassword").isEqualTo(true)
+				.jsonPath("$.permissions.length()").isEqualTo(0);
+		webTestClient.get().uri("/api/v1/test/full-contact")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange().expectStatus().isForbidden();
+	}
+
 	private String token(int tokenVersion) {
 		AuthenticatedUser user = new AuthenticatedUser(
 				USER_ID, "analyst", "Data Analyst", Set.of("DATA_ANALYST"),
@@ -151,9 +183,18 @@ class ResourceServerAuthorizationTest {
 	}
 
 	private UserAccount account(UserStatus status, int tokenVersion, Set<String> permissions) {
+		return account(status, false, tokenVersion, permissions);
+	}
+
+	private UserAccount account(
+			UserStatus status,
+			boolean forcePasswordChange,
+			int tokenVersion,
+			Set<String> permissions
+	) {
 		return new UserAccount(
 				USER_ID, "analyst", "analyst@example.edu", "$2a$12$hash", "Data Analyst",
-				status, false, tokenVersion, null, Instant.now(), Set.of("DATA_ANALYST"), permissions);
+				status, forcePasswordChange, tokenVersion, null, Instant.now(), Set.of("DATA_ANALYST"), permissions);
 	}
 
 	@TestConfiguration(proxyBeanMethods = false)
@@ -172,6 +213,11 @@ class ResourceServerAuthorizationTest {
 
 	@RestController
 	static class PermissionProbeController {
+
+		@GetMapping("/api/v1/users")
+		Mono<String> users() {
+			return Mono.just("allowed");
+		}
 
 		@GetMapping("/api/v1/test/full-contact")
 		@PreAuthorize("hasAuthority('contact:read_full')")

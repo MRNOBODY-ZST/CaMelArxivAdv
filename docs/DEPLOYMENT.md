@@ -6,9 +6,9 @@
 cp .env.example .env
 ```
 
-生产部署必须替换数据库、RabbitMQ、MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`TRACKING_SIGNING_KEY_BASE64` 分别生成独立 32 字节随机值。不要提交 `.env`。
+生产部署必须替换数据库、RabbitMQ、MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`AUTH_FINGERPRINT_HMAC_KEY_BASE64`、`TRACKING_SIGNING_KEY_BASE64` 分别生成独立 32 字节随机值。`docker-compose.yml` 对 JWT 与认证指纹密钥使用必填插值，缺少任一值时配置渲染会直接失败。不要提交 `.env`。
 
-Phase 1 尚未启用初始管理员 Bootstrap 和真实 SMTP；保留 `ALLOW_LIVE_SMTP=false`。即使后续启用，也应由部署平台单独注入 Secret，而不是写入 Compose 或镜像。
+首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。真实 SMTP 仍保持 `ALLOW_LIVE_SMTP=false`，后续启用也只能由部署平台注入 Secret，不能写入 Compose 或镜像。
 
 ## 开发环境
 
@@ -35,7 +35,7 @@ docker compose -f docker-compose.yml up -d --build
 docker compose -f docker-compose.yml ps
 ```
 
-生产基线只发布 `${HTTP_PORT:-8080}`。TLS 应在受信任的入口代理/负载均衡终止，并把 `X-Forwarded-Proto` 传给 Nginx/应用。公网部署还需要：
+生产基线只发布 `${HTTP_PORT:-8080}`。TLS 应在受信任的入口代理/负载均衡终止；边缘代理必须清除客户端自带的 forwarding headers。仓库 Nginx 只把连接的 `$remote_addr` 写入 `X-Forwarded-For`，不追加客户端链。若 Nginx 前还有负载均衡器，必须仅对其受控 CIDR 配置 `set_real_ip_from`，再启用 `real_ip_header`/`real_ip_recursive`，使 `$remote_addr` 成为真实客户端地址；禁止信任任意来源的转发头。公网部署还需要：
 
 - 外部 Secret Manager 和密钥轮换；
 - 托管 PostgreSQL/Redis/RabbitMQ 或可靠备份；
