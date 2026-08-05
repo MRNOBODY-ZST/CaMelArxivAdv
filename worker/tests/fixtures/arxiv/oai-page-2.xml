@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-08-05T00:00:04Z</responseDate>
+  <request verb="ListRecords">https://oaipmh.arxiv.org/oai</request>
+  <ListRecords>
+    <record><header status="deleted"><identifier>oai:arXiv.org:2608.00002</identifier><datestamp>2026-08-05</datestamp><setSpec>cs:cs:AI</setSpec></header></record>
+    <resumptionToken></resumptionToken>
+  </ListRecords>
+</OAI-PMH>

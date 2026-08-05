@@ -51,7 +51,9 @@ def test_heartbeat_serializes_with_versioned_camel_case_contract() -> None:
 
 
 def test_runtime_heartbeat_contains_no_connection_secret() -> None:
-    heartbeat = build_heartbeat_message(Settings(rabbitmq_url="amqp://user:password@rabbitmq:5672/"))
+    heartbeat = build_heartbeat_message(
+        Settings(rabbitmq_url="amqp://user:password@rabbitmq:5672/")
+    )
     serialized = heartbeat.model_dump_json(by_alias=True)
 
     assert heartbeat.type == MessageType.WORKER_HEARTBEAT

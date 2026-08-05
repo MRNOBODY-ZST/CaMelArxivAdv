@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>arXiv Query: search_query=all:agent</title>
+  <entry>
+    <id>https://arxiv.org/abs/2608.00001v2</id>
+    <updated>2026-08-04T12:30:00Z</updated>
+    <published>2026-08-01T09:00:00Z</published>
+    <title>  Reliable\n Agents  </title>
+    <summary> A robust agent study. </summary>
+    <author><name>Ada Lovelace</name><arxiv:affiliation>Analytical Institute</arxiv:affiliation></author>
+    <author><name>Grace Hopper</name></author>
+    <arxiv:primary_category term="cs.AI" />
+    <category term="cs.AI" /><category term="cs.LG" />
+    <arxiv:doi>10.1000/example</arxiv:doi>
+    <arxiv:journal_ref>Journal of Agents 1 (2026)</arxiv:journal_ref>
+    <arxiv:comment>12 pages</arxiv:comment>
+    <link title="pdf" href="https://arxiv.org/pdf/2608.00001v2" />
+    <link rel="license" href="https://creativecommons.org/licenses/by/4.0/" />
+  </entry>
+</feed>
