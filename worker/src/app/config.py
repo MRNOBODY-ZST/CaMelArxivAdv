@@ -27,12 +27,21 @@ class Settings(BaseSettings):
     rabbitmq_url: SecretStr = SecretStr("amqp://guest:guest@localhost:5672/")
     redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
     results_exchange: str = "arxiv.results"
+    jobs_exchange: str = "arxiv.jobs"
+    retry_exchange: str = "arxiv.retry"
+    dead_exchange: str = "arxiv.dead"
+    jobs_queue: str = "arxiv.jobs.worker"
+    command_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
+    metadata_batch_size: int = Field(default=50, ge=1, le=100)
     heartbeat_interval_seconds: float = Field(default=15.0, ge=5.0, le=300.0)
     allowed_arxiv_hosts: frozenset[str] = frozenset(
         {"export.arxiv.org", "oaipmh.arxiv.org", "arxiv.org"}
     )
     min_request_interval_seconds: float = Field(default=3.0, ge=3.0, le=300.0)
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    legacy_base_url: str = "https://export.arxiv.org/api/query"
+    oai_base_url: str = "https://oaipmh.arxiv.org/oai"
+    user_agent: str = "CaMelArxivAdv/0.1 (admin@example.invalid)"
     max_redirects: int = Field(default=3, ge=0, le=5)
     max_archive_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024)
     max_extracted_bytes: int = Field(default=250 * 1024 * 1024, ge=1024)

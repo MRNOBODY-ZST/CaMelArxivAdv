@@ -6,6 +6,7 @@ import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchConflictExceptio
 import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchNotFoundException;
 import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchValidationException;
 import com.camel_hub.advertisement.arxiv.importing.ArxivImportValidationException;
+import com.camel_hub.advertisement.arxiv.paper.PaperNotFoundException;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
@@ -251,6 +252,12 @@ public class GlobalExceptionHandler {
 			ArxivImportValidationException exception, ServerWebExchange exchange
 	) {
 		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_arxiv_import", "arXiv import rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(PaperNotFoundException.class)
+	ResponseEntity<ApiError> handlePaperNotFound(PaperNotFoundException exception, ServerWebExchange exchange) {
+		return response(exchange, HttpStatus.NOT_FOUND, "paper_not_found", "Paper not found",
 				exception.getMessage(), Map.of());
 	}
 

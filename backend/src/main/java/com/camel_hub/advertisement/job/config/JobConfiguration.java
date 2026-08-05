@@ -6,11 +6,16 @@ import com.camel_hub.advertisement.job.domain.JobStateMachine;
 import com.camel_hub.advertisement.job.persistence.JobRepository;
 import com.camel_hub.advertisement.job.service.JobService;
 import com.camel_hub.advertisement.job.service.JobEventStream;
+import com.camel_hub.advertisement.job.service.JobControlSignal;
+import com.camel_hub.advertisement.job.service.RedisJobControlSignal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.transaction.reactive.TransactionalOperator;
 
 import java.time.Duration;
@@ -38,9 +43,18 @@ public class JobConfiguration {
 			JobStateMachine stateMachine,
 			AuditService auditService,
 			SensitiveValueHasher hasher,
-			TransactionalOperator transactions
+			TransactionalOperator transactions,
+			ObjectProvider<JobControlSignal> controlSignal
 	) {
-		return new JobService(repository, stateMachine, auditService, hasher, transactions);
+		return new JobService(
+				repository, stateMachine, auditService, hasher, transactions,
+				controlSignal.getIfAvailable(JobControlSignal::noop));
+	}
+
+	@Bean
+	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	JobControlSignal jobControlSignal(ReactiveStringRedisTemplate redis) {
+		return new RedisJobControlSignal(redis);
 	}
 
 	@Bean

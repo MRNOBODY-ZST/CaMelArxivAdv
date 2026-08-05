@@ -50,6 +50,41 @@ class LegacyApiClient:
         )
         return parse_atom_feed(body)
 
+    async def search_page(
+        self,
+        search_query: str,
+        start: int,
+        max_results: int,
+        sort_by: str,
+        sort_order: str,
+    ) -> tuple[ArxivMetadata, ...]:
+        if not search_query or start < 0 or not 1 <= max_results <= 100:
+            raise ValueError("Legacy API search page is invalid")
+        sort_names = {
+            "RELEVANCE": "relevance",
+            "LAST_UPDATED_DATE": "lastUpdatedDate",
+            "SUBMITTED_DATE": "submittedDate",
+        }
+        order_names = {"ASCENDING": "ascending", "DESCENDING": "descending"}
+        if sort_by not in sort_names or sort_order not in order_names:
+            raise ValueError("Legacy API sort is invalid")
+        body = await request_xml(
+            self._client,
+            self._lease,
+            self._base_url,
+            {
+                "search_query": search_query,
+                "start": str(start),
+                "max_results": str(max_results),
+                "sortBy": sort_names[sort_by],
+                "sortOrder": order_names[sort_order],
+            },
+            self._user_agent,
+            self._max_response_bytes,
+            self._max_retries,
+        )
+        return parse_atom_feed(body)
+
 
 def parse_atom_feed(body: bytes) -> tuple[ArxivMetadata, ...]:
     root = secure_root(body)

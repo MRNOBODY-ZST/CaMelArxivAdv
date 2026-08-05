@@ -1,20 +1,28 @@
 package com.camel_hub.advertisement.messaging;
 
+import com.camel_hub.advertisement.arxiv.paper.PaperRepository;
+import com.camel_hub.advertisement.arxiv.paper.PaperQueryRepository;
+import com.camel_hub.advertisement.arxiv.paper.PaperQueryService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Declarables;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.annotation.EnableRabbit;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 @EnableScheduling
+@EnableRabbit
 public class ArxivMessagingConfiguration {
 
 	public static final String JOBS_EXCHANGE = "arxiv.jobs";
@@ -54,5 +62,51 @@ public class ArxivMessagingConfiguration {
 	@ConditionalOnBean({RabbitTemplate.class, OutboxRepository.class})
 	ArxivCommandPublisher arxivCommandPublisher(RabbitTemplate rabbitTemplate, OutboxRepository repository) {
 		return new ArxivCommandPublisher(rabbitTemplate, repository, 20);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivResultRepository arxivResultRepository(DatabaseClient databaseClient) {
+		return new ArxivResultRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	PaperRepository paperRepository(DatabaseClient databaseClient, ObjectMapper objectMapper) {
+		return new PaperRepository(databaseClient, objectMapper);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	PaperQueryRepository paperQueryRepository(DatabaseClient databaseClient, ObjectMapper objectMapper) {
+		return new PaperQueryRepository(databaseClient, objectMapper);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	PaperQueryService paperQueryService(PaperQueryRepository repository) {
+		return new PaperQueryService(repository);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivResultHandler arxivResultHandler(
+			ArxivResultRepository repository,
+			PaperRepository papers,
+			ObjectMapper objectMapper,
+			TransactionalOperator transactions
+	) {
+		return new ArxivResultHandler(repository, papers, objectMapper, transactions);
+	}
+
+	@Bean
+	@ConditionalOnBean({ConnectionFactory.class, ArxivResultHandler.class})
+	ArxivResultConsumer arxivResultConsumer(ArxivResultHandler handler) {
+		return new ArxivResultConsumer(handler);
 	}
 }

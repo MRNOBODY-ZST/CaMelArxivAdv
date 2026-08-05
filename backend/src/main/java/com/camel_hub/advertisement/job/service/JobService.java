@@ -31,6 +31,7 @@ public class JobService {
 	private final AuditService auditService;
 	private final SensitiveValueHasher hasher;
 	private final TransactionalOperator transactions;
+	private final JobControlSignal controlSignal;
 
 	public JobService(
 			JobRepository repository,
@@ -39,11 +40,23 @@ public class JobService {
 			SensitiveValueHasher hasher,
 			TransactionalOperator transactions
 	) {
+		this(repository, stateMachine, auditService, hasher, transactions, JobControlSignal.noop());
+	}
+
+	public JobService(
+			JobRepository repository,
+			JobStateMachine stateMachine,
+			AuditService auditService,
+			SensitiveValueHasher hasher,
+			TransactionalOperator transactions,
+			JobControlSignal controlSignal
+	) {
 		this.repository = repository;
 		this.stateMachine = stateMachine;
 		this.auditService = auditService;
 		this.hasher = hasher;
 		this.transactions = transactions;
+		this.controlSignal = controlSignal;
 	}
 
 	public Mono<PageResponse<JobView>> list(
@@ -82,7 +95,10 @@ public class JobService {
 				.flatMap(original -> action == JobAction.RETRY
 						? retry(original, actorUserId, context)
 						: transition(original, action, actorUserId, context))
-				.as(transactions::transactional);
+				.as(transactions::transactional)
+				.flatMap(view -> controlSignal.set(
+						view.id(), action == JobAction.PAUSE ? "PAUSE"
+								: action == JobAction.CANCEL ? "CANCEL" : "RUN").thenReturn(view));
 	}
 
 	private Mono<JobView> transition(

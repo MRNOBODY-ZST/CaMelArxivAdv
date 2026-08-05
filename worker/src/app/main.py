@@ -7,10 +7,19 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import aio_pika
+import httpx
+import redis.asyncio as redis_async
 from aio_pika import DeliveryMode, ExchangeType, Message
+from structlog.typing import FilteringBoundLogger
 
+from app.arxiv.api_client import LegacyApiClient
+from app.arxiv.oai_client import OaiClient
+from app.arxiv.rate_limit import RedisGlobalArxivRateLease
 from app.config import Settings
+from app.jobs.arxiv_consumer import ArxivCommandProcessor
+from app.jobs.job_control import RedisJobStore
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
+from app.messaging.rabbit import RabbitResultPublisher, settle_delivery
 from app.observability.logging import configure_logging, get_logger
 
 
@@ -47,34 +56,97 @@ async def run(settings: Settings | None = None) -> None:
         timeout=active_settings.request_timeout_seconds,
     )
     try:
-        channel = await connection.channel()
+        channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
+        await channel.set_qos(prefetch_count=1)
         exchange = await channel.declare_exchange(
             active_settings.results_exchange,
             ExchangeType.TOPIC,
             durable=True,
         )
-        while not stop_event.is_set():
-            heartbeat = build_heartbeat_message(active_settings)
-            await exchange.publish(
-                Message(
-                    body=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
-                    content_type="application/json",
-                    delivery_mode=DeliveryMode.PERSISTENT,
-                    message_id=str(heartbeat.message_id),
-                    timestamp=heartbeat.occurred_at,
+        jobs_exchange = await channel.declare_exchange(
+            active_settings.jobs_exchange, ExchangeType.TOPIC, durable=True
+        )
+        retry_exchange = await channel.declare_exchange(
+            active_settings.retry_exchange, ExchangeType.TOPIC, durable=True
+        )
+        await channel.declare_exchange(
+            active_settings.dead_exchange, ExchangeType.TOPIC, durable=True
+        )
+        queue = await channel.declare_queue(
+            active_settings.jobs_queue,
+            durable=True,
+            arguments={"x-dead-letter-exchange": active_settings.dead_exchange},
+        )
+        await queue.bind(jobs_exchange, "arxiv.import.metadata")
+        await queue.bind(jobs_exchange, "arxiv.sync.oai")
+        redis = redis_async.from_url(  # type: ignore[no-untyped-call]
+            active_settings.redis_url.get_secret_value()
+        )
+        lease = RedisGlobalArxivRateLease(redis, active_settings.min_request_interval_seconds)
+        store = RedisJobStore(redis)
+        timeout = httpx.Timeout(active_settings.request_timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as http:
+            processor = ArxivCommandProcessor(
+                LegacyApiClient(
+                    http,
+                    lease,
+                    active_settings.legacy_base_url,
+                    active_settings.allowed_arxiv_hosts,
+                    active_settings.user_agent,
                 ),
-                routing_key="worker.heartbeat",
+                OaiClient(
+                    http,
+                    lease,
+                    active_settings.oai_base_url,
+                    active_settings.allowed_arxiv_hosts,
+                    active_settings.user_agent,
+                ),
+                RabbitResultPublisher(exchange),
+                store,
+                batch_size=active_settings.metadata_batch_size,
+                maximum_command_bytes=active_settings.command_max_bytes,
             )
-            logger.info("heartbeat_published", messageId=str(heartbeat.message_id))
+
+            async def consume(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+                outcome = await processor.process(message.body)
+                await settle_delivery(message, outcome, retry_exchange)
+
+            consumer_tag = await queue.consume(consume, no_ack=False)
             try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=active_settings.heartbeat_interval_seconds
-                )
-            except TimeoutError:
-                continue
+                await _heartbeat_loop(active_settings, exchange, stop_event, logger)
+            finally:
+                await queue.cancel(consumer_tag)
+                await redis.aclose()
     finally:
         logger.info("worker_stopping")
         await connection.close()
+
+
+async def _heartbeat_loop(
+    active_settings: Settings,
+    exchange: aio_pika.abc.AbstractExchange,
+    stop_event: asyncio.Event,
+    logger: FilteringBoundLogger,
+) -> None:
+    while not stop_event.is_set():
+        heartbeat = build_heartbeat_message(active_settings)
+        await exchange.publish(
+            Message(
+                body=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
+                content_type="application/json",
+                delivery_mode=DeliveryMode.PERSISTENT,
+                message_id=str(heartbeat.message_id),
+                timestamp=heartbeat.occurred_at,
+            ),
+            routing_key="worker.heartbeat",
+        )
+        logger.info("heartbeat_published", messageId=str(heartbeat.message_id))
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=active_settings.heartbeat_interval_seconds
+            )
+        except TimeoutError:
+            continue
 
 
 def cli() -> None:
