@@ -1,0 +1,2 @@
+"""Versioned RabbitMQ contracts."""
+
