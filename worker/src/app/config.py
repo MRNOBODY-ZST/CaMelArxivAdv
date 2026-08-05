@@ -25,9 +25,12 @@ class Settings(BaseSettings):
     worker_version: str = "0.1.0"
     log_level: str = "INFO"
     rabbitmq_url: SecretStr = SecretStr("amqp://guest:guest@localhost:5672/")
+    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
     results_exchange: str = "arxiv.results"
     heartbeat_interval_seconds: float = Field(default=15.0, ge=5.0, le=300.0)
-    allowed_arxiv_hosts: frozenset[str] = frozenset({"export.arxiv.org", "arxiv.org"})
+    allowed_arxiv_hosts: frozenset[str] = frozenset(
+        {"export.arxiv.org", "oaipmh.arxiv.org", "arxiv.org"}
+    )
     min_request_interval_seconds: float = Field(default=3.0, ge=3.0, le=300.0)
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     max_redirects: int = Field(default=3, ge=0, le=5)
@@ -39,4 +42,3 @@ class Settings(BaseSettings):
     max_include_depth: int = Field(default=16, ge=1, le=100)
     max_parse_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     temp_root: Path | None = None
-

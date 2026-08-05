@@ -1,6 +1,15 @@
 package com.camel_hub.advertisement.arxiv.config;
 
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomySnapshotLoader;
+import com.camel_hub.advertisement.arxiv.client.GlobalArxivRateLease;
+import com.camel_hub.advertisement.arxiv.client.RedisGlobalArxivRateLease;
+import com.camel_hub.advertisement.arxiv.client.ArxivLegacyClient;
+import com.camel_hub.advertisement.arxiv.client.AtomFeedParser;
+import com.camel_hub.advertisement.arxiv.search.ArxivLegacyQueryBuilder;
+import com.camel_hub.advertisement.arxiv.search.ArxivPreviewCache;
+import com.camel_hub.advertisement.arxiv.search.ArxivPreviewService;
+import com.camel_hub.advertisement.arxiv.search.ArxivQueryNormalizer;
+import com.camel_hub.advertisement.arxiv.search.RedisArxivPreviewCache;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyBootstrap;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyRepository;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyService;
@@ -9,10 +18,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.transaction.reactive.TransactionalOperator;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
+import org.springframework.web.reactive.function.client.WebClient;
 
 @Configuration
 @EnableConfigurationProperties(ArxivProperties.class)
@@ -21,6 +34,68 @@ public class ArxivConfiguration {
 	@Bean
 	TaxonomySnapshotLoader taxonomySnapshotLoader(ObjectMapper objectMapper, ArxivProperties properties) {
 		return new TaxonomySnapshotLoader(objectMapper, properties.taxonomySnapshot());
+	}
+
+	@Bean
+	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	GlobalArxivRateLease globalArxivRateLease(
+			ReactiveStringRedisTemplate redis,
+			ArxivProperties properties
+	) {
+		return new RedisGlobalArxivRateLease(redis, properties.minRequestInterval());
+	}
+
+	@Bean
+	AtomFeedParser atomFeedParser() {
+		return new AtomFeedParser();
+	}
+
+	@Bean
+	ArxivLegacyQueryBuilder arxivLegacyQueryBuilder() {
+		return new ArxivLegacyQueryBuilder();
+	}
+
+	@Bean
+	ArxivQueryNormalizer arxivQueryNormalizer(ObjectMapper objectMapper, ArxivProperties properties) {
+		return new ArxivQueryNormalizer(objectMapper, properties.previewMaxPageSize());
+	}
+
+	@Bean
+	@ConditionalOnBean(GlobalArxivRateLease.class)
+	ArxivLegacyClient arxivLegacyClient(
+			GlobalArxivRateLease rateLease,
+			ArxivProperties properties,
+			AtomFeedParser parser
+	) {
+		ExchangeStrategies strategies = ExchangeStrategies.builder()
+				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(5 * 1024 * 1024))
+				.build();
+		return new ArxivLegacyClient(
+				WebClient.builder().exchangeStrategies(strategies).build(), rateLease, properties, parser);
+	}
+
+	@Bean
+	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	ArxivPreviewCache arxivPreviewCache(
+			ReactiveStringRedisTemplate redis,
+			ObjectMapper objectMapper,
+			ArxivProperties properties
+	) {
+		return new RedisArxivPreviewCache(redis, objectMapper, properties.previewCacheTtl());
+	}
+
+	@Bean
+	@ConditionalOnBean({ArxivLegacyClient.class, ArxivPreviewCache.class})
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivPreviewService arxivPreviewService(
+			TaxonomyRepository taxonomyRepository,
+			ArxivQueryNormalizer normalizer,
+			ArxivLegacyQueryBuilder queryBuilder,
+			ArxivLegacyClient client,
+			ArxivPreviewCache cache
+	) {
+		return new ArxivPreviewService(taxonomyRepository, normalizer, queryBuilder, client, cache);
 	}
 
 	@Bean

@@ -29,6 +29,13 @@ public class TaxonomyRepository {
 				.one();
 	}
 
+	public Mono<java.util.Set<String>> activeCategoryIds() {
+		return databaseClient.sql("SELECT category_id FROM arxiv_categories WHERE active = true")
+				.map((row, metadata) -> row.get("category_id", String.class))
+				.all()
+				.collect(java.util.stream.Collectors.toUnmodifiableSet());
+	}
+
 	public Mono<UUID> applySnapshot(TaxonomySnapshot snapshot) {
 		return upsertSnapshot(snapshot)
 				.flatMap(snapshotId -> upsertGroups(snapshot.categories())

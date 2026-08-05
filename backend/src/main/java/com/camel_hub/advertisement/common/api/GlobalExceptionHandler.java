@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.common.api;
 
 import com.camel_hub.advertisement.audit.AuditEvent;
+import com.camel_hub.advertisement.arxiv.client.ArxivDependencyException;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
@@ -200,6 +201,16 @@ public class GlobalExceptionHandler {
 		HttpStatus resolved = status == null ? HttpStatus.INTERNAL_SERVER_ERROR : status;
 		String detail = exception.getReason() == null ? resolved.getReasonPhrase() : exception.getReason();
 		return response(exchange, resolved, "request_rejected", resolved.getReasonPhrase(), detail, Map.of());
+	}
+
+	@ExceptionHandler(ArxivDependencyException.class)
+	ResponseEntity<ApiError> handleArxivDependency(
+			ArxivDependencyException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.SERVICE_UNAVAILABLE,
+				"arxiv_unavailable", "arXiv unavailable",
+				"The arXiv request could not be completed safely; retry later", Map.of());
 	}
 
 	@ExceptionHandler(Exception.class)
