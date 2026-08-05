@@ -33,7 +33,9 @@ import {
   UsersIcon,
   XMarkIcon,
 } from '@heroicons/vue/24/outline'
-import { defineComponent, h, ref, type Component } from 'vue'
+import { defineComponent, h, type Component } from 'vue'
+
+import { useFocusReturningDisclosure } from '@/composables/useFocusReturningDisclosure'
 
 interface NavigationItem {
   label: string
@@ -47,7 +49,13 @@ interface NavigationGroup {
   items: readonly NavigationItem[]
 }
 
-const sidebarOpen = ref(false)
+const {
+  close: closeSidebar,
+  open: sidebarOpen,
+  restoreFocus: restoreSidebarFocus,
+  show: openSidebar,
+  trigger: mobileNavigationTrigger,
+} = useFocusReturningDisclosure()
 
 const navigation: readonly NavigationGroup[] = [
   { label: '概览', items: [{ label: '数据总览', href: '/', icon: HomeIcon, current: true }] },
@@ -117,10 +125,11 @@ const SidebarContent = defineComponent({
     <TransitionRoot
       as="template"
       :show="sidebarOpen"
+      @after-leave="restoreSidebarFocus"
     >
       <Dialog
         class="relative z-50 lg:hidden"
-        @close="sidebarOpen = false"
+        @close="closeSidebar"
       >
         <TransitionChild
           as="template"
@@ -149,7 +158,7 @@ const SidebarContent = defineComponent({
                   type="button"
                   class="min-h-11 min-w-11 p-2.5 text-white"
                   aria-label="关闭侧边栏"
-                  @click="sidebarOpen = false"
+                  @click="closeSidebar"
                 >
                   <XMarkIcon class="size-6" />
                 </button>
@@ -175,11 +184,12 @@ const SidebarContent = defineComponent({
     <div class="lg:pl-64">
       <header class="sticky top-0 z-40 flex h-16 items-center gap-3 border-b border-slate-200 bg-white px-4 shadow-xs sm:px-6 lg:px-8">
         <button
+          ref="mobileNavigationTrigger"
           data-testid="mobile-navigation"
           type="button"
           class="-ml-2 min-h-11 min-w-11 p-2 text-slate-600 hover:text-slate-900 lg:hidden"
           aria-label="打开侧边栏"
-          @click="sidebarOpen = true"
+          @click="openSidebar"
         >
           <Bars3Icon class="size-6" />
         </button>
