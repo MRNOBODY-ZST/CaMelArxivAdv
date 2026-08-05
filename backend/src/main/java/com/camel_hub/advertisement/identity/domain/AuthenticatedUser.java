@@ -1,5 +1,6 @@
 package com.camel_hub.advertisement.identity.domain;
 
+import java.security.Principal;
 import java.util.Set;
 import java.util.UUID;
 
@@ -11,7 +12,7 @@ public record AuthenticatedUser(
 		Set<String> permissions,
 		boolean mustChangePassword,
 		int tokenVersion
-) {
+) implements Principal {
 
 	public static AuthenticatedUser from(UserAccount account) {
 		return new AuthenticatedUser(
@@ -22,5 +23,10 @@ public record AuthenticatedUser(
 				account.permissions(),
 				account.forcePasswordChange(),
 				account.tokenVersion());
+	}
+
+	@Override
+	public String getName() {
+		return id.toString();
 	}
 }

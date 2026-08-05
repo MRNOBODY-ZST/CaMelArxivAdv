@@ -14,6 +14,7 @@ import com.camel_hub.advertisement.identity.service.AuthenticationService;
 import com.camel_hub.advertisement.identity.service.RefreshSessionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -26,6 +27,12 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 @Configuration
 @EnableConfigurationProperties(AuthProperties.class)
 public class IdentityConfiguration {
+
+	@Bean
+	@ConditionalOnMissingBean(ObjectMapper.class)
+	ObjectMapper legacyObjectMapper() {
+		return new ObjectMapper().findAndRegisterModules();
+	}
 
 	@Bean
 	PasswordEncoder passwordEncoder() {

@@ -23,6 +23,8 @@ import static org.springframework.security.test.web.reactive.server.SecurityMock
 import static org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.springSecurity;
 
 @SpringBootTest(properties = {
+		"app.auth.signing-key-base64=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+		"app.auth.fingerprint-hmac-key-base64=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		"spring.autoconfigure.exclude="
 				+ "org.springframework.boot.r2dbc.autoconfigure.R2dbcAutoConfiguration,"
 				+ "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"

@@ -237,7 +237,7 @@ Run: `cd backend && ./gradlew test --tests '*RefreshApiTest' --tests '*ChangePas
 
 Expected: PASS, including concurrent refresh where exactly one request succeeds.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/com/camel_hub/advertisement/identity backend/src/test/java/com/camel_hub/advertisement/identity
@@ -259,21 +259,21 @@ git commit -m "feat: rotate refresh sessions securely"
 - Consumes: JWT from Task 3 and current PostgreSQL user state.
 - Produces: authenticated principal authorities, `GET /api/v1/auth/me`, `@EnableReactiveMethodSecurity`, permission constants and full/masked email policy.
 
-- [ ] **Step 1: Write failing resource server tests**
+- [x] **Step 1: Write failing resource server tests**
 
 Cover missing/invalid/expired JWT, valid JWT, disabled user after issuance, token-version increment after issuance, permission denial, `/auth/me`, and email rendering `jo***@example.edu` without `contact:read_full`.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd backend && ./gradlew test --tests '*ResourceServerAuthorizationTest' --tests '*EmailDisclosurePolicyTest'`
 
 Expected: FAIL because protected Bearer authentication is absent.
 
-- [ ] **Step 3: Configure JWT decoding and live validation**
+- [x] **Step 3: Configure JWT decoding and live validation**
 
 Permit only login, refresh, tracking placeholders, health and API docs. The converter loads the current user, rejects non-`ACTIVE` state and compares database/JWT token versions before emitting `UsernamePasswordAuthenticationToken` with exact permission authorities.
 
-- [ ] **Step 4: Verify focused tests**
+- [x] **Step 4: Verify focused tests**
 
 Run: `cd backend && ./gradlew test --tests '*ResourceServerAuthorizationTest' --tests '*EmailDisclosurePolicyTest'`
 
