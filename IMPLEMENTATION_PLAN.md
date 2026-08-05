@@ -34,7 +34,13 @@
 8. **追踪**：签名打开像素、受控点击重定向、机器人标记、活动分析和数据保留。
 9. **完善发布**：全量 Testcontainers/pytest/Vitest/Playwright、可访问性、安全审计、Docker E2E、运维和隐私文档。
 
+## 当前进度
+
+- Phase 1（工程基础）：**已完成，2026-08-05 验收**。
+- Phase 2–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
+
+Phase 1 实际证据：后端 `clean check bootJar` 成功；Testcontainers 从空 PostgreSQL 执行 4 个 Flyway 迁移并建立 50 张表；Python 8 tests、Ruff、MyPy strict 成功；前端 7 tests、ESLint、`vue-tsc`、Vite build 成功；Compose/镜像契约成功；九服务均健康，外部健康 API、Mailpit 和 MinIO Console 可达。浏览器验证桌面 1280×720、移动 390×844 均无横向溢出和 console warning/error，移动抽屉焦点恢复正常。
+
 ## 阶段验收规则
 
 每阶段必须依次执行适用的后端测试、Worker 测试、前端测试、lint、类型检查和构建。任何因外部网络、Docker 或服务不可用而未执行的检查必须明确记录；未看到成功输出的检查不得标为通过。
-

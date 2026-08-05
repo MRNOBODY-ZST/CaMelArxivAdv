@@ -2,15 +2,15 @@
 
 ## 阶段 1：工程基础
 
-- [ ] 根目录安全守卫与构建仓库配置
-- [ ] Spring Boot PostgreSQL/Redis/RabbitMQ/Flyway/Actuator/OpenAPI 基础
-- [ ] 统一错误格式、Trace ID 与健康 API
-- [ ] Flyway 从空库迁移和索引基线
-- [ ] Python Worker 工程、配置、日志与健康心跳
-- [ ] Vue 3 严格模式工程和 DesignSkill 组件适配基础
-- [ ] Sidebar with header 应用外壳和 Bento Grid 首页骨架
-- [ ] PostgreSQL/Redis/RabbitMQ/MinIO/Mailpit/Nginx Compose
-- [ ] 阶段 1 测试、构建、容器健康和文档
+- [x] 根目录安全守卫与构建仓库配置
+- [x] Spring Boot PostgreSQL/Redis/RabbitMQ/Flyway/Actuator/OpenAPI 基础
+- [x] 统一错误格式、Trace ID 与健康 API
+- [x] Flyway 从空库迁移和索引基线
+- [x] Python Worker 工程、配置、日志与健康心跳
+- [x] Vue 3 严格模式工程和 DesignSkill 组件适配基础
+- [x] Sidebar with header 应用外壳和 Bento Grid 首页骨架
+- [x] PostgreSQL/Redis/RabbitMQ/MinIO/Mailpit/Nginx Compose
+- [x] 阶段 1 测试、构建、容器健康和文档
 
 ## 阶段 2：认证与 RBAC
 
@@ -81,4 +81,3 @@
 - [ ] 全量测试、lint、类型检查和构建
 - [ ] Docker Compose 从空环境启动与健康验证
 - [ ] 完整文档和最终验收清单
-
