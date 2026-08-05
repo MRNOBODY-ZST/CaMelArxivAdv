@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: camel-arxiv-platform
+  main:
+    web-application-type: reactive
+  r2dbc:
+    url: ${SPRING_R2DBC_URL:r2dbc:postgresql://localhost:5432/camel_arxiv}
+    username: ${POSTGRES_USER:camel}
+    password: ${POSTGRES_PASSWORD:}
+    pool:
+      enabled: true
+      initial-size: 2
+      max-size: 20
+  flyway:
+    enabled: true
+    url: ${SPRING_FLYWAY_URL:jdbc:postgresql://localhost:5432/camel_arxiv}
+    user: ${POSTGRES_USER:camel}
+    password: ${POSTGRES_PASSWORD:}
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:camel}
+    password: ${RABBITMQ_PASSWORD:}
+  jackson:
+    time-zone: UTC
+
+server:
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+springdoc:
+  api-docs:
+    path: /api/openapi.json
+  swagger-ui:
+    path: /api/docs
+
+app:
+  live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
