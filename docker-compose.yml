@@ -173,6 +173,7 @@ services:
       ARXIV_WORKER_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
       ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS: "3"
       ARXIV_WORKER_LOG_LEVEL: INFO
+    entrypoint: ["python", "-m", "app.main"]
     depends_on:
       rabbitmq: { condition: service_healthy }
     healthcheck:

@@ -9,7 +9,7 @@ WORKDIR /workspace/worker
 COPY worker/pyproject.toml worker/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY worker/src ./src
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12.10-slim-bookworm AS runtime
 
@@ -24,4 +24,4 @@ USER camel
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
   CMD python -c "import socket; socket.create_connection(('rabbitmq', 5672), 3).close()" || exit 1
 
-ENTRYPOINT ["arxiv-worker"]
+ENTRYPOINT ["python", "-m", "app.main"]

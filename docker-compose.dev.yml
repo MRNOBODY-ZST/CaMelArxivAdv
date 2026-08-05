@@ -5,6 +5,7 @@ services:
         target: 8025
         published: ${MAILPIT_WEB_PORT:-8025}
         protocol: tcp
+    networks: [data, edge]
 
   minio:
     ports:
@@ -12,6 +13,7 @@ services:
         target: 9001
         published: ${MINIO_CONSOLE_PORT:-9001}
         protocol: tcp
+    networks: [data, edge]
 
   backend-api:
     environment:

@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose_file="$project_root/docker-compose.yml"
+development_compose_file="$project_root/docker-compose.dev.yml"
 
 if [[ ! -f "$compose_file" ]]; then
   echo "Missing root docker-compose.yml" >&2
@@ -10,6 +11,13 @@ if [[ ! -f "$compose_file" ]]; then
 fi
 
 compose_json=$(docker compose --project-directory "$project_root" -f "$compose_file" config --format json)
+development_compose_json=$(
+  docker compose \
+    --project-directory "$project_root" \
+    -f "$compose_file" \
+    -f "$development_compose_file" \
+    config --format json
+)
 actual_services=$(jq -r '.services | keys[]' <<<"$compose_json")
 required_services=(postgres redis rabbitmq minio backend-api mail-worker arxiv-worker frontend mailpit)
 
@@ -48,5 +56,27 @@ for app_service in backend-api mail-worker arxiv-worker frontend; do
     exit 1
   fi
 done
+
+if [[ $(jq -r '(.services["arxiv-worker"].entrypoint // []) | join(" ")' <<<"$development_compose_json") != "python -m app.main" ]]; then
+  echo "arxiv-worker must use a relocatable Python module entrypoint" >&2
+  exit 1
+fi
+
+for development_service in mailpit minio; do
+  if [[ $(jq -r --arg service "$development_service" '.services[$service].networks | has("edge")' <<<"$development_compose_json") != "true" ]]; then
+    echo "$development_service must join the edge network when its development port is published" >&2
+    exit 1
+  fi
+done
+
+if [[ $(jq -r '.services.mailpit.ports[0].target' <<<"$development_compose_json") != "8025" ]]; then
+  echo "Mailpit development UI must publish container port 8025" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services.minio.ports[0].target' <<<"$development_compose_json") != "9001" ]]; then
+  echo "MinIO development console must publish container port 9001" >&2
+  exit 1
+fi
 
 echo "Compose contract verified for ${#required_services[@]} services"

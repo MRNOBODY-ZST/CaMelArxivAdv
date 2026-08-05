@@ -34,6 +34,8 @@ def redact_sensitive(
 def configure_logging(level: str) -> None:
     numeric_level = logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
     logging.basicConfig(level=numeric_level, format="%(message)s", force=True)
+    for dependency_logger in ("aio_pika", "aiormq", "pamqp"):
+        logging.getLogger(dependency_logger).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
