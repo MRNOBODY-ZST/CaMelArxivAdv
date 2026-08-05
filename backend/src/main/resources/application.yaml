@@ -54,6 +54,18 @@ app:
   live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
   persistence:
     enabled: ${APP_PERSISTENCE_ENABLED:true}
+  arxiv:
+    legacy-base-url: ${ARXIV_LEGACY_BASE_URL:https://export.arxiv.org/api/query}
+    oai-base-url: ${ARXIV_OAI_BASE_URL:https://oaipmh.arxiv.org/oai}
+    official-hosts: ${ARXIV_OFFICIAL_HOSTS:export.arxiv.org,oaipmh.arxiv.org,arxiv.org}
+    taxonomy-snapshot: classpath:arxiv/taxonomy-2026-08.json
+    preview-cache-ttl: ${ARXIV_PREVIEW_CACHE_TTL:PT24H}
+    request-timeout: ${ARXIV_REQUEST_TIMEOUT:PT30S}
+    min-request-interval: ${ARXIV_MIN_REQUEST_INTERVAL:PT3S}
+    max-retries: ${ARXIV_MAX_RETRIES:3}
+    preview-max-page-size: ${ARXIV_PREVIEW_MAX_PAGE_SIZE:100}
+    import-max-papers: ${ARXIV_IMPORT_MAX_PAPERS:10000}
+    user-agent: ${ARXIV_USER_AGENT:CaMelArxivAdv/0.1 (admin@example.invalid)}
   auth:
     access-token-ttl: ${AUTH_ACCESS_TOKEN_TTL:PT10M}
     refresh-token-ttl: ${AUTH_REFRESH_TOKEN_TTL:P14D}
