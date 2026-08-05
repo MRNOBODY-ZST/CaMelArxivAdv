@@ -325,7 +325,7 @@ Run: `cd backend && ./gradlew check bootJar`
 
 Expected: PASS; OpenAPI contains auth/user/role/permission/audit paths.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/com/camel_hub/advertisement/identity backend/src/main/java/com/camel_hub/advertisement/audit backend/src/test
@@ -352,21 +352,21 @@ git commit -m "feat: add audited identity administration"
 - Consumes: login/refresh/logout/me APIs and permission strings.
 - Produces: memory-only `accessToken`, bootstrap refresh, one-refresh concurrency lock, `/login`, forced-password-change redirect and permission-filtered navigation.
 
-- [ ] **Step 1: Write failing auth store/router/shell tests**
+- [x] **Step 1: Write failing auth store/router/shell tests**
 
 Test login, initial `/me` bootstrap through refresh cookie, no Web Storage writes, 20 simultaneous 401 responses causing one refresh, failed refresh clearing memory, `mustChangePassword` redirect, route meta denial, and navigation groups containing only authorized items.
 
-- [ ] **Step 2: Run focused frontend tests and verify failure**
+- [x] **Step 2: Run focused frontend tests and verify failure**
 
 Run: `cd frontend && npm test -- --run src/modules/auth src/layouts/__tests__/AppShell.spec.ts`
 
 Expected: FAIL because the auth module does not exist.
 
-- [ ] **Step 3: Implement the memory-only auth flow**
+- [x] **Step 3: Implement the memory-only auth flow**
 
 Define route metadata as `requiresAuth` and `permissions: readonly Permission[]`. `httpClient` attaches the current Bearer token, excludes login/refresh from retry, queues concurrent callers behind `refreshCoordinator`, retries each original request once, and never serializes the access token outside memory.
 
-- [ ] **Step 4: Verify tests, types, lint and production build**
+- [x] **Step 4: Verify tests, types, lint and production build**
 
 Run: `cd frontend && npm test -- --run && npm run typecheck && npm run lint && npm run build`
 

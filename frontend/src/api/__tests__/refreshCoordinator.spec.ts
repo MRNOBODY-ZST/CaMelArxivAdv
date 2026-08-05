@@ -22,6 +22,19 @@ describe('refresh coordinator', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
   })
 
+  it('queues twenty simultaneous unauthorized callers behind one refresh', async () => {
+    let release: ((token: string) => void) | undefined
+    const refresh = vi.fn(() => new Promise<string>((resolve) => { release = resolve }))
+    const coordinator = createRefreshCoordinator(refresh)
+
+    const callers = Array.from({ length: 20 }, () => coordinator.refresh())
+    release?.('rotated-token')
+
+    await expect(Promise.all(callers)).resolves.toEqual(Array(20).fill('rotated-token'))
+    expect(new Set(callers).size).toBe(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
   it('clears the shared request after rejection', async () => {
     const refresh = vi
       .fn<() => Promise<string>>()

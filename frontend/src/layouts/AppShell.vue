@@ -33,15 +33,18 @@ import {
   UsersIcon,
   XMarkIcon,
 } from '@heroicons/vue/24/outline'
-import { defineComponent, h, type Component } from 'vue'
+import { computed, defineComponent, h, type Component } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { useFocusReturningDisclosure } from '@/composables/useFocusReturningDisclosure'
+import { useAuthStore } from '@/modules/auth/auth.store'
+import type { Permission } from '@/modules/auth/auth.types'
 
 interface NavigationItem {
   label: string
   href: string
   icon: Component
-  current?: boolean
+  permission?: Permission
 }
 
 interface NavigationGroup {
@@ -57,34 +60,50 @@ const {
   trigger: mobileNavigationTrigger,
 } = useFocusReturningDisclosure()
 
+const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
+
 const navigation: readonly NavigationGroup[] = [
-  { label: '概览', items: [{ label: '数据总览', href: '/', icon: HomeIcon, current: true }] },
+  { label: '概览', items: [{ label: '数据总览', href: '/', icon: HomeIcon }] },
   { label: 'arXiv 数据', items: [
-    { label: '论文发现', href: '#paper-discovery', icon: MagnifyingGlassIcon },
-    { label: '导入任务', href: '#import-jobs', icon: ArrowDownTrayIcon },
-    { label: '论文库', href: '#papers', icon: ArchiveBoxIcon },
-    { label: '作者与联系人', href: '#contacts', icon: UsersIcon },
+    { label: '论文发现', href: '#paper-discovery', icon: MagnifyingGlassIcon, permission: 'paper:read' },
+    { label: '导入任务', href: '#import-jobs', icon: ArrowDownTrayIcon, permission: 'paper:import' },
+    { label: '论文库', href: '#papers', icon: ArchiveBoxIcon, permission: 'paper:read' },
+    { label: '作者与联系人', href: '#contacts', icon: UsersIcon, permission: 'contact:read_masked' },
   ] },
   { label: '邮件运营', items: [
-    { label: '邮件模板', href: '#templates', icon: DocumentTextIcon },
-    { label: '收件人分组', href: '#segments', icon: FolderIcon },
-    { label: '邮件活动', href: '#campaigns', icon: PaperAirplaneIcon },
-    { label: '发送记录', href: '#deliveries', icon: EnvelopeIcon },
+    { label: '邮件模板', href: '#templates', icon: DocumentTextIcon, permission: 'template:read' },
+    { label: '收件人分组', href: '#segments', icon: FolderIcon, permission: 'campaign:read' },
+    { label: '邮件活动', href: '#campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
+    { label: '发送记录', href: '#deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
   ] },
   { label: '数据分析', items: [
-    { label: '采集分析', href: '#ingestion-analytics', icon: ChartBarIcon },
-    { label: '联系人分析', href: '#contact-analytics', icon: ChartPieIcon },
-    { label: '活动分析', href: '#campaign-analytics', icon: DocumentChartBarIcon },
-    { label: '链接分析', href: '#link-analytics', icon: LinkIcon },
+    { label: '采集分析', href: '#ingestion-analytics', icon: ChartBarIcon, permission: 'analytics:read' },
+    { label: '联系人分析', href: '#contact-analytics', icon: ChartPieIcon, permission: 'analytics:read' },
+    { label: '活动分析', href: '#campaign-analytics', icon: DocumentChartBarIcon, permission: 'analytics:read' },
+    { label: '链接分析', href: '#link-analytics', icon: LinkIcon, permission: 'analytics:read' },
   ] },
   { label: '系统管理', items: [
-    { label: 'SMTP 账户', href: '#smtp', icon: ServerStackIcon },
-    { label: '用户管理', href: '#users', icon: UserGroupIcon },
-    { label: '角色与权限', href: '#roles', icon: ShieldCheckIcon },
-    { label: '审计日志', href: '#audit', icon: ClipboardDocumentListIcon },
-    { label: '系统设置', href: '#settings', icon: Cog6ToothIcon },
+    { label: 'SMTP 账户', href: '#smtp', icon: ServerStackIcon, permission: 'smtp:read' },
+    { label: '用户管理', href: '/admin/users', icon: UserGroupIcon, permission: 'user:read' },
+    { label: '角色与权限', href: '/admin/roles', icon: ShieldCheckIcon, permission: 'role:read' },
+    { label: '审计日志', href: '/admin/audit', icon: ClipboardDocumentListIcon, permission: 'audit:read' },
+    { label: '系统设置', href: '#settings', icon: Cog6ToothIcon, permission: 'system:manage' },
   ] },
 ]
+
+const visibleNavigation = computed(() => navigation
+  .map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.permission || auth.hasPermission(item.permission)),
+  }))
+  .filter((group) => group.items.length > 0))
+
+async function logout(): Promise<void> {
+  await auth.logout()
+  await router.replace({ name: 'login' })
+}
 
 const SidebarContent = defineComponent({
   name: 'SidebarContent',
@@ -96,17 +115,17 @@ const SidebarContent = defineComponent({
       ]),
       h('nav', { class: 'flex flex-1 flex-col', 'aria-label': '主导航' }, [
         h('ul', { class: 'flex flex-1 flex-col gap-y-5', role: 'list' }, [
-          ...navigation.map((group) => h('li', { key: group.label }, [
+          ...visibleNavigation.value.map((group) => h('li', { key: group.label }, [
             h('p', { class: 'mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400' }, group.label),
             h('ul', { class: 'space-y-0.5', role: 'list' }, group.items.map((item) => h('li', { key: item.label }, [
-              h('a', {
-                href: item.href,
-                'aria-current': item.current ? 'page' : undefined,
+              h(RouterLink, {
+                to: item.href,
+                'aria-current': route.path === item.href ? 'page' : undefined,
                 class: [
                   'group flex min-h-10 items-center gap-3 rounded-md px-2.5 text-sm font-medium',
-                  item.current ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900',
+                  route.path === item.href ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900',
                 ],
-              }, [h(item.icon, { class: ['size-5 shrink-0', item.current ? 'text-brand-500' : 'text-slate-400 group-hover:text-slate-600'], 'aria-hidden': true }), item.label]),
+              }, { default: () => [h(item.icon, { class: ['size-5 shrink-0', route.path === item.href ? 'text-brand-500' : 'text-slate-400 group-hover:text-slate-600'], 'aria-hidden': true }), item.label] }),
             ]))),
           ])),
           h('li', { class: 'mt-auto pt-2' }, [h('div', { class: 'rounded-md bg-slate-50 p-3 text-xs/5 text-slate-500' }, [h('p', { class: 'font-medium text-slate-700' }, '安全发送默认开启'), h('p', '真实 SMTP 当前默认禁用')])]),
@@ -235,7 +254,7 @@ const SidebarContent = defineComponent({
           class="relative"
         >
           <MenuButton class="flex min-h-11 items-center gap-2 rounded-md px-1.5 hover:bg-slate-50">
-            <span class="flex size-8 items-center justify-center rounded-full bg-brand-100 text-xs font-semibold text-brand-700">管</span><span class="hidden text-sm font-medium text-slate-700 xl:block">管理员</span><ChevronDownIcon class="hidden size-4 text-slate-400 xl:block" />
+            <span class="flex size-8 items-center justify-center rounded-full bg-brand-100 text-xs font-semibold text-brand-700">{{ auth.user?.displayName.slice(0, 1) ?? '用' }}</span><span class="hidden text-sm font-medium text-slate-700 xl:block">{{ auth.user?.displayName ?? '用户' }}</span><ChevronDownIcon class="hidden size-4 text-slate-400 xl:block" />
           </MenuButton>
           <Transition
             enter-active-class="transition duration-100"
@@ -255,6 +274,7 @@ const SidebarContent = defineComponent({
                 <button
                   type="button"
                   :class="[active ? 'bg-slate-50' : '', 'block w-full px-3 py-2 text-left text-sm text-slate-700']"
+                  @click="logout"
                 >
                   退出登录
                 </button>

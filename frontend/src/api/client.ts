@@ -1,14 +1,10 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { createRefreshCoordinator } from '@/api/refreshCoordinator'
-import { useAuthStore } from '@/stores/auth'
+import { useAuthStore } from '@/modules/auth/auth.store'
 
 interface RetriableRequest extends InternalAxiosRequestConfig {
   _retry?: boolean
-}
-
-interface RefreshResponse {
-  accessToken: string
 }
 
 export const apiClient = axios.create({
@@ -19,11 +15,7 @@ export const apiClient = axios.create({
 })
 
 const refreshCoordinator = createRefreshCoordinator(async () => {
-  const { data } = await axios.post<RefreshResponse>('/api/v1/auth/refresh', undefined, {
-    withCredentials: true,
-  })
-  useAuthStore().setAccessToken(data.accessToken)
-  return data.accessToken
+  return useAuthStore().refresh()
 })
 
 apiClient.interceptors.request.use((config) => {
@@ -34,12 +26,20 @@ apiClient.interceptors.request.use((config) => {
 
 apiClient.interceptors.response.use(undefined, async (error: AxiosError) => {
   const request = error.config as RetriableRequest | undefined
-  if (error.response?.status !== 401 || !request || request._retry || request.url === '/auth/refresh') {
+  const authPath = request?.url ?? ''
+  const shouldNotRefresh = ['/auth/login', '/auth/refresh', '/auth/logout'].includes(authPath)
+  if (error.response?.status !== 401 || !request || request._retry || shouldNotRefresh) {
     throw error
   }
 
   request._retry = true
-  const token = await refreshCoordinator.refresh()
+  let token: string
+  try {
+    token = await refreshCoordinator.refresh()
+  } catch (refreshError) {
+    useAuthStore().clearSession()
+    throw refreshError
+  }
   request.headers.Authorization = `Bearer ${token}`
   return apiClient(request)
 })
