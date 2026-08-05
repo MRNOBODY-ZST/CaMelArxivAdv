@@ -5,9 +5,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest(properties = {
 		"spring.autoconfigure.exclude="
-				+ "org.springframework.boot.autoconfigure.r2dbc.R2dbcAutoConfiguration,"
-				+ "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-				+ "org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration,"
+				+ "org.springframework.boot.r2dbc.autoconfigure.R2dbcAutoConfiguration,"
+				+ "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration,"
+				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration,"
+				+ "org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration,"
 				+ "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
 })
 class AdvertisementApplicationTests {
