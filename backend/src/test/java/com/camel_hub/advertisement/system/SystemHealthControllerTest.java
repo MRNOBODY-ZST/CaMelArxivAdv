@@ -25,6 +25,7 @@ class SystemHealthControllerTest {
 	private ApplicationContext applicationContext;
 
 	private WebTestClient webTestClient;
+	private WebTestClient anonymousWebTestClient;
 
 	@BeforeEach
 	void setUp() {
@@ -32,6 +33,9 @@ class SystemHealthControllerTest {
 				.apply(springSecurity())
 				.build()
 				.mutateWith(mockUser());
+		anonymousWebTestClient = WebTestClient.bindToApplicationContext(applicationContext)
+				.apply(springSecurity())
+				.build();
 	}
 
 	@Test
@@ -44,5 +48,13 @@ class SystemHealthControllerTest {
 				.expectBody()
 				.jsonPath("$.status").isEqualTo("UP")
 				.jsonPath("$.checkedAt").isNotEmpty();
+	}
+
+	@Test
+	void permitsHealthChecksWithoutAuthentication() {
+		anonymousWebTestClient.get()
+				.uri("/api/v1/system/health")
+				.exchange()
+				.expectStatus().isOk();
 	}
 }

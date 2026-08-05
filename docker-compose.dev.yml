@@ -1,0 +1,28 @@
+services:
+  mailpit:
+    ports:
+      - name: mailpit-web
+        target: 8025
+        published: ${MAILPIT_WEB_PORT:-8025}
+        protocol: tcp
+
+  minio:
+    ports:
+      - name: minio-console
+        target: 9001
+        published: ${MINIO_CONSOLE_PORT:-9001}
+        protocol: tcp
+
+  backend-api:
+    environment:
+      APP_ENV: development
+      ALLOW_LIVE_SMTP: "false"
+
+  mail-worker:
+    environment:
+      APP_ENV: development
+      ALLOW_LIVE_SMTP: "false"
+
+  arxiv-worker:
+    environment:
+      ARXIV_WORKER_LOG_LEVEL: DEBUG
