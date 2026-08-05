@@ -26,6 +26,8 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USER:camel}
     password: ${RABBITMQ_PASSWORD:}
+    publisher-confirm-type: correlated
+    publisher-returns: true
   jackson:
     time-zone: UTC
 

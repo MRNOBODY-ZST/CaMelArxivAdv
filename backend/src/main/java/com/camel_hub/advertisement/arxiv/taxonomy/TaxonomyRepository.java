@@ -36,6 +36,21 @@ public class TaxonomyRepository {
 				.collect(java.util.stream.Collectors.toUnmodifiableSet());
 	}
 
+	public Mono<java.util.Set<String>> activeImportIdentifiers() {
+		return databaseClient.sql("""
+				SELECT category_id AS identifier
+				FROM arxiv_categories
+				WHERE active = true
+				UNION
+				SELECT group_id || ':' || archive_id || ':' ||
+				       substring(category_id from position('.' in category_id) + 1) AS identifier
+				FROM arxiv_categories
+				WHERE active = true
+				""")
+				.map((row, metadata) -> row.get("identifier", String.class))
+				.all().collect(java.util.stream.Collectors.toUnmodifiableSet());
+	}
+
 	public Mono<UUID> applySnapshot(TaxonomySnapshot snapshot) {
 		return upsertSnapshot(snapshot)
 				.flatMap(snapshotId -> upsertGroups(snapshot.categories())

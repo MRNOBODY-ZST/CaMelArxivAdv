@@ -10,6 +10,12 @@ import com.camel_hub.advertisement.arxiv.search.ArxivPreviewCache;
 import com.camel_hub.advertisement.arxiv.search.ArxivPreviewService;
 import com.camel_hub.advertisement.arxiv.search.ArxivQueryNormalizer;
 import com.camel_hub.advertisement.arxiv.search.RedisArxivPreviewCache;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchCategoryCatalog;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchRepository;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchService;
+import com.camel_hub.advertisement.arxiv.importing.ArxivImportCatalog;
+import com.camel_hub.advertisement.arxiv.importing.ArxivImportRepository;
+import com.camel_hub.advertisement.arxiv.importing.ArxivImportService;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyBootstrap;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyRepository;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyService;
@@ -123,5 +129,67 @@ public class ArxivConfiguration {
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	TaxonomyBootstrap taxonomyBootstrap(TaxonomyService service) {
 		return new TaxonomyBootstrap(service);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	SavedSearchRepository savedSearchRepository(DatabaseClient databaseClient, ObjectMapper objectMapper) {
+		return new SavedSearchRepository(databaseClient, objectMapper);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	SavedSearchCategoryCatalog savedSearchCategoryCatalog(TaxonomyRepository repository) {
+		return repository::activeCategoryIds;
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	SavedSearchService savedSearchService(
+			SavedSearchRepository repository,
+			ArxivQueryNormalizer normalizer,
+			SavedSearchCategoryCatalog categoryCatalog,
+			AuditService auditService,
+			SensitiveValueHasher hasher,
+			ObjectMapper objectMapper,
+			TransactionalOperator transactions
+	) {
+		return new SavedSearchService(
+				repository, normalizer, categoryCatalog, auditService, hasher, objectMapper, transactions);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivImportRepository arxivImportRepository(DatabaseClient databaseClient) {
+		return new ArxivImportRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivImportCatalog arxivImportCatalog(TaxonomyRepository repository) {
+		return repository::activeImportIdentifiers;
+	}
+
+	@Bean
+	@ConditionalOnProperty(
+			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	ArxivImportService arxivImportService(
+			ArxivImportRepository repository,
+			ArxivQueryNormalizer normalizer,
+			ArxivImportCatalog catalog,
+			AuditService auditService,
+			SensitiveValueHasher hasher,
+			ObjectMapper objectMapper,
+			ArxivProperties properties,
+			TransactionalOperator transactions
+	) {
+		return new ArxivImportService(
+				repository, normalizer, catalog, auditService, hasher, objectMapper,
+				properties.importMaxPapers(), transactions);
 	}
 }

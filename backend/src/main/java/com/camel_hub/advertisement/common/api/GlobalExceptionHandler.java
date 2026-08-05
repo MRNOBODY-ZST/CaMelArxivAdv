@@ -2,6 +2,10 @@ package com.camel_hub.advertisement.common.api;
 
 import com.camel_hub.advertisement.audit.AuditEvent;
 import com.camel_hub.advertisement.arxiv.client.ArxivDependencyException;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchConflictException;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchNotFoundException;
+import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchValidationException;
+import com.camel_hub.advertisement.arxiv.importing.ArxivImportValidationException;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
@@ -17,6 +21,9 @@ import com.camel_hub.advertisement.identity.service.AdministrationValidationExce
 import com.camel_hub.advertisement.identity.service.InvalidRefreshTokenException;
 import com.camel_hub.advertisement.identity.service.LoginRateLimitedException;
 import com.camel_hub.advertisement.identity.service.PasswordPolicyViolationException;
+import com.camel_hub.advertisement.job.service.InvalidJobStateException;
+import com.camel_hub.advertisement.job.service.JobConflictException;
+import com.camel_hub.advertisement.job.service.JobNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.beans.factory.ObjectProvider;
@@ -201,6 +208,50 @@ public class GlobalExceptionHandler {
 		HttpStatus resolved = status == null ? HttpStatus.INTERNAL_SERVER_ERROR : status;
 		String detail = exception.getReason() == null ? resolved.getReasonPhrase() : exception.getReason();
 		return response(exchange, resolved, "request_rejected", resolved.getReasonPhrase(), detail, Map.of());
+	}
+
+	@ExceptionHandler(JobNotFoundException.class)
+	ResponseEntity<ApiError> handleJobNotFound(JobNotFoundException exception, ServerWebExchange exchange) {
+		return response(exchange, HttpStatus.NOT_FOUND, "job_not_found", "Job not found",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler({JobConflictException.class, InvalidJobStateException.class})
+	ResponseEntity<ApiError> handleJobConflict(RuntimeException exception, ServerWebExchange exchange) {
+		return response(exchange, HttpStatus.CONFLICT, "job_conflict", "Job command rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SavedSearchNotFoundException.class)
+	ResponseEntity<ApiError> handleSavedSearchNotFound(
+			SavedSearchNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "saved_search_not_found", "Saved search not found",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SavedSearchValidationException.class)
+	ResponseEntity<ApiError> handleSavedSearchValidation(
+			SavedSearchValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_saved_search", "Saved search rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SavedSearchConflictException.class)
+	ResponseEntity<ApiError> handleSavedSearchConflict(
+			SavedSearchConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "saved_search_conflict", "Saved search conflict",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(ArxivImportValidationException.class)
+	ResponseEntity<ApiError> handleArxivImportValidation(
+			ArxivImportValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_arxiv_import", "arXiv import rejected",
+				exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(ArxivDependencyException.class)
