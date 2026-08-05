@@ -38,6 +38,17 @@ if [[ $(jq -r '.services["backend-api"].environment.ALLOW_LIVE_SMTP' <<<"$compos
   exit 1
 fi
 
+for backend_service in backend-api mail-worker; do
+  if [[ $(jq -r --arg service "$backend_service" '.services[$service].environment.AUTH_COOKIE_SECURE' <<<"$compose_json") != "true" ]]; then
+    echo "$backend_service must require secure authentication cookies in the production baseline" >&2
+    exit 1
+  fi
+  if [[ -z $(jq -r --arg service "$backend_service" '.services[$service].environment.JWT_SIGNING_KEY_BASE64' <<<"$compose_json") ]]; then
+    echo "$backend_service must receive JWT signing key material" >&2
+    exit 1
+  fi
+done
+
 for internal_service in postgres redis rabbitmq minio backend-api mail-worker arxiv-worker mailpit; do
   if [[ $(jq -r --arg service "$internal_service" '.services[$service] | has("ports")' <<<"$compose_json") == "true" ]]; then
     echo "$internal_service must not publish production ports" >&2
@@ -78,5 +89,12 @@ if [[ $(jq -r '.services.minio.ports[0].target' <<<"$development_compose_json") 
   echo "MinIO development console must publish container port 9001" >&2
   exit 1
 fi
+
+for backend_service in backend-api mail-worker; do
+  if [[ $(jq -r --arg service "$backend_service" '.services[$service].environment.AUTH_COOKIE_SECURE' <<<"$development_compose_json") != "false" ]]; then
+    echo "$backend_service localhost development cookie must explicitly disable Secure" >&2
+    exit 1
+  fi
+done
 
 echo "Compose contract verified for ${#required_services[@]} services"

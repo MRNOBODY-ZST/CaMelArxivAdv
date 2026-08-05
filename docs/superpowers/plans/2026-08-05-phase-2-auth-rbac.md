@@ -17,7 +17,7 @@
 - Production refresh cookies are `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api/v1/auth`; the development override alone may set `Secure=false` for localhost.
 - Access tokens remain in memory and are never written to localStorage, sessionStorage, IndexedDB or URLs.
 - A disabled/locked user or mismatched `tokenVersion` is rejected even when the JWT signature and expiry are valid.
-- Five system roles and all 27 permission codes from the original prompt are seeded idempotently.
+- Five system roles and all 26 permission codes from the original prompt are seeded idempotently.
 - Backend method authorization is authoritative; frontend visibility is usability only.
 - Login success/failure, password mutation, user state changes, role/permission changes and denied sensitive operations are audited without sensitive fields.
 - Initial administrator credentials come from environment variables and always set `forcePasswordChange=true`.
@@ -39,11 +39,11 @@
 
 **Interfaces:**
 - Consumes: V1 identity tables and environment configuration.
-- Produces: `AuthProperties`, 27 permission rows, `SUPER_ADMIN`, `ADMIN`, `CAMPAIGN_MANAGER`, `DATA_ANALYST`, `VIEWER`, and their deterministic grants.
+- Produces: `AuthProperties`, 26 permission rows, `SUPER_ADMIN`, `ADMIN`, `CAMPAIGN_MANAGER`, `DATA_ANALYST`, `VIEWER`, and their deterministic grants.
 
 - [ ] **Step 1: Extend the migration test with failing RBAC assertions**
 
-Assert exactly 27 prompt permission codes, five system roles, all permissions on `SUPER_ADMIN`, no `contact:read_full` on `VIEWER`, and no plaintext default user password in migration SQL.
+Assert exactly 26 prompt permission codes, five system roles, all permissions on `SUPER_ADMIN`, no `contact:read_full` on `VIEWER`, and no plaintext default user password in migration SQL.
 
 - [ ] **Step 2: Run the focused migration test**
 
@@ -435,6 +435,6 @@ git commit -m "docs: complete phase two acceptance"
 
 ## Self-Review
 
-- Spec coverage: username/email login, hashing, access/refresh, rotation, logout, forced invalidation, rate limiting, password changes/admin reset, initial forced change, five roles, 27 permissions, backend/frontend checks, email disclosure and required audit actions are each assigned above.
+- Spec coverage: username/email login, hashing, access/refresh, rotation, logout, forced invalidation, rate limiting, password changes/admin reset, initial forced change, five roles, 26 permissions, backend/frontend checks, email disclosure and required audit actions are each assigned above.
 - Placeholder scan: implementation steps define concrete endpoints, fields, algorithms, tests and commands; no deferred placeholder is used.
 - Type consistency: `AuthProperties`, `AuthenticatedUser`, `Permission`, JWT claims, frontend `Permission`, auth response and route metadata retain the same names across tasks.

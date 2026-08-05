@@ -19,11 +19,13 @@ services:
     environment:
       APP_ENV: development
       ALLOW_LIVE_SMTP: "false"
+      AUTH_COOKIE_SECURE: "false"
 
   mail-worker:
     environment:
       APP_ENV: development
       ALLOW_LIVE_SMTP: "false"
+      AUTH_COOKIE_SECURE: "false"
 
   arxiv-worker:
     environment:

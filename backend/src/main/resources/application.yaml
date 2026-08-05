@@ -52,3 +52,20 @@ springdoc:
 
 app:
   live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+  auth:
+    access-token-ttl: ${AUTH_ACCESS_TOKEN_TTL:PT10M}
+    refresh-token-ttl: ${AUTH_REFRESH_TOKEN_TTL:P14D}
+    max-login-failures: ${AUTH_MAX_LOGIN_FAILURES:5}
+    login-failure-window: ${AUTH_LOGIN_FAILURE_WINDOW:PT15M}
+    issuer: ${AUTH_ISSUER:camel-arxiv}
+    signing-key-base64: ${JWT_SIGNING_KEY_BASE64:}
+    fingerprint-hmac-key-base64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:}
+    cookie:
+      secure: ${AUTH_COOKIE_SECURE:true}
+      same-site: ${AUTH_COOKIE_SAME_SITE:Strict}
+      path: /api/v1/auth
+    bootstrap-admin:
+      username: ${INITIAL_ADMIN_USERNAME:}
+      email: ${INITIAL_ADMIN_EMAIL:}
+      display-name: ${INITIAL_ADMIN_DISPLAY_NAME:Administrator}
+      password: ${INITIAL_ADMIN_PASSWORD:}
