@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.identity.security.AccessTokenService;
 
 public record AuthenticationResult(
 		AccessTokenService.IssuedAccessToken accessToken,
-		AuthenticatedUser user
+		AuthenticatedUser user,
+		String refreshToken
 ) {
 }

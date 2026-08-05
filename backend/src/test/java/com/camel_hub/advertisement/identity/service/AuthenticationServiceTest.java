@@ -7,6 +7,7 @@ import com.camel_hub.advertisement.identity.domain.UserStatus;
 import com.camel_hub.advertisement.identity.persistence.IdentityRepository;
 import com.camel_hub.advertisement.identity.security.AccessTokenService;
 import com.camel_hub.advertisement.identity.security.LoginRateLimiter;
+import com.camel_hub.advertisement.identity.security.PasswordPolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -25,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,6 +44,12 @@ class AuthenticationServiceTest {
 	private PasswordEncoder passwordEncoder;
 	@Mock
 	private AccessTokenService accessTokenService;
+	@Mock
+	private RefreshSessionService refreshSessions;
+	@Mock
+	private PasswordPolicy passwordPolicy;
+	@Mock
+	private TransactionalOperator transactions;
 
 	private AuthenticationService service;
 	private AuthenticationRequestContext context;
@@ -49,7 +58,8 @@ class AuthenticationServiceTest {
 	void setUp() {
 		when(passwordEncoder.encode(anyString())).thenReturn("dummy-hash");
 		service = new AuthenticationService(
-				identityRepository, rateLimiter, auditService, passwordEncoder, accessTokenService);
+				identityRepository, rateLimiter, auditService, passwordEncoder, accessTokenService,
+				refreshSessions, passwordPolicy, transactions);
 		context = new AuthenticationRequestContext("192.0.2.10", "test-agent", "trace-auth-1");
 	}
 
@@ -65,6 +75,10 @@ class AuthenticationServiceTest {
 		when(identityRepository.updateLastLogin(account.id())).thenReturn(Mono.empty());
 		when(auditService.record(any())).thenReturn(Mono.empty());
 		when(accessTokenService.issue(any())).thenReturn(token);
+		when(refreshSessions.issue(account.id(), context)).thenReturn(Mono.just(
+				new RefreshSessionService.IssuedRefreshSession(
+						UUID.randomUUID(), UUID.randomUUID(), "refresh-value",
+						Instant.parse("2026-08-19T08:00:00Z"))));
 
 		StepVerifier.create(service.login("  AdMiN ", "Correct!Password92", context))
 				.assertNext(result -> {
@@ -126,6 +140,47 @@ class AuthenticationServiceTest {
 
 		verify(identityRepository, never()).findByPrincipal(anyString());
 		verify(passwordEncoder, never()).matches(anyString(), anyString());
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void passwordChangeUpdatesTheHashInvalidatesAccessTokensAndRevokesEveryRefreshFamily() {
+		UserAccount account = account(UserStatus.ACTIVE);
+		when(identityRepository.findById(account.id())).thenReturn(Mono.just(account));
+		when(passwordEncoder.matches("Current!Password92", account.passwordHash())).thenReturn(true);
+		when(identityRepository.updatePassword(account.id(), "dummy-hash")).thenReturn(Mono.empty());
+		when(refreshSessions.revokeAll(account.id())).thenReturn(Mono.empty());
+		when(auditService.record(any())).thenReturn(Mono.empty());
+		when(transactions.transactional(any(Mono.class)))
+				.thenAnswer(invocation -> invocation.getArgument(0));
+
+		StepVerifier.create(service.changePassword(
+						account.id(), "Current!Password92", "Maple!Orbit93", context))
+				.verifyComplete();
+
+		verify(passwordPolicy).validate("Maple!Orbit93", account.username(), account.email());
+		verify(identityRepository).updatePassword(account.id(), "dummy-hash");
+		verify(refreshSessions).revokeAll(account.id());
+		ArgumentCaptor<AuditEvent> event = ArgumentCaptor.forClass(AuditEvent.class);
+		verify(auditService).record(event.capture());
+		assertThat(event.getValue().action()).isEqualTo("AUTH_PASSWORD_CHANGE");
+		assertThat(event.getValue().afterSummary().get("tokenVersion")).isEqualTo(3);
+	}
+
+	@Test
+	void passwordPolicyFailureDoesNotMutateTheUserOrSessions() {
+		UserAccount account = account(UserStatus.ACTIVE);
+		when(identityRepository.findById(account.id())).thenReturn(Mono.just(account));
+		when(passwordEncoder.matches("Current!Password92", account.passwordHash())).thenReturn(true);
+		doThrow(new IllegalArgumentException("password must contain at least 12 characters"))
+				.when(passwordPolicy).validate("weak", account.username(), account.email());
+
+		StepVerifier.create(service.changePassword(account.id(), "Current!Password92", "weak", context))
+				.expectError(PasswordPolicyViolationException.class)
+				.verify();
+
+		verify(identityRepository, never()).updatePassword(any(), anyString());
+		verify(refreshSessions, never()).revokeAll(any());
 	}
 
 	private UserAccount account(UserStatus status) {

@@ -194,7 +194,7 @@ Run: `cd backend && ./gradlew test --tests '*LoginApiTest' --tests '*LoginRateLi
 
 Expected: PASS; JWT contains no email, password hash or Secret values.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/com/camel_hub/advertisement/audit backend/src/main/java/com/camel_hub/advertisement/identity backend/src/test/java/com/camel_hub/advertisement/audit backend/src/test/java/com/camel_hub/advertisement/identity
@@ -217,21 +217,21 @@ git commit -m "feat: add audited password login"
 - Consumes: successful login, refresh token table, password policy and transaction operator.
 - Produces: rotating `refresh_token` cookie, `POST /refresh`, `POST /logout`, `POST /change-password`, family replay revocation and token-version invalidation.
 
-- [ ] **Step 1: Write failing rotation and password tests**
+- [x] **Step 1: Write failing rotation and password tests**
 
 Verify login sets correct cookie attributes; refresh returns a new cookie and marks old row rotated/replaced; old-token replay revokes every family row; logout revokes the current family and expires the cookie; change password requires current password, enforces policy, clears `forcePasswordChange`, increments `tokenVersion`, revokes all refresh families and audits the action.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd backend && ./gradlew test --tests '*RefreshApiTest' --tests '*ChangePasswordApiTest'`
 
 Expected: FAIL because refresh/session endpoints are absent.
 
-- [ ] **Step 3: Implement transactional refresh sessions**
+- [x] **Step 3: Implement transactional refresh sessions**
 
 Generate `Base64.getUrlEncoder().withoutPadding()` values from `SecureRandom` 32-byte arrays. Hash before database access. Lock the matching refresh row with `SELECT ... FOR UPDATE`; create the replacement and update `rotated_at/replaced_by` in one transaction. Never return a refresh token in JSON.
 
-- [ ] **Step 4: Verify focused tests**
+- [x] **Step 4: Verify focused tests**
 
 Run: `cd backend && ./gradlew test --tests '*RefreshApiTest' --tests '*ChangePasswordApiTest'`
 

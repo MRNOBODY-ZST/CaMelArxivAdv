@@ -1,7 +1,9 @@
 package com.camel_hub.advertisement.identity.api;
 
 import com.camel_hub.advertisement.common.api.GlobalExceptionHandler;
+import com.camel_hub.advertisement.identity.config.AuthProperties;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
+import com.camel_hub.advertisement.identity.security.RefreshCookieFactory;
 import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
 import com.camel_hub.advertisement.identity.service.AuthenticationResult;
 import com.camel_hub.advertisement.identity.service.AuthenticationService;
@@ -13,6 +15,8 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.Set;
 import java.util.UUID;
 
@@ -29,7 +33,8 @@ class LoginApiTest {
 	@BeforeEach
 	void setUp() {
 		authenticationService = mock(AuthenticationService.class);
-		webTestClient = WebTestClient.bindToController(new AuthController(authenticationService))
+		webTestClient = WebTestClient.bindToController(
+						new AuthController(authenticationService, new RefreshCookieFactory(properties())))
 				.controllerAdvice(new GlobalExceptionHandler())
 				.build();
 	}
@@ -42,7 +47,9 @@ class LoginApiTest {
 		when(authenticationService.login(eq("Admin"), eq("Maple!Orbit92"), any()))
 				.thenReturn(Mono.just(new AuthenticationResult(
 						new AccessTokenService.IssuedAccessToken(
-								"signed.jwt.value", Instant.now().plusSeconds(600), 600), user)));
+								"signed.jwt.value", Instant.now().plusSeconds(600), 600),
+						user,
+						"refresh-value")));
 
 		webTestClient.post().uri("/api/v1/auth/login")
 				.header("User-Agent", "Browser/1.0")
@@ -56,6 +63,15 @@ class LoginApiTest {
 				.jsonPath("$.user.username").isEqualTo("admin")
 				.jsonPath("$.user.mustChangePassword").isEqualTo(true)
 				.jsonPath("$.user.passwordHash").doesNotExist();
+	}
+
+	private AuthProperties properties() {
+		String key = Base64.getEncoder().encodeToString(new byte[32]);
+		return new AuthProperties(
+				Duration.ofMinutes(10), Duration.ofDays(14), 5, Duration.ofMinutes(15),
+				"camel-arxiv", key, key,
+				new AuthProperties.RefreshCookie(true, "Strict", "/api/v1/auth"),
+				new AuthProperties.BootstrapAdmin("", "", "", ""));
 	}
 
 	@Test

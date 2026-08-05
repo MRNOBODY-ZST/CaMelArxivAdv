@@ -25,6 +25,12 @@ public final class AuthDtos {
 	) {
 	}
 
+	public record ChangePasswordRequest(
+			@NotBlank String currentPassword,
+			@NotBlank String newPassword
+	) {
+	}
+
 	public record CurrentUserResponse(
 			UUID id,
 			String username,

@@ -2,7 +2,9 @@ package com.camel_hub.advertisement.common.api;
 
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
+import com.camel_hub.advertisement.identity.service.InvalidRefreshTokenException;
 import com.camel_hub.advertisement.identity.service.LoginRateLimitedException;
+import com.camel_hub.advertisement.identity.service.PasswordPolicyViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -71,6 +73,24 @@ public class GlobalExceptionHandler {
 			ServerWebExchange exchange
 	) {
 		return response(exchange, HttpStatus.TOO_MANY_REQUESTS, "login_rate_limited", "Login rate limited",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(InvalidRefreshTokenException.class)
+	ResponseEntity<ApiError> handleInvalidRefreshToken(
+			InvalidRefreshTokenException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.UNAUTHORIZED, "invalid_session", "Invalid session",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(PasswordPolicyViolationException.class)
+	ResponseEntity<ApiError> handlePasswordPolicyViolation(
+			PasswordPolicyViolationException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "password_policy_violation", "Password rejected",
 				exception.getMessage(), Map.of());
 	}
 

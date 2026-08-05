@@ -9,12 +9,15 @@ import com.camel_hub.advertisement.identity.domain.UserStatus;
 import com.camel_hub.advertisement.identity.persistence.IdentityRepository;
 import com.camel_hub.advertisement.identity.security.AccessTokenService;
 import com.camel_hub.advertisement.identity.security.LoginRateLimiter;
+import com.camel_hub.advertisement.identity.security.PasswordPolicy;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 public class AuthenticationService {
 
@@ -23,6 +26,9 @@ public class AuthenticationService {
 	private final AuditService auditService;
 	private final PasswordEncoder passwordEncoder;
 	private final AccessTokenService accessTokenService;
+	private final RefreshSessionService refreshSessions;
+	private final PasswordPolicy passwordPolicy;
+	private final TransactionalOperator transactions;
 	private final String dummyPasswordHash;
 
 	public AuthenticationService(
@@ -30,13 +36,19 @@ public class AuthenticationService {
 			LoginRateLimiter rateLimiter,
 			AuditService auditService,
 			PasswordEncoder passwordEncoder,
-			AccessTokenService accessTokenService
+			AccessTokenService accessTokenService,
+			RefreshSessionService refreshSessions,
+			PasswordPolicy passwordPolicy,
+			TransactionalOperator transactions
 	) {
 		this.identityRepository = identityRepository;
 		this.rateLimiter = rateLimiter;
 		this.auditService = auditService;
 		this.passwordEncoder = passwordEncoder;
 		this.accessTokenService = accessTokenService;
+		this.refreshSessions = refreshSessions;
+		this.passwordPolicy = passwordPolicy;
+		this.transactions = transactions;
 		this.dummyPasswordHash = passwordEncoder.encode("Dummy!Credential92");
 	}
 
@@ -73,14 +85,88 @@ public class AuthenticationService {
 			AuthenticationRequestContext context
 	) {
 		AuthenticatedUser user = AuthenticatedUser.from(account);
-		AuthenticationResult result = new AuthenticationResult(accessTokenService.issue(user), user);
 		return rateLimiter.record(principal, context.ipAddress(), true, null)
 				.then(identityRepository.updateLastLogin(account.id()))
 				.then(auditService.record(new AuditEvent(
 						account.id(), "AUTH_LOGIN_SUCCESS", "USER", account.id().toString(),
 						rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
 						Map.of(), Map.of("status", "AUTHENTICATED"), AuditResult.SUCCESS, null)))
-				.thenReturn(result);
+				.then(refreshSessions.issue(account.id(), context))
+				.map(refresh -> new AuthenticationResult(
+						accessTokenService.issue(user), user, refresh.rawToken()));
+	}
+
+	public Mono<AuthenticationResult> refresh(String rawToken, AuthenticationRequestContext context) {
+		return refreshSessions.rotate(rawToken, context)
+				.flatMap(rotated -> {
+					AuthenticatedUser user = AuthenticatedUser.from(rotated.account());
+					return auditService.record(new AuditEvent(
+							user.id(), "AUTH_REFRESH_SUCCESS", "REFRESH_FAMILY", rotated.familyId().toString(),
+							rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
+							Map.of(), Map.of("status", "ROTATED"), AuditResult.SUCCESS, null))
+							.thenReturn(new AuthenticationResult(
+									accessTokenService.issue(user), user, rotated.rawToken()));
+				});
+	}
+
+	public Mono<Void> logout(String rawToken, AuthenticationRequestContext context) {
+		return refreshSessions.revoke(rawToken)
+				.flatMap(userId -> auditService.record(new AuditEvent(
+						userId, "AUTH_LOGOUT", "USER", userId.toString(),
+						rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
+						Map.of(), Map.of("status", "REVOKED"), AuditResult.SUCCESS, null)))
+				.then();
+	}
+
+	public Mono<Void> changePassword(
+			UUID userId,
+			String currentPassword,
+			String newPassword,
+			AuthenticationRequestContext context
+	) {
+		return identityRepository.findById(userId)
+				.switchIfEmpty(Mono.error(new AuthenticationFailedException()))
+				.flatMap(account -> passwordMatches(currentPassword, account.passwordHash())
+						.flatMap(matches -> matches && account.status() == UserStatus.ACTIVE
+								? validateAndChangePassword(account, newPassword, context)
+								: passwordChangeFailed(account, context)));
+	}
+
+	private Mono<Void> validateAndChangePassword(
+			UserAccount account,
+			String newPassword,
+			AuthenticationRequestContext context
+	) {
+		Mono<String> encodedPassword = Mono.fromCallable(() -> {
+			try {
+				passwordPolicy.validate(newPassword, account.username(), account.email());
+			}
+			catch (IllegalArgumentException exception) {
+				throw new PasswordPolicyViolationException(exception.getMessage());
+			}
+			return passwordEncoder.encode(newPassword);
+		}).subscribeOn(Schedulers.boundedElastic());
+
+		return encodedPassword.flatMap(encoded -> transactions.transactional(
+				identityRepository.updatePassword(account.id(), encoded)
+						.then(refreshSessions.revokeAll(account.id()))
+						.then(auditService.record(new AuditEvent(
+								account.id(), "AUTH_PASSWORD_CHANGE", "USER", account.id().toString(),
+								rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
+								Map.of("tokenVersion", account.tokenVersion()),
+								Map.of("tokenVersion", account.tokenVersion() + 1, "sessions", "REVOKED"),
+								AuditResult.SUCCESS, null)))));
+	}
+
+	private Mono<Void> passwordChangeFailed(
+			UserAccount account,
+			AuthenticationRequestContext context
+	) {
+		return auditService.record(new AuditEvent(
+				account.id(), "AUTH_PASSWORD_CHANGE", "USER", account.id().toString(),
+				rateLimiter.ipHash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
+				Map.of(), Map.of("status", "REJECTED"), AuditResult.FAILURE, "BAD_CREDENTIALS"))
+				.then(Mono.error(new AuthenticationFailedException()));
 	}
 
 	private Mono<AuthenticationResult> loginFailed(
