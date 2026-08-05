@@ -46,8 +46,11 @@ class FlywayMigrationTest {
 		assertThat(flyway.migrate().success).isTrue();
 		assertThat(tableNames()).contains(
 				"users",
+				"arxiv_category_snapshots",
 				"arxiv_categories",
+				"arxiv_sync_cursors",
 				"papers",
+				"paper_imports",
 				"contacts",
 				"jobs",
 				"campaigns",
