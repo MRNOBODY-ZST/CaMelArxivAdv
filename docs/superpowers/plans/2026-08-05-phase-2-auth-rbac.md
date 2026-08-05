@@ -41,17 +41,17 @@
 - Consumes: V1 identity tables and environment configuration.
 - Produces: `AuthProperties`, 26 permission rows, `SUPER_ADMIN`, `ADMIN`, `CAMPAIGN_MANAGER`, `DATA_ANALYST`, `VIEWER`, and their deterministic grants.
 
-- [ ] **Step 1: Extend the migration test with failing RBAC assertions**
+- [x] **Step 1: Extend the migration test with failing RBAC assertions**
 
 Assert exactly 26 prompt permission codes, five system roles, all permissions on `SUPER_ADMIN`, no `contact:read_full` on `VIEWER`, and no plaintext default user password in migration SQL.
 
-- [ ] **Step 2: Run the focused migration test**
+- [x] **Step 2: Run the focused migration test**
 
 Run: `cd backend && ./gradlew test --tests '*FlywayMigrationTest'`
 
 Expected: FAIL because V5 and default grants do not exist.
 
-- [ ] **Step 3: Add OAuth2/Jose dependencies, V5 seed data and validated properties**
+- [x] **Step 3: Add OAuth2/Jose dependencies, V5 seed data and validated properties**
 
 Add `spring-boot-starter-oauth2-resource-server`. Create a V5 migration using `INSERT ... ON CONFLICT DO NOTHING`; use role-to-permission `INSERT ... SELECT` statements so UUID values stay database-generated. `AuthProperties` must expose:
 
@@ -71,7 +71,7 @@ public record AuthProperties(
 
 Validate decoded signing/HMAC keys are each at least 32 bytes. Default `cookie.secure=true`; `docker-compose.dev.yml` sets only `AUTH_COOKIE_SECURE=false`.
 
-- [ ] **Step 4: Verify migrations, properties and Compose secrets wiring**
+- [x] **Step 4: Verify migrations, properties and Compose secrets wiring**
 
 Run: `cd backend && ./gradlew test --tests '*FlywayMigrationTest' --tests '*AuthPropertiesTest'`
 
@@ -79,7 +79,7 @@ Run: `bash scripts/verify-compose.sh`
 
 Expected: all focused tests and the Compose contract pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/build.gradle backend/src/main/resources backend/src/main/java/com/camel_hub/advertisement/identity/config backend/src/test .env.example docker-compose.yml docker-compose.dev.yml scripts/verify-compose.sh
@@ -104,17 +104,17 @@ git commit -m "feat: seed RBAC and authentication configuration"
 - Consumes: `AuthProperties`, seeded `SUPER_ADMIN`, `DatabaseClient`, `PasswordEncoder`.
 - Produces: case-insensitive user lookup, safe role/permission loading, user mutation methods and one-time initial admin creation.
 
-- [ ] **Step 1: Write failing password, repository and bootstrap tests**
+- [x] **Step 1: Write failing password, repository and bootstrap tests**
 
 Cover: minimum 12 characters, upper/lower/digit/symbol, rejection of username/email fragments; lookup by mixed-case username/email; disabled status preservation; permissions returned as an immutable set; initial admin created once with BCrypt hash, `SUPER_ADMIN`, and `forcePasswordChange=true`; a second startup is idempotent.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd backend && ./gradlew test --tests '*PasswordPolicyTest' --tests '*IdentityRepositoryTest' --tests '*InitialAdminBootstrapTest'`
 
 Expected: FAIL because the identity services are absent.
 
-- [ ] **Step 3: Implement focused domain and persistence classes**
+- [x] **Step 3: Implement focused domain and persistence classes**
 
 Use explicit SQL projections with `DatabaseClient`; never map `password_hash` into an outward DTO. Configure:
 
@@ -127,7 +127,7 @@ PasswordEncoder passwordEncoder() {
 
 `InitialAdminBootstrap` skips cleanly when any bootstrap credential is blank, rejects policy-invalid passwords, and never logs the supplied password.
 
-- [ ] **Step 4: Verify tests and database state**
+- [x] **Step 4: Verify tests and database state**
 
 Run: `cd backend && ./gradlew test --tests '*PasswordPolicyTest' --tests '*IdentityRepositoryTest' --tests '*InitialAdminBootstrapTest'`
 
