@@ -29,6 +29,27 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, pageTitle: '修改密码', pageSection: '账号安全' },
   },
   {
+    path: '/arxiv/discovery', name: 'arxiv-discovery',
+    component: () => import('@/modules/arxiv/ArxivDiscoveryView.vue'),
+    meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '论文发现', pageSection: 'arXiv 数据' },
+  },
+  {
+    path: '/jobs', name: 'import-jobs', component: () => import('@/modules/jobs/ImportJobsView.vue'),
+    meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '导入任务', pageSection: 'arXiv 数据' },
+  },
+  {
+    path: '/jobs/:id', name: 'job-detail', component: () => import('@/modules/jobs/JobDetailView.vue'),
+    meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '任务详情', pageSection: 'arXiv 数据' },
+  },
+  {
+    path: '/papers', name: 'papers', component: () => import('@/modules/papers/PapersView.vue'),
+    meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '论文库', pageSection: 'arXiv 数据' },
+  },
+  {
+    path: '/papers/:id', name: 'paper-detail', component: () => import('@/modules/papers/PaperDetailView.vue'),
+    meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '论文详情', pageSection: 'arXiv 数据' },
+  },
+  {
     path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
     meta: {
       requiresAuth: true, permissions: ['user:read'], pageTitle: '用户管理', pageSection: '系统管理',
