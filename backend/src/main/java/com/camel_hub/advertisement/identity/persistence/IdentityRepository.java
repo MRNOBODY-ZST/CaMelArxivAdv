@@ -92,6 +92,18 @@ public final class IdentityRepository {
 				.defaultIfEmpty(false);
 	}
 
+	public Mono<Void> updateLastLogin(UUID userId) {
+		return databaseClient.sql("""
+				UPDATE users
+				SET last_login_at = now(), updated_at = now()
+				WHERE id = :userId
+				""")
+				.bind("userId", userId)
+				.fetch()
+				.rowsUpdated()
+				.then();
+	}
+
 	private UserAccount mapUser(Row row) {
 		return new UserAccount(
 				row.get("id", UUID.class),

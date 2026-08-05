@@ -19,6 +19,8 @@ public class SecurityConfiguration {
 				.logout(ServerHttpSecurity.LogoutSpec::disable)
 				.authorizeExchange(exchanges -> exchanges
 						.pathMatchers(
+								"/api/v1/auth/login",
+								"/api/v1/auth/refresh",
 								"/api/v1/system/health",
 								"/actuator/health/**",
 								"/actuator/info",

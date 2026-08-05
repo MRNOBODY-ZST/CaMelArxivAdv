@@ -133,7 +133,7 @@ Run: `cd backend && ./gradlew test --tests '*PasswordPolicyTest' --tests '*Ident
 
 Expected: PASS; stored hash starts with `$2` and raw password is absent from captured logs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/com/camel_hub/advertisement/identity backend/src/test/java/com/camel_hub/advertisement/identity
@@ -158,17 +158,17 @@ git commit -m "feat: add identity persistence and admin bootstrap"
 - Consumes: `IdentityRepository`, `PasswordEncoder`, `AuthProperties`, `TraceIdWebFilter` exchange attribute.
 - Produces: `POST /api/v1/auth/login`, signed JWT claims `sub`, `username`, `roles`, `permissions`, `tokenVersion`, `mustChangePassword`, and sanitized audit records.
 
-- [ ] **Step 1: Write failing login/security tests**
+- [x] **Step 1: Write failing login/security tests**
 
 Test username and email login, identical `401` body for unknown/wrong password, disabled/locked denial, fifth failure returning `429`, success clearing the effective failure streak, 10-minute JWT expiry, no password/token in logs or audit JSON, and audit `AUTH_LOGIN_SUCCESS`/`AUTH_LOGIN_FAILURE`.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd backend && ./gradlew test --tests '*LoginApiTest' --tests '*LoginRateLimiterTest' --tests '*AuditServiceTest'`
 
 Expected: FAIL because login is not implemented.
 
-- [ ] **Step 3: Implement login with constant-shape failures**
+- [x] **Step 3: Implement login with constant-shape failures**
 
 `LoginRateLimiter` hashes normalized principal and IP with HMAC before storage. Unknown users still execute `PasswordEncoder.matches` against a fixed dummy BCrypt hash. A successful login updates `last_login_at`, inserts a success attempt and audit event, then returns:
 
@@ -188,7 +188,7 @@ Expected: FAIL because login is not implemented.
 }
 ```
 
-- [ ] **Step 4: Verify focused tests and inspect JWT contents**
+- [x] **Step 4: Verify focused tests and inspect JWT contents**
 
 Run: `cd backend && ./gradlew test --tests '*LoginApiTest' --tests '*LoginRateLimiterTest' --tests '*AuditServiceTest'`
 

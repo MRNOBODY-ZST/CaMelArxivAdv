@@ -1,9 +1,14 @@
 package com.camel_hub.advertisement.identity.config;
 
+import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.identity.bootstrap.InitialAdminBootstrap;
 import com.camel_hub.advertisement.identity.persistence.IdentityRepository;
+import com.camel_hub.advertisement.identity.security.AccessTokenService;
+import com.camel_hub.advertisement.identity.security.LoginRateLimiter;
 import com.camel_hub.advertisement.identity.security.PasswordPolicy;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
+import com.camel_hub.advertisement.identity.service.AuthenticationService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -34,9 +39,44 @@ public class IdentityConfiguration {
 	}
 
 	@Bean
+	@Lazy
+	AccessTokenService accessTokenService(AuthProperties properties) {
+		return new AccessTokenService(properties);
+	}
+
+	@Bean
 	@ConditionalOnBean(DatabaseClient.class)
 	IdentityRepository identityRepository(DatabaseClient databaseClient) {
 		return new IdentityRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnBean(DatabaseClient.class)
+	AuditService auditService(DatabaseClient databaseClient, ObjectMapper objectMapper) {
+		return new AuditService(databaseClient, objectMapper);
+	}
+
+	@Bean
+	@ConditionalOnBean(DatabaseClient.class)
+	LoginRateLimiter loginRateLimiter(
+			DatabaseClient databaseClient,
+			SensitiveValueHasher hasher,
+			AuthProperties properties
+	) {
+		return new LoginRateLimiter(databaseClient, hasher, properties);
+	}
+
+	@Bean
+	@ConditionalOnBean(DatabaseClient.class)
+	AuthenticationService authenticationService(
+			IdentityRepository repository,
+			LoginRateLimiter rateLimiter,
+			AuditService auditService,
+			PasswordEncoder passwordEncoder,
+			AccessTokenService accessTokenService
+	) {
+		return new AuthenticationService(
+				repository, rateLimiter, auditService, passwordEncoder, accessTokenService);
 	}
 
 	@Bean

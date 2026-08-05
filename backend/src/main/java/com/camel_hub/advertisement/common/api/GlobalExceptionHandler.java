@@ -1,6 +1,8 @@
 package com.camel_hub.advertisement.common.api;
 
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
+import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
+import com.camel_hub.advertisement.identity.service.LoginRateLimitedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -54,6 +56,24 @@ public class GlobalExceptionHandler {
 				"You do not have permission to perform this operation", Map.of());
 	}
 
+	@ExceptionHandler(AuthenticationFailedException.class)
+	ResponseEntity<ApiError> handleAuthenticationFailed(
+			AuthenticationFailedException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.UNAUTHORIZED, "authentication_failed", "Authentication failed",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(LoginRateLimitedException.class)
+	ResponseEntity<ApiError> handleLoginRateLimited(
+			LoginRateLimitedException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.TOO_MANY_REQUESTS, "login_rate_limited", "Login rate limited",
+				exception.getMessage(), Map.of());
+	}
+
 	@ExceptionHandler(ResponseStatusException.class)
 	ResponseEntity<ApiError> handleResponseStatus(ResponseStatusException exception, ServerWebExchange exchange) {
 		HttpStatus status = HttpStatus.resolve(exception.getStatusCode().value());
@@ -88,4 +108,3 @@ public class GlobalExceptionHandler {
 		return ResponseEntity.status(status).body(error);
 	}
 }
-
