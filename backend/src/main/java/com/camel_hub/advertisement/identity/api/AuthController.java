@@ -7,7 +7,7 @@ import com.camel_hub.advertisement.identity.service.AuthenticationResult;
 import com.camel_hub.advertisement.identity.service.AuthenticationService;
 import com.camel_hub.advertisement.identity.service.InvalidRefreshTokenException;
 import jakarta.validation.Valid;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.CookieValue;
@@ -25,7 +25,8 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/auth")
-@ConditionalOnBean(AuthenticationService.class)
+@ConditionalOnProperty(
+		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class AuthController {
 
 	private static final int MAXIMUM_USER_AGENT_LENGTH = 255;

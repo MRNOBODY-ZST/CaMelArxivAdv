@@ -2,6 +2,9 @@ package com.camel_hub.advertisement.common.api;
 
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.identity.service.AuthenticationFailedException;
+import com.camel_hub.advertisement.identity.service.AdministrationConflictException;
+import com.camel_hub.advertisement.identity.service.AdministrationNotFoundException;
+import com.camel_hub.advertisement.identity.service.AdministrationValidationException;
 import com.camel_hub.advertisement.identity.service.InvalidRefreshTokenException;
 import com.camel_hub.advertisement.identity.service.LoginRateLimitedException;
 import com.camel_hub.advertisement.identity.service.PasswordPolicyViolationException;
@@ -91,6 +94,33 @@ public class GlobalExceptionHandler {
 			ServerWebExchange exchange
 	) {
 		return response(exchange, HttpStatus.BAD_REQUEST, "password_policy_violation", "Password rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(AdministrationValidationException.class)
+	ResponseEntity<ApiError> handleAdministrationValidation(
+			AdministrationValidationException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_operation", "Operation rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(AdministrationConflictException.class)
+	ResponseEntity<ApiError> handleAdministrationConflict(
+			AdministrationConflictException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "resource_conflict", "Resource conflict",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(AdministrationNotFoundException.class)
+	ResponseEntity<ApiError> handleAdministrationNotFound(
+			AdministrationNotFoundException exception,
+			ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "resource_not_found", "Resource not found",
 				exception.getMessage(), Map.of());
 	}
 

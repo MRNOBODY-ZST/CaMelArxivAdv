@@ -52,6 +52,8 @@ springdoc:
 
 app:
   live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+  persistence:
+    enabled: ${APP_PERSISTENCE_ENABLED:true}
   auth:
     access-token-ttl: ${AUTH_ACCESS_TOKEN_TTL:PT10M}
     refresh-token-ttl: ${AUTH_REFRESH_TOKEN_TTL:P14D}

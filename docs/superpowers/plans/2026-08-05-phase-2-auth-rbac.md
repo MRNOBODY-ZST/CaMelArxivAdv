@@ -279,7 +279,7 @@ Run: `cd backend && ./gradlew test --tests '*ResourceServerAuthorizationTest' --
 
 Expected: PASS; frontend-hidden routes remain forbidden by backend authorization.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/com/camel_hub/advertisement/common/security backend/src/main/java/com/camel_hub/advertisement/identity backend/src/main/java/com/camel_hub/advertisement/contact backend/src/test
@@ -303,21 +303,21 @@ git commit -m "feat: enforce live JWT permissions"
 - Consumes: method security, identity repository, password policy and audit service.
 - Produces: all `/api/v1/users`, `/roles`, `/permissions`, `/audit-logs` endpoints from the prompt plus `POST /users/{id}/reset-password`.
 
-- [ ] **Step 1: Write failing administration API tests**
+- [x] **Step 1: Write failing administration API tests**
 
 Verify required permission on every endpoint; create/update/disable/enable; admin reset sets force-change and invalidates sessions; system role code cannot be renamed/deleted; custom role grants must be known permission codes; the last active `SUPER_ADMIN` cannot be disabled or stripped; audits contain before/after summaries but no hashes/tokens/passwords.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cd backend && ./gradlew test --tests '*UserAdminApiTest' --tests '*RoleAdminApiTest' --tests '*AuditLogApiTest'`
 
 Expected: FAIL because administration controllers are absent.
 
-- [ ] **Step 3: Implement paginated, authorized services**
+- [x] **Step 3: Implement paginated, authorized services**
 
 Use `@PreAuthorize("hasAuthority('user:read')")` and the matching prompt codes. All writes execute in transactions, increment affected user token versions when role/status/password changes, and return outward records that omit password/refresh hashes. Audit query supports time, actor, action, resource and result filters.
 
-- [ ] **Step 4: Verify focused tests and OpenAPI**
+- [x] **Step 4: Verify focused tests and OpenAPI**
 
 Run: `cd backend && ./gradlew test --tests '*UserAdminApiTest' --tests '*RoleAdminApiTest' --tests '*AuditLogApiTest'`
 
