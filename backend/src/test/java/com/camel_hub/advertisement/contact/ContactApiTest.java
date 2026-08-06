@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.common.api.PageResponse;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.server.WebFilter;
@@ -32,8 +33,10 @@ class ContactApiTest {
 		AuthenticatedUser user = new AuthenticatedUser(
 				UUID.randomUUID(), "analyst", "Analyst", Set.of("DATA_ANALYST"),
 				Set.of("contact:read_masked"), false, 0);
+		var authentication = UsernamePasswordAuthenticationToken.authenticated(
+				user, "token", List.of());
 		WebFilter principal = (exchange, chain) -> chain.filter(
-				exchange.mutate().principal(Mono.just(user)).build());
+				exchange.mutate().principal(Mono.just(authentication)).build());
 		client = WebTestClient.bindToController(new ContactController(service))
 				.controllerAdvice(new GlobalExceptionHandler(null, null)).webFilter(principal).build();
 	}

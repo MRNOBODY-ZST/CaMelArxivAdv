@@ -6,6 +6,7 @@ import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -74,7 +75,9 @@ public class ContactController {
 	}
 
 	private AuthenticatedUser user(Principal principal) {
-		if (principal instanceof AuthenticatedUser user) {
+		Object candidate = principal instanceof Authentication authentication
+				? authentication.getPrincipal() : principal;
+		if (candidate instanceof AuthenticatedUser user) {
 			return user;
 		}
 		throw new AccessDeniedException("Authenticated user is required");
