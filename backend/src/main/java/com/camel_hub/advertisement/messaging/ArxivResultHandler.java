@@ -115,7 +115,10 @@ public class ArxivResultHandler {
 			case "ARXIV_JOB_COMPLETED" -> "ARXIV_SYNC_TAXONOMY".equals(job.type())
 					? applyTaxonomySnapshot(message, job)
 						.then(repository.applyTerminal(job.id(), payload))
-					: repository.applyTerminal(job.id(), payload)
+					: (isExtractionJob(job.type())
+							? repository.assertExtractionItemsTerminal(job.id(), payload)
+								.then(repository.applyTerminal(job.id(), payload))
+							: repository.applyTerminal(job.id(), payload))
 						.then("ARXIV_SYNC_OAI".equals(job.type())
 								? repository.markSyncComplete(job.id()) : Mono.empty());
 			case "ARXIV_JOB_FAILED" -> repository.applyTerminal(job.id(), payload)
@@ -124,6 +127,11 @@ public class ArxivResultHandler {
 			default -> Mono.error(new IllegalArgumentException("Result message type is unsupported"));
 		};
 		return mutation.then(repository.appendEvent(job.id(), message.type(), payload, details));
+	}
+
+	private boolean isExtractionJob(String jobType) {
+		return Set.of("ARXIV_FETCH_AND_PARSE_SOURCE", "ARXIV_REEXTRACT_CONTACTS")
+				.contains(jobType);
 	}
 
 	private Mono<Void> applyExtraction(
@@ -310,9 +318,11 @@ public class ArxivResultHandler {
 			throw new IllegalArgumentException("Extraction result collections are invalid");
 		}
 		Set<Integer> orders = new java.util.HashSet<>();
+		Set<String> normalizedNames = new java.util.HashSet<>();
 		for (ArxivResultMessage.SourceAuthor author : authors) {
 			if (author == null || author.order() < 1 || author.order() > 500
 					|| !orders.add(author.order()) || invalidText(author.name(), 300)
+					|| !normalizedNames.add(normalizedAuthorName(author.name()))
 					|| author.affiliations() == null || author.affiliations().size() > 100
 					|| author.affiliations().stream().anyMatch(value -> invalidText(value, 2000))) {
 				throw new IllegalArgumentException("Extraction author is invalid");
@@ -321,6 +331,11 @@ public class ArxivResultHandler {
 		for (ArxivResultMessage.SourceContact contact : contacts) {
 			validateContact(contact, orders);
 		}
+	}
+
+	private String normalizedAuthorName(String value) {
+		return java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC)
+				.strip().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
 	}
 
 	private void validateContact(ArxivResultMessage.SourceContact contact, Set<Integer> orders) {

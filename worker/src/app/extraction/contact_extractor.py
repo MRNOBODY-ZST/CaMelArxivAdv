@@ -71,6 +71,47 @@ def extract_contacts(corpus: TexCorpus) -> ExtractionDocument:
         for command in commands:
             if command.name.lower() not in _AUTHOR_NAMES:
                 continue
+            ieee_name_blocks = [
+                item
+                for item in commands
+                if item.name.lower() == "ieeeauthorblockn"
+                and command.start < item.start
+                and item.end <= command.end
+            ]
+            if ieee_name_blocks:
+                for index, block in enumerate(ieee_name_blocks):
+                    segment_end = (
+                        ieee_name_blocks[index + 1].start
+                        if index + 1 < len(ieee_name_blocks)
+                        else command.end
+                    )
+                    block_affiliations = _ieee_affiliations(
+                        commands, block.end, segment_end
+                    )
+                    for raw_name in _author_names(block.argument):
+                        name = re.sub(
+                            r"^\s*\d+(?:st|nd|rd|th)\s+",
+                            "",
+                            raw_name,
+                            flags=re.I,
+                        )
+                        if not name:
+                            continue
+                        order = len(authors) + 1
+                        authors.append(
+                            ExtractedAuthor(
+                                order=order,
+                                name=name,
+                                affiliations=block_affiliations,
+                                corresponding=bool(
+                                    re.search(
+                                        r"correspond|corref", command.argument, re.I
+                                    )
+                                ),
+                            )
+                        )
+                        spans.append(_AuthorSpan((order,), block.start, segment_end))
+                continue
             names = _author_names(command.argument)
             orders: list[int] = []
             for name in names:
@@ -231,6 +272,24 @@ def _nearby_affiliations(
         and item.name.lower() in _AFFILIATION_COMMANDS
     ]
     values = tuple(value for item in following[:5] if (value := _plain_tex(item.argument)))
+    return tuple(dict.fromkeys(values))
+
+
+def _ieee_affiliations(
+    commands: tuple[_Command, ...], start: int, end: int
+) -> tuple[str, ...]:
+    values: list[str] = []
+    for command in commands:
+        if (
+            command.name.lower() != "ieeeauthorblocka"
+            or command.start < start
+            or command.end > end
+        ):
+            continue
+        without_email = _EMAIL.sub("", _tex_unescape(command.argument))
+        value = _plain_tex(without_email)
+        if value:
+            values.append(value)
     return tuple(dict.fromkeys(values))
 
 

@@ -73,6 +73,35 @@ def test_common_document_families_keep_explicit_addresses(tmp_path: Path, source
     assert result.contacts[0].normalized_email == "alice@uni.edu"
 
 
+def test_ieee_author_blocks_do_not_promote_affiliations_or_emails_to_authors(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{IEEEtran}
+\author{
+\IEEEauthorblockN{1st Kacper Kenji Lesniak}
+\IEEEauthorblockA{University of Copenhagen and Dynasty Studios\\
+Copenhagen, Denmark\\ kkl@di.ku.dk}
+\and
+\IEEEauthorblockN{2nd Maria Maistro}
+\IEEEauthorblockA{University of Copenhagen\\
+Copenhagen, Denmark\\ mm@di.ku.dk}}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [author.name for author in result.authors] == [
+        "Kacper Kenji Lesniak",
+        "Maria Maistro",
+    ]
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "kkl@di.ku.dk",
+        "mm@di.ku.dk",
+    ]
+    assert [contact.author_order for contact in result.contacts] == [1, 2]
+
+
 def test_body_and_bibliography_addresses_are_not_promoted_to_contacts(tmp_path: Path) -> None:
     result = extract(
         tmp_path,

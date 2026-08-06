@@ -32,6 +32,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 			.withDatabaseName("camel_source_result_test").withUsername("camel").withPassword("test-only");
 	private static final UUID ACTOR = UUID.fromString("8cd94cdf-79dd-4d50-a1fb-244e73f9a802");
 	private static final UUID PAPER = UUID.fromString("615e263f-0041-48f6-9331-7a3e909344c6");
+	private static final UUID AUTHOR = UUID.fromString("9727ea06-7c20-4c44-af99-9481f21d5df2");
 	private DatabaseClient databaseClient;
 	private ArxivResultHandler handler;
 	private ContactCrypto crypto;
@@ -78,6 +79,9 @@ class SourceExtractionResultHandlerIntegrationTest {
 				.isEqualTo("SUCCEEDED");
 		assertThat(text("SELECT confidence FROM paper_author_contacts LIMIT 1"))
 				.isEqualTo("HIGH");
+		assertThat(count("paper_authors")).isEqualTo(1);
+		assertThat(text("SELECT raw_name FROM paper_authors WHERE paper_id = '" + PAPER + "'"))
+				.isEqualTo("Alice Metadata");
 		assertThat(text("SELECT masked_context FROM extraction_evidence LIMIT 1"))
 				.contains("al***@university.edu").doesNotContain("alice@university.edu");
 		assertThat(text("SELECT details::text FROM job_events WHERE event_type = 'ARXIV_EXTRACTION_RESULT'"))
@@ -101,7 +105,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 				.collectList().block();
 		assertThat(rows).hasSize(1);
 		var contact = rows.getFirst();
-		assertThat(contact.authorName()).isEqualTo("Alice Example");
+		assertThat(contact.authorName()).isEqualTo("Alice Metadata");
 		assertThat(contacts.find(contact.id()).block().paperId()).isEqualTo(PAPER);
 		assertThat(contacts.evidence(contact.mappingId()).collectList().block())
 				.singleElement().satisfies(item -> assertThat(item.maskedContext())
@@ -121,6 +125,23 @@ class SourceExtractionResultHandlerIntegrationTest {
 			assertThat(run.contactsFound()).isEqualTo(1);
 			assertThat(run.cleanupConfirmed()).isTrue();
 		});
+	}
+
+	@Test
+	void refusesSourceCompletionUntilEveryItemResultWasPersisted() {
+		String premature = completionMessage(UUID.randomUUID());
+
+		assertThatThrownBy(() -> handler.handle(premature).block())
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("item results");
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+
+		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("SUCCEEDED");
 	}
 
 	@Test
@@ -157,6 +178,17 @@ class SourceExtractionResultHandlerIntegrationTest {
 				 "lineNumber":4,"logicalLocation":"AUTHOR_FRONT_MATTER",
 				 "maskedContext":"Corresponding author: %s"}]}]}]}}
 				""".formatted(messageId, jobId, messageId, PAPER, context);
+	}
+
+	private String completionMessage(UUID messageId) {
+		return """
+				{"version":1,"messageId":"%s","type":"ARXIV_JOB_COMPLETED","jobId":"%s",
+				 "idempotencyKey":"source-complete:%s","traceId":"0123456789abcdef",
+				 "occurredAt":"2026-08-06T01:00:01Z","payload":{
+				 "status":"SUCCEEDED","stage":"COMPLETED","processedCount":1,
+				 "successCount":1,"skippedCount":0,"failedCount":0,"totalCount":1,
+				 "progressPercent":100,"checkpoint":{},"papers":[],"extractions":[]}}
+				""".formatted(messageId, jobId, messageId);
 	}
 
 	private void clear() {
@@ -199,6 +231,15 @@ class SourceExtractionResultHandlerIntegrationTest {
 				       now(), now(), 'https://arxiv.org/pdf/2608.00001'
 				FROM arxiv_categories WHERE category_id = 'cs.AI'
 				""").bind("paper", PAPER).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO authors (id, normalized_name, display_name)
+				VALUES (:author, 'alice metadata', 'Alice Metadata')
+				""").bind("author", AUTHOR).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO paper_authors (
+				  paper_id, author_id, author_order, raw_name, affiliation_data)
+				VALUES (:paper, :author, 1, 'Alice Metadata', '[]'::jsonb)
+				""").bind("paper", PAPER).bind("author", AUTHOR).fetch().rowsUpdated().block();
 		jobId = UUID.randomUUID();
 		databaseClient.sql("""
 				INSERT INTO jobs (

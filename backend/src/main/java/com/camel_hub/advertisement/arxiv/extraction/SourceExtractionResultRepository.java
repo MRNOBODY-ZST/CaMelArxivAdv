@@ -124,9 +124,18 @@ public final class SourceExtractionResultRepository {
 		return Flux.fromIterable(safe(result.authors())).concatMap(author -> {
 			String display = normalizeName(author.name());
 			String normalized = display.toLowerCase(Locale.ROOT);
-			return findOrCreateAuthor(normalized, display)
+			return existingPaperAuthor(result.paperId(), author.order())
+					.switchIfEmpty(findOrCreateAuthor(normalized, display))
 					.flatMap(authorId -> upsertPaperAuthor(result.paperId(), authorId, author, display));
 		});
+	}
+
+	private Mono<UUID> existingPaperAuthor(UUID paperId, int authorOrder) {
+		return databaseClient.sql("""
+				SELECT author_id FROM paper_authors
+				WHERE paper_id = :paperId AND author_order = :authorOrder
+				""").bind("paperId", paperId).bind("authorOrder", authorOrder)
+				.map((row, metadata) -> row.get("author_id", UUID.class)).one();
 	}
 
 	private Mono<UUID> findOrCreateAuthor(String normalized, String display) {
@@ -156,11 +165,14 @@ public final class SourceExtractionResultRepository {
 				  :paperId, :authorId, :authorOrder, :corresponding,
 				  :rawName, :affiliationText, CAST(:affiliations AS jsonb))
 				ON CONFLICT (paper_id, author_order) DO UPDATE SET
-				  author_id = EXCLUDED.author_id,
-				  corresponding_author = EXCLUDED.corresponding_author,
-				  raw_name = EXCLUDED.raw_name,
-				  affiliation_text = EXCLUDED.affiliation_text,
-				  affiliation_data = EXCLUDED.affiliation_data
+				  corresponding_author = paper_authors.corresponding_author
+				                             OR EXCLUDED.corresponding_author,
+				  affiliation_text = CASE WHEN EXCLUDED.affiliation_text = ''
+				                          THEN paper_authors.affiliation_text
+				                          ELSE EXCLUDED.affiliation_text END,
+				  affiliation_data = CASE WHEN EXCLUDED.affiliation_data = '[]'::jsonb
+				                          THEN paper_authors.affiliation_data
+				                          ELSE EXCLUDED.affiliation_data END
 				RETURNING id
 				""").bind("paperId", paperId).bind("authorId", authorId)
 				.bind("authorOrder", author.order()).bind("corresponding", author.corresponding())

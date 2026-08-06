@@ -128,6 +128,34 @@ public class ArxivResultRepository {
 				.fetch().rowsUpdated().then();
 	}
 
+	public Mono<Void> assertExtractionItemsTerminal(
+			UUID jobId,
+			ArxivResultMessage.Payload payload
+	) {
+		return databaseClient.sql("""
+				SELECT count(*) AS total,
+				       count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded,
+				       count(*) FILTER (WHERE status = 'SKIPPED') AS skipped,
+				       count(*) FILTER (WHERE status = 'FAILED') AS failed,
+				       count(*) FILTER (WHERE status IN ('PENDING','RUNNING')) AS pending
+				FROM job_items WHERE job_id = :jobId
+				""").bind("jobId", jobId).map((row, metadata) -> new ItemTotals(
+						value(row.get("total", Long.class)),
+						value(row.get("succeeded", Long.class)),
+						value(row.get("skipped", Long.class)),
+						value(row.get("failed", Long.class)),
+						value(row.get("pending", Long.class)))).one()
+				.flatMap(totals -> totals.total() > 0 && totals.pending() == 0
+						&& totals.total() == payload.totalCount()
+						&& totals.total() == payload.processedCount()
+						&& totals.succeeded() == payload.successCount()
+						&& totals.skipped() == payload.skippedCount()
+						&& totals.failed() == payload.failedCount()
+						? Mono.empty()
+						: Mono.error(new IllegalArgumentException(
+								"Source job cannot complete before all item results are persisted")));
+	}
+
 	public Mono<Void> upsertSyncCursor(UUID jobId, String checkpointJson) {
 		return databaseClient.sql("""
 				INSERT INTO arxiv_sync_cursors (
@@ -210,6 +238,10 @@ public class ArxivResultRepository {
 		return Math.max(0, Math.min(100, value));
 	}
 
+	private long value(Long value) {
+		return value == null ? 0 : value;
+	}
+
 	private String eventMessage(String type) {
 		return switch (type) {
 			case "ARXIV_JOB_STARTED" -> "Worker started the arXiv job";
@@ -224,4 +256,6 @@ public class ArxivResultRepository {
 
 	public record JobRecord(UUID id, String type, String status) {
 	}
+
+	private record ItemTotals(long total, long succeeded, long skipped, long failed, long pending) { }
 }
