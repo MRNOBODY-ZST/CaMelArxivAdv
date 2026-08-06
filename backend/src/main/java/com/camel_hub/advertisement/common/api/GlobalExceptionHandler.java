@@ -10,6 +10,7 @@ import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionConflictExce
 import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionNotFoundException;
 import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionValidationException;
 import com.camel_hub.advertisement.arxiv.paper.PaperNotFoundException;
+import com.camel_hub.advertisement.analytics.AnalyticsValidationException;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
@@ -304,6 +305,14 @@ public class GlobalExceptionHandler {
 	ResponseEntity<ApiError> handlePaperNotFound(PaperNotFoundException exception, ServerWebExchange exchange) {
 		return response(exchange, HttpStatus.NOT_FOUND, "paper_not_found", "Paper not found",
 				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(AnalyticsValidationException.class)
+	ResponseEntity<ApiError> handleAnalyticsValidation(
+			AnalyticsValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_analytics_filter",
+				"Analytics filter rejected", exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(ArxivDependencyException.class)

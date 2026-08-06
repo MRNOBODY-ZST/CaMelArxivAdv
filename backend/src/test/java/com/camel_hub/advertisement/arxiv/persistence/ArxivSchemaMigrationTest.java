@@ -77,6 +77,16 @@ class ArxivSchemaMigrationTest {
 	}
 
 	@Test
+	void addsIndexedAnalyticsQueryPaths() throws SQLException {
+		assertThat(indexNames()).contains(
+				"ix_papers_analytics_imported", "ix_paper_imports_analytics_date_job",
+				"ix_paper_categories_analytics_relation", "ix_extraction_runs_analytics_latest",
+				"ix_extraction_runs_analytics_duration", "ix_contact_mappings_analytics_latest",
+				"ix_extraction_evidence_analytics_rule", "ix_jobs_analytics_actor_date",
+				"ix_job_errors_analytics_code");
+	}
+
+	@Test
 	void databaseRejectsInvalidSnapshotAndJobRuntimeState() throws SQLException {
 		assertThat(fails("""
 				INSERT INTO arxiv_category_snapshots
