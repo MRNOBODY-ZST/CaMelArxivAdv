@@ -143,6 +143,21 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 机器提取的联系人默认 `UNVERIFIED`。API 不支持批量完整邮箱披露；列表、Job 事件和错误体不会返回完整地址。
 
+### 数据统计
+
+所有分析端点需要 `analytics:read`，共享 `from`、`to`、`categoryId`、`relation`、`jobId`、`userId`、`domain` 和 `confidence` 查询参数。`from`/`to` 是包含首尾两天的 UTC `papers.imported_at` 日期队列，默认 30 天、最大 10 年。
+
+| 方法与路径 | 说明 |
+|---|---|
+| `GET /api/v1/analytics/overview` | 首页核心指标、每日导入、主分类、Source 漏斗和当前任务 |
+| `GET /api/v1/analytics/ingestion` | 查询匹配、采集漏斗、最新状态、耗时分位、错误码和任务吞吐 |
+| `GET /api/v1/analytics/papers` | Group/Archive/Category、关系、发表/更新月、作者/版本和 Source 格式 |
+| `GET /api/v1/analytics/contacts` | 唯一作者/邮箱、置信度、域名、分类发现率、规则、复用和共同作者 |
+| `GET /api/v1/analytics/filters` | 当前日期范围内可用分类、Job、用户、域名和枚举选项 |
+| `GET /api/v1/analytics/{view}/export` | 导出聚合 CSV 并写 `ANALYTICS_EXPORT_CREATED` 审计 |
+
+比率指标固定返回 `value`、`numerator`、`denominator`、`unit` 和 `definition`；零分母返回 0。联系人响应/CSV 只包含域名和聚合，不包含完整邮箱。完整口径见 [ANALYTICS.md](ANALYTICS.md)。
+
 ## 统一错误
 
 错误不会返回 Java 类名或堆栈。结构：

@@ -40,7 +40,8 @@
 - Phase 2（认证与 RBAC）：**已完成，2026-08-05 验收**。
 - Phase 3（arXiv 发现与导入）：**已完成，2026-08-06 验收**。
 - Phase 4（Source 解析）：**已完成，2026-08-06 验收**。
-- Phase 5–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
+- Phase 5（数据统计）：**已完成，2026-08-06 验收**。
+- Phase 6–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
 
 Phase 1 实际证据：后端 `clean check bootJar` 成功；Testcontainers 从空 PostgreSQL 执行 4 个 Flyway 迁移并建立 50 张表；Python 8 tests、Ruff、MyPy strict 成功；前端 7 tests、ESLint、`vue-tsc`、Vite build 成功；Compose/镜像契约成功；九服务均健康，外部健康 API、Mailpit 和 MinIO Console 可达。浏览器验证桌面 1280×720、移动 390×844 均无横向溢出和 console warning/error，移动抽屉焦点恢复正常。
 
@@ -49,6 +50,8 @@ Phase 2 实际证据：Flyway V5 幂等建立 26 项权限和 5 个系统角色�
 Phase 3 实际证据：Flyway V6 从空库建立 53 张表和 1 个物化视图；后端 132 tests/`clean check`/`bootJar`、Python 31 tests/Ruff/MyPy、前端 27 tests/ESLint/`vue-tsc`/Vite build 均通过。真实 Compose 运行验证了官方分类离线读取、Legacy API 查询预览、Redis 全局租约、Outbox/RabbitMQ、Worker 心跳、选中论文导入、任务事件/终态和论文持久化；真实导入 `2212.02256` 成功。管理员分类同步通过 OAI `ListSets` 形成完整 Job → Outbox → Worker → 结果快照闭环，Job `18fed311-b1af-4dd7-ae09-148a867aac71` 原子完成 166 个分类、6 个 alias 和 155 条描述；两段式 physics set 被保留，重复内容复用既有快照且历史分类只失活不删除。`mail-worker` Profile 的业务 API 真实请求返回 404。桌面发现/任务/论文流程与 390×844 发现页均无全局横向溢出，控制台零 error。
 
 Phase 4 实际证据：Flyway V7 后保持 53 张表和 1 个物化视图并增加 Source 幂等/尺寸/清理证明、独立显示 nonce 与映射乐观版本；后端 153 tests/`clean check`/`bootJar`、Python 68 tests/Ruff/MyPy strict（41 files）、前端 30 tests/ESLint/`vue-tsc`/Vite build 全部通过，Compose 九服务与三个非 root 镜像契约通过。真实官方 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 解析论文 `2212.02256`：`TAR_GZIP` 归档 488,729 bytes、展开 913,762 bytes、检查 1 个 TeX 文件，按顺序保留 2 位作者并得到 2 个 `HIGH`/`UNVERIFIED` 明确联系人；数据库验证规范化/显示 nonce 全部不同、HMAC 唯一、两类密文均不含 `@`，Worker 临时根为空且 RestartCount=0。受权 HTTP 验证列表始终脱敏、单条完整披露和披露审计成功、论文提取记录清理确认可见；`mail-worker` 业务 API 为 404。桌面 1280×720 与移动 390×844 的联系人/论文详情均 `scrollWidth=clientWidth`，七个指定标签页可用，控制台零 warning/error；验收 QA 账号及失败试跑的单条 DLQ 消息均已删除，四个 arXiv 队列最终为空。
+
+Phase 5 实际证据：Flyway V8 增加 9 条分析查询索引；后端 162 tests/`clean check`/`bootJar`、Worker 68 tests/Ruff/MyPy strict、前端 33 tests/ESLint/`vue-tsc`/Vite build 均通过。真实 PostgreSQL 的 2026-08-01 至 2026-08-06 UTC 队列独立 SQL 得到 `cohort=1, parsed=1, papers_with_email=1, unique_contacts=2, mappings=2`，与 overview/contact API 完全一致；查询计划命中导入日期和最新联系人 covering index。受权 CSV 返回 UTF-8 附件并写 `ANALYTICS_EXPORT_CREATED`，未认证分析请求为 401。桌面 1440×900 与移动 390×844 验证采集、论文、联系人共 22 个图表、筛选 URL 同步、加载/空状态和数据新鲜度；移动端 `scrollWidth=clientWidth=375`，联系人页可见文本无完整邮箱，控制台零 warning/error。Compose 九服务均 healthy、四个应用容器非 root 且 RestartCount=0、四个 arXiv 队列为空；临时 Phase 5 QA 账号和审计记录已删除。
 
 ## 阶段验收规则
 

@@ -32,9 +32,12 @@
 - `contact:read_masked`：读取脱敏列表和证据；
 - `contact:read_full`：显式读取单条完整邮箱；
 - `contact:verify`：以乐观版本确认或驳回映射；
+- `analytics:read`：读取聚合分析并导出不含完整邮箱的 CSV；
 - `audit:read`：查看审计事件。
 
 完整邮箱披露和验证变化均记录 Actor、资源、结果、Trace ID、哈希化网络来源与非敏感 before/after。审计详情不能包含邮箱、Token、Cookie、Source 正文或加密密钥。
+
+分析 API 在数据库侧以加密联系人 ID 聚合，永不为统计解密邮箱；只返回域名、数量、分子/分母和平台推导的域名类别。CSV 对公式前缀转义，并记录 `ANALYTICS_EXPORT_CREATED`。域名类别不能解释为机构归属。
 
 ## 网络与执行隔离
 

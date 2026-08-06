@@ -1,6 +1,6 @@
 # Phase 5 Analytics Implementation Plan
 
-**Status:** In progress.
+**Status:** Complete — accepted 2026-08-06.
 
 **Goal:** Turn the imported paper, Source extraction, author, contact, category, and Job facts already stored in PostgreSQL into permission-protected, source-backed analytics with consistent filters, real ECharts visualizations, aggregate CSV export, freshness/definition metadata, and responsive Chinese UI.
 
@@ -96,3 +96,5 @@ Every chart uses a neutral descriptive title, a subtitle with cohort/date/denomi
 - Update API, architecture, ERD, operations, security/privacy, README, implementation plan, tasks and DesignSkill mapping.
 
 **Final checkpoint:** mark Phase 5 complete only after source queries, UI values, exports and direct database reconciliations agree and all observed quality gates pass.
+
+**Acceptance:** PostgreSQL reference queries and the authenticated APIs reconciled on the real Phase 3/4 cohort; backend (162), Worker (68), and frontend (33) tests plus lint, strict typing, builds, Compose/image contracts, desktop/mobile browser QA, export audit, privacy inspection, and container health checks all passed. The temporary QA identity and its audit rows were removed after verification.

@@ -1,8 +1,8 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–4：生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务，以及 Source 安全下载/解包、TeX 作者/邮箱提取、加密联系人、脱敏证据和人工验证均已形成可运行垂直切片。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–5：生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取，以及基于真实 PostgreSQL 的采集/论文/联系人分析均已形成可运行垂直切片。
 
-> 数据统计、模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 5–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
+> 模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 6–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
 
 ## 快速启动
 
@@ -30,6 +30,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - 导入任务：[http://localhost:8080/jobs](http://localhost:8080/jobs)
 - 论文库：[http://localhost:8080/papers](http://localhost:8080/papers)
 - 作者与联系人：[http://localhost:8080/contacts](http://localhost:8080/contacts)
+- 采集分析：[http://localhost:8080/analytics/ingestion](http://localhost:8080/analytics/ingestion)
+- 论文分析：[http://localhost:8080/analytics/papers](http://localhost:8080/analytics/papers)
+- 联系人分析：[http://localhost:8080/analytics/contacts](http://localhost:8080/analytics/contacts)
 
 首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
 
@@ -72,7 +75,7 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–4 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+Phase 1–5 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 ## 文档
 
@@ -81,6 +84,7 @@ Phase 1–4 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 - [API 约定](docs/API.md)
 - [认证与 RBAC](docs/RBAC.md)
 - [TeX Source 提取](docs/TEX_EXTRACTION.md)
+- [数据统计口径与看板](docs/ANALYTICS.md)
 - [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
 - [部署](docs/DEPLOYMENT.md)
 - [运维](docs/OPERATIONS.md)
