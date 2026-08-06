@@ -79,8 +79,9 @@ const navigation: readonly NavigationGroup[] = [
     { label: '发送记录', href: '#deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
   ] },
   { label: '数据分析', items: [
-    { label: '采集分析', href: '#ingestion-analytics', icon: ChartBarIcon, permission: 'analytics:read' },
-    { label: '联系人分析', href: '#contact-analytics', icon: ChartPieIcon, permission: 'analytics:read' },
+    { label: '采集分析', href: '/analytics/ingestion', icon: ChartBarIcon, permission: 'analytics:read' },
+    { label: '论文分析', href: '/analytics/papers', icon: DocumentChartBarIcon, permission: 'analytics:read' },
+    { label: '联系人分析', href: '/analytics/contacts', icon: ChartPieIcon, permission: 'analytics:read' },
     { label: '活动分析', href: '#campaign-analytics', icon: DocumentChartBarIcon, permission: 'analytics:read' },
     { label: '链接分析', href: '#link-analytics', icon: LinkIcon, permission: 'analytics:read' },
   ] },

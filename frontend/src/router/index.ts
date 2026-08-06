@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type Router } from 'vue-router'
 
-import DashboardView from '@/views/DashboardView.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { Permission } from '@/modules/auth/auth.types'
 
@@ -20,7 +19,7 @@ export const routes: RouteRecordRaw[] = [
     meta: { publicLayout: true },
   },
   {
-    path: '/', name: 'dashboard', component: DashboardView,
+    path: '/', name: 'dashboard', component: () => import('@/views/DashboardView.vue'),
     meta: { requiresAuth: true, pageTitle: '数据总览', pageSection: '概览' },
   },
   {
@@ -52,6 +51,21 @@ export const routes: RouteRecordRaw[] = [
   {
     path: '/contacts', name: 'contacts', component: () => import('@/modules/contacts/ContactListView.vue'),
     meta: { requiresAuth: true, permissions: ['contact:read_masked'], pageTitle: '作者与联系人', pageSection: 'arXiv 数据' },
+  },
+  {
+    path: '/analytics/ingestion', name: 'ingestion-analytics',
+    component: () => import('@/modules/analytics/AnalyticsView.vue'), props: { view: 'ingestion' },
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '采集分析', pageSection: '数据分析' },
+  },
+  {
+    path: '/analytics/papers', name: 'paper-analytics',
+    component: () => import('@/modules/analytics/AnalyticsView.vue'), props: { view: 'papers' },
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '论文分析', pageSection: '数据分析' },
+  },
+  {
+    path: '/analytics/contacts', name: 'contact-analytics',
+    component: () => import('@/modules/analytics/AnalyticsView.vue'), props: { view: 'contacts' },
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '联系人分析', pageSection: '数据分析' },
   },
   {
     path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
