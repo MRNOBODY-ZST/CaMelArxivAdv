@@ -16,7 +16,7 @@ public class ContactRepository {
 	}
 
 	public Flux<ContactRow> list(ContactService.ContactFilter filter, int offset, int limit) {
-		return bind(databaseClient.sql(selectSql() + filtersSql() + """
+		return bind(databaseClient.sql(selectSql(true) + filtersSql() + """
 				ORDER BY c.last_extracted_at DESC, c.id
 				OFFSET :offset LIMIT :limit
 				"""), filter).bind("offset", offset).bind("limit", limit).map(this::row).all();
@@ -31,6 +31,7 @@ public class ContactRepository {
 				  FROM paper_author_contacts pac
 				  JOIN extraction_runs er ON er.id = pac.extraction_run_id
 				  WHERE pac.contact_id = c.id
+				    AND (:paperEmpty OR pac.paper_id = :paperId)
 				  ORDER BY er.completed_at DESC NULLS LAST, pac.created_at DESC, pac.id
 				  LIMIT 1
 				) latest ON true
@@ -39,7 +40,7 @@ public class ContactRepository {
 	}
 
 	public Mono<ContactRow> find(UUID contactId) {
-		return databaseClient.sql(selectSql() + " WHERE c.id = :contactId AND c.deleted_at IS NULL")
+		return databaseClient.sql(selectSql(false) + " WHERE c.id = :contactId AND c.deleted_at IS NULL")
 				.bind("contactId", contactId).map(this::row).one();
 	}
 
@@ -74,7 +75,9 @@ public class ContactRepository {
 				.fetch().rowsUpdated().map(rows -> rows == 1);
 	}
 
-	private String selectSql() {
+	private String selectSql(boolean scopeMappingToPaper) {
+		String paperScope = scopeMappingToPaper
+				? " AND (:paperEmpty OR pac.paper_id = :paperId)\n" : "";
 		return """
 				SELECT c.id, c.display_ciphertext, c.display_nonce, c.email_domain,
 				       c.example_address, c.suppression_status, c.last_extracted_at,
@@ -94,6 +97,7 @@ public class ContactRepository {
 				  FROM paper_author_contacts pac
 				  JOIN extraction_runs er ON er.id = pac.extraction_run_id
 				  WHERE pac.contact_id = c.id
+				""" + paperScope + """
 				  ORDER BY er.completed_at DESC NULLS LAST, pac.created_at DESC, pac.id
 				  LIMIT 1
 				) latest ON true

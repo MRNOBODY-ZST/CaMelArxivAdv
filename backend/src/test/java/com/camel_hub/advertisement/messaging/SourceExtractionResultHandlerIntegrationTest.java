@@ -145,6 +145,64 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void scopesLatestContactMappingToTheFilteredPaper() {
+		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		UUID otherPaper = UUID.randomUUID();
+		UUID otherAuthor = UUID.randomUUID();
+		UUID otherPaperAuthor = UUID.randomUUID();
+		UUID otherRun = UUID.randomUUID();
+
+		databaseClient.sql("""
+				INSERT INTO papers (
+				  id, arxiv_id, title, abstract_text, primary_category_id,
+				  submitted_at, updated_at, pdf_url)
+				SELECT :paper, '2608.00002', 'Later Source Paper', 'Abstract', id,
+				       now(), now(), 'https://arxiv.org/pdf/2608.00002'
+				FROM arxiv_categories WHERE category_id = 'cs.AI'
+				""").bind("paper", otherPaper).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO authors (id, normalized_name, display_name)
+				VALUES (:author, 'later author', 'Later Author')
+				""").bind("author", otherAuthor).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO paper_authors (
+				  id, paper_id, author_id, author_order, raw_name, affiliation_data)
+				VALUES (:paperAuthor, :paper, :author, 1, 'Later Author', '[]'::jsonb)
+				""").bind("paperAuthor", otherPaperAuthor).bind("paper", otherPaper)
+				.bind("author", otherAuthor).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO extraction_runs (
+				  id, paper_id, parser_version, status, files_inspected, contacts_found,
+				  started_at, completed_at, cleanup_confirmed, cleanup_confirmed_at)
+				VALUES (:run, :paper, '0.1.0', 'SUCCEEDED', 1, 1,
+				        now() + interval '1 minute', now() + interval '1 minute', true,
+				        now() + interval '1 minute')
+				""").bind("run", otherRun).bind("paper", otherPaper)
+				.fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO paper_author_contacts (
+				  paper_author_id, paper_id, contact_id, extraction_run_id, confidence,
+				  corresponding_author, created_at)
+				SELECT :paperAuthor, :paper, id, :run, 'MEDIUM', false, now() + interval '1 minute'
+				FROM contacts LIMIT 1
+				""").bind("paperAuthor", otherPaperAuthor).bind("paper", otherPaper)
+				.bind("run", otherRun).fetch().rowsUpdated().block();
+
+		var contacts = new ContactRepository(databaseClient);
+		var originalRows = contacts.list(new ContactService.ContactFilter(
+				null, null, null, null, PAPER), 0, 20).collectList().block();
+		var laterRows = contacts.list(new ContactService.ContactFilter(
+				null, null, null, null, otherPaper), 0, 20).collectList().block();
+
+		assertThat(originalRows).singleElement()
+				.satisfies(row -> assertThat(row.paperId()).isEqualTo(PAPER));
+		assertThat(laterRows).singleElement()
+				.satisfies(row -> assertThat(row.paperId()).isEqualTo(otherPaper));
+		assertThat(contacts.count(new ContactService.ContactFilter(
+				null, null, null, null, PAPER)).block()).isEqualTo(1);
+	}
+
+	@Test
 	void rejectsUnmaskedEvidenceWithoutLeavingProcessedMarkerOrPartialRows() {
 		String unsafe = resultMessage(UUID.randomUUID(), "alice@university.edu");
 
