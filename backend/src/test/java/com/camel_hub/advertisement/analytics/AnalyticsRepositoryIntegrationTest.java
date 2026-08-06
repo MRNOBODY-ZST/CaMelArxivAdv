@@ -83,6 +83,13 @@ class AnalyticsRepositoryIntegrationTest {
 			assertThat(domain.key()).isEqualTo("example.edu");
 			assertThat(domain.count()).isEqualTo(1);
 		});
+
+		AnalyticsQuery oldConfidence = new AnalyticsQuery(
+				LocalDate.parse("2026-08-01"), LocalDate.parse("2026-08-03"),
+				null, AnalyticsQuery.Relation.ALL, null, null, null, AnalyticsQuery.Confidence.LOW);
+		var low = service.contacts(oldConfidence).block();
+		assertThat(metric(low.metrics(), "uniqueEmails").value()).isZero();
+		assertThat(metric(low.metrics(), "discoveryRate").denominator()).isZero();
 	}
 
 	@Test

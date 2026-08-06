@@ -40,12 +40,18 @@ public class AnalyticsRepository {
 			      WHERE uer.paper_id = p.id AND ej.created_by = :userId
 			    ))
 			    AND (:contactFilterEmpty OR EXISTS (
-			      SELECT 1
-			      FROM paper_author_contacts fpac
-			      JOIN contacts fc ON fc.id = fpac.contact_id
-			      WHERE fpac.paper_id = p.id AND fc.deleted_at IS NULL
-			        AND (:domainEmpty OR fc.email_domain = :domain)
-			        AND (:confidenceEmpty OR fpac.confidence = :confidence)
+			      SELECT 1 FROM (
+			        SELECT DISTINCT ON (fpac.contact_id)
+			          fpac.confidence, fc.email_domain
+			        FROM paper_author_contacts fpac
+			        JOIN contacts fc ON fc.id = fpac.contact_id AND fc.deleted_at IS NULL
+			        JOIN extraction_runs fer ON fer.id = fpac.extraction_run_id
+			        WHERE fpac.paper_id = p.id
+			        ORDER BY fpac.contact_id, fer.completed_at DESC NULLS LAST,
+			                 fpac.created_at DESC, fpac.id DESC
+			      ) current_contact
+			      WHERE (:domainEmpty OR current_contact.email_domain = :domain)
+			        AND (:confidenceEmpty OR current_contact.confidence = :confidence)
 			    ))
 			),
 			latest_runs AS (
@@ -55,17 +61,22 @@ public class AnalyticsRepository {
 			  JOIN filtered_papers fp ON fp.id = er.paper_id
 			  ORDER BY er.paper_id, er.started_at DESC, er.id DESC
 			),
-			latest_mappings AS (
+			latest_mapping_candidates AS (
 			  SELECT DISTINCT ON (pac.paper_id, pac.contact_id)
 			    pac.*
 			  FROM paper_author_contacts pac
 			  JOIN filtered_papers fp ON fp.id = pac.paper_id
 			  JOIN contacts c ON c.id = pac.contact_id AND c.deleted_at IS NULL
 			  JOIN extraction_runs er ON er.id = pac.extraction_run_id
-			  WHERE (:domainEmpty OR c.email_domain = :domain)
-			    AND (:confidenceEmpty OR pac.confidence = :confidence)
 			  ORDER BY pac.paper_id, pac.contact_id,
 			           er.completed_at DESC NULLS LAST, pac.created_at DESC, pac.id DESC
+			),
+			latest_mappings AS (
+			  SELECT lmc.*
+			  FROM latest_mapping_candidates lmc
+			  JOIN contacts c ON c.id = lmc.contact_id AND c.deleted_at IS NULL
+			  WHERE (:domainEmpty OR c.email_domain = :domain)
+			    AND (:confidenceEmpty OR lmc.confidence = :confidence)
 			)
 			""";
 

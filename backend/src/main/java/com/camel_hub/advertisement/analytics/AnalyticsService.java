@@ -188,11 +188,11 @@ public class AnalyticsService {
 
 	private List<AnalyticsDtos.Metric> overviewMetrics(AnalyticsRepository.CoreStats stats) {
 		return List.of(
-				countMetric("cohortPapers", "Imported papers", stats.cohortPapers(),
+				countMetric("cohortPapers", "已导入论文", stats.cohortPapers(),
 						"Distinct non-deleted papers imported in the selected UTC date window"),
-				rateMetric("parsedCoverage", "Parsed coverage", stats.parsedPapers(), stats.cohortPapers(),
+				rateMetric("parsedCoverage", "解析覆盖率", stats.parsedPapers(), stats.cohortPapers(),
 						"Papers whose latest extraction succeeded or partially succeeded divided by imported papers"),
-				rateMetric("emailDiscovery", "Email discovery", stats.papersWithEmail(), stats.cohortPapers(),
+				rateMetric("emailDiscovery", "邮箱发现率", stats.papersWithEmail(), stats.cohortPapers(),
 						"Papers with at least one latest contact mapping divided by imported papers"));
 	}
 
@@ -200,41 +200,42 @@ public class AnalyticsService {
 			AnalyticsRepository.CoreStats stats, AnalyticsDtos.DurationStats duration
 	) {
 		return List.of(
-				countMetric("queryMatched", "Query matched", stats.queryMatched(),
+				countMetric("queryMatched", "查询匹配量", stats.queryMatched(),
 						"Sum of total_count on matching arXiv import jobs created in the selected UTC window"),
-				countMetric("papersImported", "Papers imported", stats.cohortPapers(),
+				countMetric("papersImported", "已导入论文", stats.cohortPapers(),
 						"Distinct non-deleted papers imported in the selected UTC date window"),
-				rateMetric("parseCoverage", "Parse coverage", stats.parsedPapers(), stats.cohortPapers(),
+				rateMetric("parseCoverage", "解析覆盖率", stats.parsedPapers(), stats.cohortPapers(),
 						"Latest successful or partially successful extraction divided by imported papers"),
 				new AnalyticsDtos.Metric(
-						"averageDuration", "Average extraction", duration.averageMs(), duration.samples(),
+						"averageDuration", "平均解析耗时", duration.averageMs(),
+						Math.round(duration.averageMs() * duration.samples()),
 						duration.samples(), "milliseconds",
 						"Arithmetic mean duration of the latest extraction run when duration is present"));
 	}
 
 	private List<AnalyticsDtos.Metric> paperMetrics(AnalyticsRepository.CoreStats stats) {
 		return List.of(
-				countMetric("cohortPapers", "Papers", stats.cohortPapers(),
+				countMetric("cohortPapers", "论文数", stats.cohortPapers(),
 						"Distinct non-deleted papers imported in the selected UTC date window"),
-				rateMetric("doiCoverage", "DOI coverage", stats.doiPapers(), stats.cohortPapers(),
+				rateMetric("doiCoverage", "DOI 覆盖率", stats.doiPapers(), stats.cohortPapers(),
 						"Papers with a DOI divided by imported papers"),
-				rateMetric("journalCoverage", "Journal reference coverage", stats.journalPapers(), stats.cohortPapers(),
+				rateMetric("journalCoverage", "期刊引用覆盖率", stats.journalPapers(), stats.cohortPapers(),
 						"Papers with a journal reference divided by imported papers"));
 	}
 
 	private List<AnalyticsDtos.Metric> contactMetrics(AnalyticsRepository.CoreStats stats) {
 		return List.of(
-				countMetric("uniqueAuthors", "Mapped authors", stats.uniqueAuthors(),
+				countMetric("uniqueAuthors", "已映射作者", stats.uniqueAuthors(),
 						"Distinct authors associated with a latest contact mapping"),
-				countMetric("uniqueEmails", "Unique emails", stats.uniqueContacts(),
+				countMetric("uniqueEmails", "唯一邮箱", stats.uniqueContacts(),
 						"Distinct encrypted contact records in latest mappings; full addresses are never exposed"),
-				averageMetric("emailsPerPaper", "Emails per paper", stats.mappings(), stats.cohortPapers(),
+				averageMetric("emailsPerPaper", "每篇论文邮箱数", stats.mappings(), stats.cohortPapers(),
 						"Latest paper-contact mappings divided by imported papers"),
-				rateMetric("discoveryRate", "Discovery rate", stats.papersWithEmail(), stats.cohortPapers(),
+				rateMetric("discoveryRate", "邮箱发现率", stats.papersWithEmail(), stats.cohortPapers(),
 						"Papers with at least one latest contact mapping divided by imported papers"),
-				rateMetric("correspondingRate", "Corresponding rate", stats.correspondingMappings(), stats.mappings(),
+				rateMetric("correspondingRate", "通讯作者率", stats.correspondingMappings(), stats.mappings(),
 						"Latest mappings marked corresponding author divided by latest mappings"),
-				rateMetric("confirmedRate", "Human-confirmed rate", stats.confirmedMappings(), stats.mappings(),
+				rateMetric("confirmedRate", "人工确认率", stats.confirmedMappings(), stats.mappings(),
 						"Latest mappings human-confirmed as CONFIRMED divided by latest mappings"));
 	}
 
@@ -260,14 +261,14 @@ public class AnalyticsService {
 
 	private List<AnalyticsDtos.FunnelStep> funnel(AnalyticsRepository.FunnelCounts counts) {
 		return List.of(
-				step("imported", "Imported", counts.imported(), counts.imported()),
-				step("attempted", "Source attempted", counts.attempted(), counts.imported()),
-				step("available", "Source available", counts.available(), counts.attempted()),
-				step("downloaded", "Downloaded", counts.downloaded(), counts.available()),
-				step("unpacked", "Archive unpacked", counts.unpacked(), counts.downloaded()),
-				step("texFound", "TeX discovered", counts.texFound(), counts.unpacked()),
-				step("parsed", "Parsed", counts.parsed(), counts.texFound()),
-				step("emailFound", "Email found", counts.emailFound(), counts.parsed()));
+				step("imported", "已导入", counts.imported(), counts.imported()),
+				step("attempted", "已尝试 Source", counts.attempted(), counts.imported()),
+				step("available", "Source 可用", counts.available(), counts.attempted()),
+				step("downloaded", "已下载", counts.downloaded(), counts.available()),
+				step("unpacked", "已解包", counts.unpacked(), counts.downloaded()),
+				step("texFound", "发现 TeX", counts.texFound(), counts.unpacked()),
+				step("parsed", "已解析", counts.parsed(), counts.texFound()),
+				step("emailFound", "发现邮箱", counts.emailFound(), counts.parsed()));
 	}
 
 	private AnalyticsDtos.FunnelStep step(String key, String label, long count, long previous) {
