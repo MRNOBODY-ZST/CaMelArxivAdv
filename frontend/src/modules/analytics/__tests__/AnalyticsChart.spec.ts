@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const setOption = vi.fn()
 const resize = vi.fn()
@@ -20,6 +20,7 @@ import AnalyticsChart from '@/modules/analytics/AnalyticsChart.vue'
 
 describe('AnalyticsChart', () => {
   beforeEach(() => vi.clearAllMocks())
+  afterEach(() => vi.unstubAllGlobals())
 
   it('renders data and exposes a PNG export without losing accessible context', async () => {
     const wrapper = mount(AnalyticsChart, {
@@ -36,5 +37,30 @@ describe('AnalyticsChart', () => {
     })
     expect(wrapper.text()).toContain('当前筛选范围暂无数据')
     expect(setOption).not.toHaveBeenCalled()
+  })
+
+  it('updates animation when the reduced-motion preference changes at runtime', async () => {
+    let reduced = false
+    const listeners = new Set<EventListenerOrEventListenerObject>()
+    const mediaQuery = {
+      get matches() { return reduced },
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => listeners.add(listener)),
+      removeEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => listeners.delete(listener)),
+    } as unknown as MediaQueryList
+    vi.stubGlobal('matchMedia', vi.fn(() => mediaQuery))
+    const wrapper = mount(AnalyticsChart, {
+      props: { title: '动态图表', option: { series: [{ data: [1] }] } },
+    })
+    await vi.waitFor(() => expect(setOption).toHaveBeenCalled())
+
+    reduced = true
+    for (const listener of listeners) {
+      if (typeof listener === 'function') listener(new Event('change'))
+      else listener.handleEvent(new Event('change'))
+    }
+
+    expect(setOption).toHaveBeenLastCalledWith(expect.objectContaining({ animation: false }), { notMerge: true })
+    wrapper.unmount()
+    expect(mediaQuery.removeEventListener).toHaveBeenCalled()
   })
 })

@@ -1,5 +1,8 @@
 package com.camel_hub.advertisement.identity.security;
 
+import com.camel_hub.advertisement.analytics.AnalyticsController;
+import com.camel_hub.advertisement.analytics.AnalyticsDtos;
+import com.camel_hub.advertisement.analytics.AnalyticsService;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import com.camel_hub.advertisement.identity.domain.UserAccount;
 import com.camel_hub.advertisement.identity.domain.UserStatus;
@@ -25,6 +28,8 @@ import reactor.core.publisher.Mono;
 
 import javax.crypto.spec.SecretKeySpec;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -56,12 +61,14 @@ class ResourceServerAuthorizationTest {
 	private IdentityRepository identityRepository;
 	@Autowired
 	private AccessTokenService accessTokenService;
+	@Autowired
+	private AnalyticsService analyticsService;
 
 	private WebTestClient webTestClient;
 
 	@BeforeEach
 	void setUp() {
-		reset(identityRepository);
+		reset(identityRepository, analyticsService);
 		webTestClient = WebTestClient.bindToApplicationContext(applicationContext)
 				.apply(springSecurity())
 				.build();
@@ -142,6 +149,28 @@ class ResourceServerAuthorizationTest {
 	}
 
 	@Test
+	void enforcesAnalyticsReadAtTheRealAnalyticsHttpBoundary() {
+		var response = new AnalyticsDtos.OverviewResponse(
+				new AnalyticsDtos.Window(LocalDate.parse("2026-08-01"), LocalDate.parse("2026-08-06"),
+						"papers.imported_at", "UTC"),
+				new AnalyticsDtos.Freshness(null, "NO_DATA", Instant.parse("2026-08-06T12:00:00Z")),
+				List.of(), List.of(), List.of(), List.of(), List.of());
+		when(analyticsService.overview(org.mockito.ArgumentMatchers.any())).thenReturn(Mono.just(response));
+		when(identityRepository.findById(USER_ID))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, 1, Set.of("paper:read"))))
+				.thenReturn(Mono.just(account(UserStatus.ACTIVE, 1, Set.of("analytics:read"))));
+
+		webTestClient.get().uri("/api/v1/analytics/overview")
+				.exchange().expectStatus().isUnauthorized();
+		webTestClient.get().uri("/api/v1/analytics/overview")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange().expectStatus().isForbidden();
+		webTestClient.get().uri("/api/v1/analytics/overview")
+				.headers(headers -> headers.setBearerAuth(token(1)))
+				.exchange().expectStatus().isOk();
+	}
+
+	@Test
 	void deniesBusinessPermissionsUntilTheInitialPasswordIsChanged() {
 		when(identityRepository.findById(USER_ID))
 				.thenReturn(Mono.just(account(UserStatus.ACTIVE, true, 1, Set.of("contact:read_full"))))
@@ -203,6 +232,16 @@ class ResourceServerAuthorizationTest {
 		@Bean
 		IdentityRepository identityRepository() {
 			return mock(IdentityRepository.class);
+		}
+
+		@Bean
+		AnalyticsService analyticsService() {
+			return mock(AnalyticsService.class);
+		}
+
+		@Bean
+		AnalyticsController analyticsController(AnalyticsService service) {
+			return new AnalyticsController(service);
 		}
 
 		@Bean

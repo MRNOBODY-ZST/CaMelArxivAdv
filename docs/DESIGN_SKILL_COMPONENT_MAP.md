@@ -16,6 +16,7 @@ Catalogue root: `tailwindui_template/templates/`. Source pages use `https://tail
 | Data overview | Page title and date control | **With actions** page heading family | `application-ui/headings/page-headings/` | `frontend/src/views/DashboardView.vue` | Keeps left-aligned title/supporting copy and a compact right action. |
 | Author contacts | Filter rail, protected data table, evidence dialog | **Simple table**, **Simple modal with dismiss button**, native form controls | `application-ui/lists/tables/01__simple.vue`, `application-ui/overlays/modal-dialogs/04__simple-with-dismiss-button.vue`, `application-ui/forms/` | `frontend/src/modules/contacts/ContactListView.vue` | Keeps compact evidence operations on desktop, contained horizontal table overflow on mobile, explicit masked/full-disclosure states, focus-trapped evidence and status badges. |
 | Paper detail | Seven-part record navigation and extraction metrics | **Tabs with underline**, **Basic card**, **Flat pill with dot** | `application-ui/navigation/tabs/01__tabs-with-underline.vue`, `application-ui/layout/cards/01__basic-card.vue`, `application-ui/elements/badges/09__flat-pill-with-dot.vue` | `frontend/src/modules/papers/PaperDetailView.vue` | Uses keyboard tabs for metadata, authors, contacts, categories, versions, extraction runs and raw metadata; extraction size/cleanup evidence remains readable from mobile through desktop. |
+| Analytics views | Filter/action rail, metric rail and responsive chart grid | **With actions**, **With shared borders**, **Two row bento grid with three column second row**, **Basic card** | `application-ui/headings/page-headings/`, `application-ui/data-display/stats/05__with-shared-borders.vue`, `marketing/page-sections/bento-grids/03__two-row-bento-grid-with-three-column-second-row.vue`, `application-ui/layout/cards/01__basic-card.vue` | `frontend/src/modules/analytics/AnalyticsView.vue`, `AnalyticsFilterBar.vue`, `AnalyticsMetricGrid.vue`, `AnalyticsChart.vue` | Uses the established compact action hierarchy and white/ring surfaces around real ECharts canvases. Desktop uses two columns; mobile uses one column and contained metric overflow. Loading, empty, per-chart error, PNG and reduced-motion behavior are product-specific adaptations. |
 
 ## Reusable adapter inventory
 
@@ -49,7 +50,7 @@ All adapters live under `frontend/src/components/design-skill/`. No second compo
 - Indigo was adjusted to the accepted `#4f6ef7` product accent; neutral colors remain Tailwind slate/gray equivalents.
 - The shell source's sample company, teams, avatar and external image URLs were replaced with code-native CaMel Arxiv identity and the required Chinese navigation.
 - Dark-mode source classes were not copied into every adapter because the approved v1 operations console is light-only. This is a documented scope choice, not an incompatible component substitution.
-- Dashboard metrics render real API data only. Until an analytics endpoint exists, the UI shows an em dash and named empty state rather than sample figures from the source previews.
+- Dashboard and analytics metrics render real API data only. Empty cohorts show named zero/empty states and `NO_DATA` freshness rather than sample figures from source previews.
 - Tooltip and skeleton are documented composites because the audited catalogue does not contain exact standalone entries.
 
 ## Verification hooks
@@ -59,4 +60,5 @@ All adapters live under `frontend/src/components/design-skill/`. No second compo
 - `frontend/src/layouts/__tests__/AppShell.spec.ts` protects the responsive shell structure.
 - `frontend/src/views/__tests__/DashboardView.spec.ts` protects the unequal bento grid and the no-fake-metrics rule.
 - `frontend/src/modules/contacts/__tests__/phase4.views.spec.ts` protects masking, evidence disclosure affordances, verification controls, the seven paper tabs, Source actions and extraction cleanup presentation.
+- `frontend/src/modules/analytics/__tests__/AnalyticsView.spec.ts` protects URL hydration and cross-view RouterView reuse; `AnalyticsChart.spec.ts` protects loading/empty/error rendering and chart lifecycle.
 - `docs/design/phase4-contacts-desktop.png` and `docs/design/phase4-contacts-mobile.png` record the accepted 1280×720 and 390×844 viewport implementations; the mobile full-page capture is 390×963 because content exceeds one viewport vertically.

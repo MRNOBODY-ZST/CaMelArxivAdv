@@ -26,7 +26,7 @@ export const analyticsApi = {
   },
   async export(view: string, query: AnalyticsQuery): Promise<void> {
     const response = await apiClient.get<Blob>(`/analytics/${view}/export`, {
-      params: query,
+      params: { ...query, dataset: 'all' },
       responseType: 'blob',
       headers: { Accept: 'text/csv' },
     })

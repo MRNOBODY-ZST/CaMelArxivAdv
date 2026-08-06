@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { ExclamationTriangleIcon } from '@heroicons/vue/24/outline'
 import type { EChartsCoreOption } from 'echarts/core'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import AnalyticsChart from '@/modules/analytics/AnalyticsChart.vue'
 import AnalyticsFilterBar from '@/modules/analytics/AnalyticsFilterBar.vue'
 import AnalyticsMetricGrid from '@/modules/analytics/AnalyticsMetricGrid.vue'
 import { analyticsApi } from '@/modules/analytics/analytics.api'
-import { countBars, dailyOption, donutOption, durationBars, funnelBars, rateBars } from '@/modules/analytics/chartOptions'
+import { countBars, dailyOption, dailySeriesOption, donutOption, durationBars, funnelBars, rateBars } from '@/modules/analytics/chartOptions'
 import type {
   AnalyticsQuery,
   ContactsResponse,
@@ -23,12 +24,16 @@ type Payload = IngestionResponse | PapersResponse | ContactsResponse
 interface ChartDefinition { key: string; title: string; description: string; option: EChartsCoreOption; size: number; height: number }
 
 const props = defineProps<{ view: ViewName }>()
+const route = useRoute()
 const { filter, query, reset, sync } = useAnalyticsFilters()
 const payload = ref<Payload | null>(null)
+const loadedView = ref<ViewName | null>(null)
+const loadedQuery = ref<AnalyticsQuery | null>(null)
 const options = ref<FilterOptionsResponse | null>(null)
 const loading = ref(true)
 const exporting = ref(false)
 const error = ref<string | null>(null)
+let requestSerial = 0
 
 const page = computed(() => ({
   ingestion: { title: '采集分析', subtitle: '从 arXiv 查询匹配到 Source 解析与邮箱发现的完整采集漏斗' },
@@ -36,14 +41,18 @@ const page = computed(() => ({
   contacts: { title: '联系人分析', subtitle: '联系人发现质量、域名、规则与协作关系；域名后缀不代表机构归属' },
 }[props.view]))
 
-const freshness = computed(() => payload.value?.freshness.dataThrough
-  ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(payload.value.freshness.dataThrough))
-  : '暂无数据')
+const currentPayload = computed(() => loadedView.value === props.view ? payload.value : null)
+const freshness = computed(() => {
+  const dataThrough = currentPayload.value?.freshness.dataThrough
+  return dataThrough
+    ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(dataThrough))
+    : '暂无数据'
+})
 
 const charts = computed<ChartDefinition[]>(() => {
-  if (!payload.value) return []
+  if (!currentPayload.value) return error.value ? errorCharts(props.view) : []
   if (props.view === 'ingestion') {
-    const data = payload.value as IngestionResponse
+    const data = currentPayload.value as IngestionResponse
     const duration: NamedCount[] = [
       { key: 'average', label: '平均', count: data.duration.averageMs },
       { key: 'p50', label: 'P50', count: data.duration.p50Ms },
@@ -57,13 +66,15 @@ const charts = computed<ChartDefinition[]>(() => {
       chart('statuses', '最新解析状态', '同一论文只计最新 extraction run。', donutOption(data.extractionStatuses), data.extractionStatuses.length),
       chart('duration', '解析耗时分位数', `样本 ${data.duration.samples} 个，单位为毫秒。`, durationBars(duration), data.duration.samples),
       chart('errors', 'Worker 错误码', '按任务错误码聚合；不展示可能含敏感内容的错误摘要。', countBars(data.workerErrors, true), data.workerErrors.length),
-      chart('throughput', '任务处理量', '按 arXiv 任务最终状态汇总 processed_count。', countBars(data.jobThroughput), data.jobThroughput.length),
+      chart('throughput', '每日任务处理量', '按 UTC 日期与 arXiv 任务最终状态汇总 processed_count。', dailySeriesOption(data.jobThroughput), data.jobThroughput.length),
     ]
   }
   if (props.view === 'papers') {
-    const data = payload.value as PapersResponse
+    const data = currentPayload.value as PapersResponse
     return [
       chart('categories', 'Primary Category 分布', '按论文主分类统计，默认展示前 20 项。', countBars(data.categories, true), data.categories.length, 360),
+      chart('allCategories', '全部 Category 分布', '包含 Primary 与 Cross-list 关系，按不同论文数统计。', countBars(data.allCategories, true), data.allCategories.length, 360),
+      chart('crossListCategories', 'Cross-list Category 分布', '仅统计 Cross-list 关系。', countBars(data.crossListCategories, true), data.crossListCategories.length, 360),
       chart('groups', 'arXiv Group 分布', '由官方分类树映射；未分类论文单独列出。', donutOption(data.groups), data.groups.length),
       chart('relations', 'Primary / Cross-list 覆盖', '一篇论文可同时出现在多个关系类型中。', donutOption(data.categoryRelations), data.categoryRelations.length),
       chart('published', '发表月份', '显示 arXiv submitted_at，但论文仍受导入日期队列筛选。', dailyOption(data.publicationMonths), data.publicationMonths.length),
@@ -73,13 +84,13 @@ const charts = computed<ChartDefinition[]>(() => {
       chart('formats', 'Source 格式', '优先使用最新 extraction run 的格式，否则使用论文已知格式。', countBars(data.sourceFormats, true), data.sourceFormats.length),
     ]
   }
-  const data = payload.value as ContactsResponse
+  const data = currentPayload.value as ContactsResponse
   return [
     chart('domains', '邮箱域名 Top 20', '仅展示域名聚合，不返回或导出完整邮箱地址。', countBars(data.domains, true), data.domains.length, 380),
     chart('confidence', '置信度分布', '同一论文与联系人的多次提取只保留最新映射。', donutOption(data.confidence), data.confidence.length),
     chart('domainClass', '常见服务商 / 其他域名', '平台规则推导，仅用于域名分类，不推断机构归属。', donutOption(data.inferredDomainClasses), data.inferredDomainClasses.length),
     chart('discovery', '分类邮箱发现率', '分子为有联系人论文数，分母为该 Primary Category 论文数。', rateBars(data.categoryDiscovery), data.categoryDiscovery.length, 380),
-    chart('documents', '文档类与联系人发现', '只统计找到联系人的论文，其文档类来自最新解析。', countBars(data.documentClasses, true), data.documentClasses.length),
+    chart('documents', '文档类联系人发现率', '分子为找到联系人的论文，分母为该最新文档类的解析论文。', rateBars(data.documentClasses), data.documentClasses.length),
     chart('rules', '提取规则命中', '按脱敏 extraction evidence 的 rule_name 聚合。', countBars(data.extractionRules, true), data.extractionRules.length),
     chart('reuse', '邮箱跨论文复用', '按同一加密联系人关联的不同论文数分桶。', countBars(data.reuseBuckets), data.reuseBuckets.length),
     chart('coauthors', '高频共同作者对', '基础协作关系视图，按队列内共同论文数排序。', countBars(data.coauthorPairs, true), data.coauthorPairs.length, 380),
@@ -90,40 +101,60 @@ function chart(key: string, title: string, description: string, option: EChartsC
   return { key, title, description, option, size, height }
 }
 
+function errorCharts(view: ViewName): ChartDefinition[] {
+  const titles = view === 'ingestion'
+    ? ['每日导入吞吐', 'Source 采集漏斗', '最新解析状态', '解析耗时分位数', 'Worker 错误码', '每日任务处理量']
+    : view === 'papers'
+      ? ['Primary Category 分布', '全部 Category 分布', 'Cross-list Category 分布', 'arXiv Group 分布', 'Primary / Cross-list 覆盖', '发表月份', '更新月份', '每篇论文作者数', '论文版本数', 'Source 格式']
+      : ['邮箱域名 Top 20', '置信度分布', '常见服务商 / 其他域名', '分类邮箱发现率', '文档类联系人发现率', '提取规则命中', '邮箱跨论文复用', '高频共同作者对']
+  return titles.map((title, index) => chart(`error-${index}`, title, '', {}, 0))
+}
+
 function updateFilter(key: keyof AnalyticsQuery, value: string | undefined): void {
   Object.assign(filter, { [key]: value })
 }
 
 async function load(): Promise<void> {
+  const serial = ++requestSerial
+  const requestedView = props.view
+  const requestedQuery = { ...query.value }
   loading.value = true
   error.value = null
+  payload.value = null
+  loadedView.value = null
+  loadedQuery.value = null
   try {
-    const loader = analyticsApi[props.view]
-    const [result, available] = await Promise.all([loader(query.value), analyticsApi.filters(query.value)])
+    const loader = analyticsApi[requestedView]
+    const [result, available] = await Promise.all([loader(requestedQuery), analyticsApi.filters(requestedQuery)])
+    if (serial !== requestSerial || requestedView !== props.view) return
     payload.value = result
+    loadedView.value = requestedView
+    loadedQuery.value = requestedQuery
     options.value = available
   } catch {
+    if (serial !== requestSerial) return
     payload.value = null
+    loadedView.value = null
+    loadedQuery.value = null
     error.value = '统计数据加载失败，请检查筛选条件或稍后重试。'
   } finally {
-    loading.value = false
+    if (serial === requestSerial) loading.value = false
   }
 }
 
 async function apply(): Promise<void> {
-  await sync()
-  await load()
+  if (!await sync()) await load()
 }
 
 async function clear(): Promise<void> {
-  await reset()
-  await load()
+  if (!await reset()) await load()
 }
 
 async function exportCsv(): Promise<void> {
+  if (!currentPayload.value || !loadedQuery.value) return
   exporting.value = true
   try {
-    await analyticsApi.export(props.view, query.value)
+    await analyticsApi.export(props.view, loadedQuery.value)
   } catch {
     error.value = 'CSV 导出失败，请稍后重试。'
   } finally {
@@ -132,6 +163,7 @@ async function exportCsv(): Promise<void> {
 }
 
 onMounted(load)
+watch(() => [props.view, route.fullPath], load)
 </script>
 
 <template>
@@ -172,7 +204,7 @@ onMounted(load)
     </div>
 
     <AnalyticsMetricGrid
-      :metrics="payload?.metrics ?? []"
+      :metrics="currentPayload?.metrics ?? []"
       :loading="loading"
     />
 

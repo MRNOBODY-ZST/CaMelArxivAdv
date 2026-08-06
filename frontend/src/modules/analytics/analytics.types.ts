@@ -16,7 +16,7 @@ export interface AnalyticsWindow {
   timezone: 'UTC'
 }
 
-export interface Freshness { dataThrough: string; generatedAt: string }
+export interface Freshness { dataThrough: string | null; status: 'CURRENT' | 'NO_DATA'; generatedAt: string }
 
 export interface Metric {
   key: string
@@ -30,6 +30,7 @@ export interface Metric {
 
 export interface NamedCount { key: string; label: string; count: number }
 export interface DailyCount { date: string; count: number }
+export interface DailySeriesPoint { date: string; key: string; label: string; count: number }
 export interface Breakdown { key: string; label: string; numerator: number; denominator: number; rate: number }
 export interface FunnelStep { key: string; label: string; count: number; previousCount: number; rateFromPrevious: number }
 export interface DurationStats { samples: number; averageMs: number; p50Ms: number; p90Ms: number; p95Ms: number; p99Ms: number }
@@ -42,12 +43,13 @@ export interface OverviewResponse {
 export interface IngestionResponse {
   window: AnalyticsWindow; freshness: Freshness; metrics: Metric[]; funnel: FunnelStep[]
   duration: DurationStats; dailyImported: DailyCount[]; extractionStatuses: NamedCount[]
-  workerErrors: NamedCount[]; jobThroughput: NamedCount[]
+  workerErrors: NamedCount[]; jobThroughput: DailySeriesPoint[]
 }
 
 export interface PapersResponse {
   window: AnalyticsWindow; freshness: Freshness; metrics: Metric[]
-  groups: NamedCount[]; archives: NamedCount[]; categories: NamedCount[]; categoryRelations: NamedCount[]
+  groups: NamedCount[]; archives: NamedCount[]; categories: NamedCount[]; allCategories: NamedCount[]
+  crossListCategories: NamedCount[]; categoryRelations: NamedCount[]
   publicationMonths: NamedCount[]; updateMonths: NamedCount[]; authorCounts: NamedCount[]
   versionCounts: NamedCount[]; sourceFormats: NamedCount[]
 }
@@ -55,7 +57,7 @@ export interface PapersResponse {
 export interface ContactsResponse {
   window: AnalyticsWindow; freshness: Freshness; metrics: Metric[]
   confidence: NamedCount[]; domains: NamedCount[]; inferredDomainClasses: NamedCount[]
-  categoryDiscovery: Breakdown[]; documentClasses: NamedCount[]; extractionRules: NamedCount[]
+  categoryDiscovery: Breakdown[]; documentClasses: Breakdown[]; extractionRules: NamedCount[]
   reuseBuckets: NamedCount[]; coauthorPairs: NamedCount[]
 }
 

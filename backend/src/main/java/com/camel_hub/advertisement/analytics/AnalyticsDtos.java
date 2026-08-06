@@ -11,7 +11,7 @@ public final class AnalyticsDtos {
 
 	public record Window(LocalDate from, LocalDate to, String dateBasis, String timezone) { }
 
-	public record Freshness(Instant dataThrough, Instant generatedAt) { }
+	public record Freshness(Instant dataThrough, String status, Instant generatedAt) { }
 
 	public record Metric(
 			String key,
@@ -26,6 +26,8 @@ public final class AnalyticsDtos {
 	public record NamedCount(String key, String label, long count) { }
 
 	public record DailyCount(LocalDate date, long count) { }
+
+	public record DailySeriesPoint(LocalDate date, String key, String label, long count) { }
 
 	public record Breakdown(
 			String key, String label, long numerator, long denominator, double rate
@@ -67,7 +69,7 @@ public final class AnalyticsDtos {
 			List<DailyCount> dailyImported,
 			List<NamedCount> extractionStatuses,
 			List<NamedCount> workerErrors,
-			List<NamedCount> jobThroughput
+			List<DailySeriesPoint> jobThroughput
 	) { }
 
 	public record PapersResponse(
@@ -77,6 +79,8 @@ public final class AnalyticsDtos {
 			List<NamedCount> groups,
 			List<NamedCount> archives,
 			List<NamedCount> categories,
+			List<NamedCount> allCategories,
+			List<NamedCount> crossListCategories,
 			List<NamedCount> categoryRelations,
 			List<NamedCount> publicationMonths,
 			List<NamedCount> updateMonths,
@@ -93,7 +97,7 @@ public final class AnalyticsDtos {
 			List<NamedCount> domains,
 			List<NamedCount> inferredDomainClasses,
 			List<Breakdown> categoryDiscovery,
-			List<NamedCount> documentClasses,
+			List<Breakdown> documentClasses,
 			List<NamedCount> extractionRules,
 			List<NamedCount> reuseBuckets,
 			List<NamedCount> coauthorPairs

@@ -1,6 +1,6 @@
 # 数据模型与 ERD
 
-Flyway 从空库按七个不可变迁移建立 53 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+Flyway 从空库按九个不可变迁移建立 53 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
 
 ## 领域关系概览
 
@@ -49,6 +49,8 @@ erDiagram
 | `V5__rbac_defaults_and_auth_hardening.sql` | 26 项权限、5 个系统角色、认证加固 | 默认授权矩阵；token version/强制改密；refresh family 与登录审计索引 |
 | `V6__arxiv_discovery_and_job_runtime.sql` | 分类快照、OAI 游标、保存查询哈希、Job runtime、论文导入来源/搜索 | 单 active snapshot；同步 token 一致性；Job lineage/重放索引；论文全文 GIN 与稳定筛选索引 |
 | `V7__source_extraction_hardening.sql` | Source 运行幂等/尺寸/清理证明、联系人显示 nonce、映射乐观版本 | message 与 Job/Paper 唯一；清理时间一致性；联系人域/最新映射查询；映射版本非负 |
+| `V8__analytics_query_paths.sql` | Phase 5 有界事实聚合查询路径 | 导入日期、分类关系、最新 run/mapping、耗时、规则、Job Actor/日期和错误日期索引 |
+| `V9__correct_analytics_index_order.sql` | Phase 5 追加式索引修正 | 保持 V8 checksum；调整 Job/错误日期前导列；5 秒锁等待失败保护 |
 
 ## 数据语义
 
@@ -60,6 +62,7 @@ erDiagram
 - `paper_imports` 记录论文与 Job 的来源（Legacy/OAI）和导入时间，同一论文/Job 只记录一次。
 - `contacts` 是按独立 HMAC 去重的邮箱实体；规范化值与显示值分别用 AES-256-GCM 和不同随机 nonce 加密，只有 `email_domain` 等非敏感派生字段为明文。论文作者与联系人通过带乐观 `version` 的 `paper_author_contacts` 关联，证据只保存截断脱敏片段。
 - `extraction_runs` 以消息 ID 和 Job/Paper 保证幂等，记录归档/展开尺寸、文件数、解析器版本和临时目录清理证明；Source 原始归档不长期保存。
+- 分析不新增个人数据副本：最新映射在查询时按 `paper_id,contact_id` 选择，作者通过 `paper_authors.author_id` 去重，完整邮箱不解密。V4 聚合表保留给后续 Campaign/Tracking 刷新任务。
 - Source terminal 只有在 Job 的所有 `job_items` 已原子持久化结果且计数一致时才允许成功；失败消息不会留下半套联系人、提取运行或 `processed_messages`。
 - `campaign_recipients` 是活动获批时的不可变收件人快照，不从实时 Contact 关系直接发送。
 - `suppression_entries` 和 `unsubscribe_records` 在任何发送尝试前检查。

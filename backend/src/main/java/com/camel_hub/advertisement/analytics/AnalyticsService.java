@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
@@ -13,6 +14,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public class AnalyticsService {
@@ -53,23 +55,23 @@ public class AnalyticsService {
 	public Mono<AnalyticsDtos.OverviewResponse> overview(AnalyticsQuery query) {
 		AnalyticsFilter filter = query.normalize(clock);
 		Instant generatedAt = clock.instant();
-		return Mono.zip(
+		return sequential(
 				repository.core(filter),
 				repository.dailyImported(filter).collectList(),
 				repository.primaryCategories(filter, 10).collectList(),
 				repository.funnel(filter),
 				repository.activeJobs(filter).collectList(),
-				repository.freshness(filter)
+				repository.freshness(filter, true)
 		).map(values -> new AnalyticsDtos.OverviewResponse(
-				window(filter), freshness(values.getT6(), generatedAt),
-				overviewMetrics(values.getT1()), values.getT2(), values.getT3(),
-				funnel(values.getT4()), values.getT5()));
+				window(filter), freshness(result(values, 5), generatedAt),
+				overviewMetrics(result(values, 0)), result(values, 1), result(values, 2),
+				funnel(result(values, 3)), result(values, 4)));
 	}
 
 	public Mono<AnalyticsDtos.IngestionResponse> ingestion(AnalyticsQuery query) {
 		AnalyticsFilter filter = query.normalize(clock);
 		Instant generatedAt = clock.instant();
-		return Mono.zip(
+		return sequential(
 				repository.core(filter),
 				repository.funnel(filter),
 				repository.duration(filter),
@@ -77,71 +79,68 @@ public class AnalyticsService {
 				repository.extractionStatuses(filter).collectList(),
 				repository.workerErrors(filter).collectList(),
 				repository.jobThroughput(filter).collectList(),
-				repository.freshness(filter)
+				repository.freshness(filter, true)
 		).map(values -> new AnalyticsDtos.IngestionResponse(
-				window(filter), freshness(values.getT8(), generatedAt),
-				ingestionMetrics(values.getT1(), values.getT3()), funnel(values.getT2()),
-				values.getT3(), values.getT4(), values.getT5(), values.getT6(), values.getT7()));
+				window(filter), freshness(result(values, 7), generatedAt),
+				ingestionMetrics(result(values, 0), result(values, 2)), funnel(result(values, 1)),
+				result(values, 2), result(values, 3), result(values, 4), result(values, 5),
+				result(values, 6)));
 	}
 
 	public Mono<AnalyticsDtos.PapersResponse> papers(AnalyticsQuery query) {
 		AnalyticsFilter filter = query.normalize(clock);
 		Instant generatedAt = clock.instant();
-		var first = Mono.zip(
+		return sequential(
 				repository.core(filter), repository.paperGroups(filter).collectList(),
 				repository.paperArchives(filter).collectList(),
 				repository.primaryCategories(filter, 20).collectList(),
-				repository.categoryRelations(filter).collectList());
-		var second = Mono.zip(
+				repository.allCategories(filter, false, 20).collectList(),
+				repository.allCategories(filter, true, 20).collectList(),
+				repository.categoryRelations(filter).collectList(),
 				repository.paperMonths(filter, false).collectList(),
 				repository.paperMonths(filter, true).collectList(),
 				repository.authorCountBuckets(filter).collectList(),
 				repository.versionCountBuckets(filter).collectList(),
 				repository.sourceFormats(filter).collectList(),
-				repository.freshness(filter));
-		return Mono.zip(first, second).map(values -> {
-			var left = values.getT1();
-			var right = values.getT2();
-			return new AnalyticsDtos.PapersResponse(
-					window(filter), freshness(right.getT6(), generatedAt), paperMetrics(left.getT1()),
-					left.getT2(), left.getT3(), left.getT4(), left.getT5(),
-					right.getT1(), right.getT2(), right.getT3(), right.getT4(), right.getT5());
-		});
+				repository.freshness(filter, false)
+		).map(values -> new AnalyticsDtos.PapersResponse(
+				window(filter), freshness(result(values, 12), generatedAt), paperMetrics(result(values, 0)),
+				result(values, 1), result(values, 2), result(values, 3), result(values, 4), result(values, 5),
+				result(values, 6), result(values, 7), result(values, 8), result(values, 9), result(values, 10),
+				result(values, 11)));
 	}
 
 	public Mono<AnalyticsDtos.ContactsResponse> contacts(AnalyticsQuery query) {
 		AnalyticsFilter filter = query.normalize(clock);
 		Instant generatedAt = clock.instant();
-		var first = Mono.zip(
+		return sequential(
 				repository.core(filter), repository.contactConfidence(filter).collectList(),
 				repository.contactDomains(filter).collectList(),
 				repository.inferredDomainClasses(filter).collectList(),
-				repository.categoryDiscovery(filter).collectList());
-		var second = Mono.zip(
+				repository.categoryDiscovery(filter).collectList(),
 				repository.documentClasses(filter).collectList(),
 				repository.extractionRules(filter).collectList(),
 				repository.reuseBuckets(filter).collectList(),
 				repository.coauthorPairs(filter).collectList(),
-				repository.freshness(filter));
-		return Mono.zip(first, second).map(values -> {
-			var left = values.getT1();
-			var right = values.getT2();
-			return new AnalyticsDtos.ContactsResponse(
-					window(filter), freshness(right.getT5(), generatedAt), contactMetrics(left.getT1()),
-					left.getT2(), left.getT3(), left.getT4(), left.getT5(),
-					right.getT1(), right.getT2(), right.getT3(), right.getT4());
-		});
+				repository.freshness(filter, false)
+		).map(values -> new AnalyticsDtos.ContactsResponse(
+				window(filter), freshness(result(values, 9), generatedAt), contactMetrics(result(values, 0)),
+				result(values, 1), result(values, 2), result(values, 3), result(values, 4),
+				result(values, 5), result(values, 6), result(values, 7), result(values, 8)));
 	}
 
-	public Mono<AnalyticsDtos.FilterOptionsResponse> filters(AnalyticsQuery query) {
+	public Mono<AnalyticsDtos.FilterOptionsResponse> filters(AnalyticsQuery query, boolean includeUsers) {
 		AnalyticsFilter filter = query.normalize(clock);
-		return Mono.zip(
+		Mono<List<AnalyticsDtos.Option>> users = includeUsers
+				? repository.userOptions().collectList() : Mono.just(List.of());
+		return sequential(
 				repository.dateBounds(), repository.categoryOptions().collectList(),
-				repository.jobOptions(filter).collectList(), repository.userOptions().collectList(),
+				repository.jobOptions(filter).collectList(), users,
 				repository.domainOptions(filter).collectList()
 		).map(values -> new AnalyticsDtos.FilterOptionsResponse(
-				values.getT1().minimum(), values.getT1().maximum(), values.getT2(), values.getT3(),
-				values.getT4(), values.getT5(),
+				this.<AnalyticsRepository.DateBounds>result(values, 0).minimum(),
+				this.<AnalyticsRepository.DateBounds>result(values, 0).maximum(),
+				result(values, 1), result(values, 2), result(values, 3), result(values, 4),
 				List.of(
 						new AnalyticsDtos.Option("HIGH", "High"),
 						new AnalyticsDtos.Option("MEDIUM", "Medium"),
@@ -153,28 +152,30 @@ public class AnalyticsService {
 						new AnalyticsDtos.Option("CROSS_LIST", "Cross-list"))));
 	}
 
+	public Mono<AnalyticsDtos.FilterOptionsResponse> filters(AnalyticsQuery query) {
+		return filters(query, false);
+	}
+
 	public Mono<CsvExport> export(
 			String view,
+			String dataset,
 			AnalyticsQuery query,
 			UUID actorId,
 			AuthenticationRequestContext context
 	) {
 		String normalizedView = view == null ? "" : view.strip().toLowerCase(java.util.Locale.ROOT);
+		String normalizedDataset = dataset == null || dataset.isBlank()
+				? "all" : dataset.strip().toLowerCase(java.util.Locale.ROOT);
+		validateDataset(normalizedView, normalizedDataset);
 		Mono<CsvExport> result = switch (normalizedView) {
-			case "overview" -> overview(query).map(response -> csv(
-					"overview", response.metrics(), response.dailyImported(),
-					response.primaryCategories(), response.funnel()));
-			case "ingestion" -> ingestion(query).map(response -> csv(
-					"ingestion", response.metrics(), response.dailyImported(),
-					response.extractionStatuses(), response.funnel()));
-			case "papers" -> papers(query).map(response -> csv(
-					"papers", response.metrics(), List.of(), response.categories(), List.of()));
-			case "contacts" -> contacts(query).map(response -> csv(
-					"contacts", response.metrics(), List.of(), response.domains(), List.of()));
+			case "overview" -> overview(query).map(response -> overviewCsv(response, normalizedDataset));
+			case "ingestion" -> ingestion(query).map(response -> ingestionCsv(response, normalizedDataset));
+			case "papers" -> papers(query).map(response -> papersCsv(response, normalizedDataset));
+			case "contacts" -> contacts(query).map(response -> contactsCsv(response, normalizedDataset));
 			default -> Mono.error(new AnalyticsValidationException("Unknown analytics export view"));
 		};
 		return result.flatMap(export -> auditExport(
-				actorId, normalizedView, query.normalize(clock), context).thenReturn(export));
+				actorId, normalizedView, normalizedDataset, query.normalize(clock), context).thenReturn(export));
 	}
 
 	private AnalyticsDtos.Window window(AnalyticsFilter filter) {
@@ -182,8 +183,23 @@ public class AnalyticsService {
 				filter.fromDate(), filter.toDate(), "papers.imported_at", "UTC");
 	}
 
-	private AnalyticsDtos.Freshness freshness(Instant dataThrough, Instant generatedAt) {
-		return new AnalyticsDtos.Freshness(dataThrough, generatedAt);
+	private AnalyticsDtos.Freshness freshness(
+			AnalyticsRepository.DataFreshness freshness, Instant generatedAt
+	) {
+		return new AnalyticsDtos.Freshness(
+				freshness.dataThrough(), freshness.dataThrough() == null ? "NO_DATA" : "CURRENT", generatedAt);
+	}
+
+	private Mono<List<Object>> sequential(Mono<?>... sources) {
+		return Flux.fromArray(sources)
+				.concatMap(source -> source.map(value -> (Object) value)
+						.switchIfEmpty(Mono.error(new IllegalStateException("analytics query returned no row"))))
+				.collectList();
+	}
+
+	@SuppressWarnings("unchecked")
+	private <T> T result(List<Object> values, int index) {
+		return (T) values.get(index);
 	}
 
 	private List<AnalyticsDtos.Metric> overviewMetrics(AnalyticsRepository.CoreStats stats) {
@@ -276,31 +292,157 @@ public class AnalyticsService {
 				key, label, count, previous, AnalyticsRepository.rate(count, previous));
 	}
 
-	private CsvExport csv(
-			String view,
-			List<AnalyticsDtos.Metric> metrics,
-			List<AnalyticsDtos.DailyCount> daily,
-			List<AnalyticsDtos.NamedCount> breakdown,
-			List<AnalyticsDtos.FunnelStep> funnel
-	) {
+	private CsvExport overviewCsv(AnalyticsDtos.OverviewResponse response, String dataset) {
+		List<String> rows = new ArrayList<>();
+		if (dataset.equals("all")) addContext(rows, response.window(), response.freshness());
+		if (included(dataset, "metrics")) addMetrics(rows, response.metrics());
+		if (included(dataset, "daily-imported")) addDaily(rows, "daily-imported", response.dailyImported());
+		if (included(dataset, "primary-categories")) addNamed(rows, "primary-categories", response.primaryCategories());
+		if (included(dataset, "funnel")) addFunnel(rows, response.funnel());
+		if (included(dataset, "active-jobs")) addNamed(rows, "active-jobs", response.activeJobs());
+		return csv("overview", dataset, rows);
+	}
+
+	private CsvExport ingestionCsv(AnalyticsDtos.IngestionResponse response, String dataset) {
+		List<String> rows = new ArrayList<>();
+		if (dataset.equals("all")) addContext(rows, response.window(), response.freshness());
+		if (included(dataset, "metrics")) addMetrics(rows, response.metrics());
+		if (included(dataset, "funnel")) addFunnel(rows, response.funnel());
+		if (included(dataset, "duration")) addDuration(rows, response.duration());
+		if (included(dataset, "daily-imported")) addDaily(rows, "daily-imported", response.dailyImported());
+		if (included(dataset, "extraction-statuses")) addNamed(rows, "extraction-statuses", response.extractionStatuses());
+		if (included(dataset, "worker-errors")) addNamed(rows, "worker-errors", response.workerErrors());
+		if (included(dataset, "job-throughput")) addDailySeries(rows, "job-throughput", response.jobThroughput());
+		return csv("ingestion", dataset, rows);
+	}
+
+	private CsvExport papersCsv(AnalyticsDtos.PapersResponse response, String dataset) {
+		List<String> rows = new ArrayList<>();
+		if (dataset.equals("all")) addContext(rows, response.window(), response.freshness());
+		if (included(dataset, "metrics")) addMetrics(rows, response.metrics());
+		if (included(dataset, "groups")) addNamed(rows, "groups", response.groups());
+		if (included(dataset, "archives")) addNamed(rows, "archives", response.archives());
+		if (included(dataset, "primary-categories")) addNamed(rows, "primary-categories", response.categories());
+		if (included(dataset, "all-categories")) addNamed(rows, "all-categories", response.allCategories());
+		if (included(dataset, "cross-list-categories")) addNamed(rows, "cross-list-categories", response.crossListCategories());
+		if (included(dataset, "category-relations")) addNamed(rows, "category-relations", response.categoryRelations());
+		if (included(dataset, "publication-months")) addNamed(rows, "publication-months", response.publicationMonths());
+		if (included(dataset, "update-months")) addNamed(rows, "update-months", response.updateMonths());
+		if (included(dataset, "author-counts")) addNamed(rows, "author-counts", response.authorCounts());
+		if (included(dataset, "version-counts")) addNamed(rows, "version-counts", response.versionCounts());
+		if (included(dataset, "source-formats")) addNamed(rows, "source-formats", response.sourceFormats());
+		return csv("papers", dataset, rows);
+	}
+
+	private CsvExport contactsCsv(AnalyticsDtos.ContactsResponse response, String dataset) {
+		List<String> rows = new ArrayList<>();
+		if (dataset.equals("all")) addContext(rows, response.window(), response.freshness());
+		if (included(dataset, "metrics")) addMetrics(rows, response.metrics());
+		if (included(dataset, "confidence")) addNamed(rows, "confidence", response.confidence());
+		if (included(dataset, "domains")) addNamed(rows, "domains", response.domains());
+		if (included(dataset, "domain-classes")) addNamed(rows, "domain-classes", response.inferredDomainClasses());
+		if (included(dataset, "category-discovery")) addBreakdowns(rows, "category-discovery", response.categoryDiscovery());
+		if (included(dataset, "document-classes")) addBreakdowns(rows, "document-classes", response.documentClasses());
+		if (included(dataset, "extraction-rules")) addNamed(rows, "extraction-rules", response.extractionRules());
+		if (included(dataset, "reuse-buckets")) addNamed(rows, "reuse-buckets", response.reuseBuckets());
+		if (included(dataset, "coauthor-pairs")) addNamed(rows, "coauthor-pairs", response.coauthorPairs());
+		return csv("contacts", dataset, rows);
+	}
+
+	private CsvExport csv(String view, String dataset, List<String> dataRows) {
 		List<String> rows = new ArrayList<>();
 		rows.add("section,key,label,value,numerator,denominator,unit,date,definition");
+		rows.addAll(dataRows);
+		return new CsvExport("camel-arxiv-" + view + "-" + dataset + "-" + LocalDate.now(clock) + ".csv",
+				"\uFEFF" + String.join("\r\n", rows) + "\r\n");
+	}
+
+	private void addMetrics(List<String> rows, List<AnalyticsDtos.Metric> metrics) {
 		metrics.forEach(metric -> rows.add(String.join(",",
 				"metric", escaped(metric.key()), escaped(metric.label()), Double.toString(metric.value()),
 				Long.toString(metric.numerator()), Long.toString(metric.denominator()), escaped(metric.unit()), "",
 				escaped(metric.definition()))));
-		daily.forEach(point -> rows.add(String.join(",",
-				"daily", "imported", "Imported papers", Long.toString(point.count()), "", "", "count",
+	}
+
+	private void addContext(
+			List<String> rows, AnalyticsDtos.Window window, AnalyticsDtos.Freshness freshness
+	) {
+		rows.add(String.join(",", "window", "from", "From", "", "", "", "date",
+				window.from().toString(), ""));
+		rows.add(String.join(",", "window", "to", "To", "", "", "", "date",
+				window.to().toString(), ""));
+		rows.add(String.join(",", "window", "date-basis", escaped(window.dateBasis()), "", "", "",
+				"text", "", ""));
+		rows.add(String.join(",", "window", "timezone", escaped(window.timezone()), "", "", "",
+				"text", "", ""));
+		rows.add(String.join(",", "freshness", "data-through", "Data through", "", "", "",
+				"instant", freshness.dataThrough() == null ? "" : freshness.dataThrough().toString(), ""));
+		rows.add(String.join(",", "freshness", "status", escaped(freshness.status()), "", "", "",
+				"text", "", ""));
+		rows.add(String.join(",", "freshness", "generated-at", "Generated at", "", "", "",
+				"instant", freshness.generatedAt().toString(), ""));
+	}
+
+	private void addDaily(List<String> rows, String section, List<AnalyticsDtos.DailyCount> daily) {
+		daily.forEach(point -> rows.add(String.join(",", section, "imported", "Imported papers",
+				Long.toString(point.count()), "", "", "count",
 				point.date().toString(), "")));
-		breakdown.forEach(item -> rows.add(String.join(",",
-				"breakdown", escaped(item.key()), escaped(item.label()), Long.toString(item.count()),
+	}
+
+	private void addNamed(List<String> rows, String section, List<AnalyticsDtos.NamedCount> values) {
+		values.forEach(item -> rows.add(String.join(",", escaped(section), escaped(item.key()),
+				escaped(item.label()), Long.toString(item.count()),
 				"", "", "count", "", "")));
+	}
+
+	private void addBreakdowns(List<String> rows, String section, List<AnalyticsDtos.Breakdown> values) {
+		values.forEach(item -> rows.add(String.join(",", escaped(section), escaped(item.key()),
+				escaped(item.label()), Double.toString(item.rate()), Long.toString(item.numerator()),
+				Long.toString(item.denominator()), "rate", "", "")));
+	}
+
+	private void addFunnel(List<String> rows, List<AnalyticsDtos.FunnelStep> funnel) {
 		funnel.forEach(item -> rows.add(String.join(",",
-				"funnel", escaped(item.key()), escaped(item.label()), Long.toString(item.count()),
-				Long.toString(item.count()), Long.toString(item.previousCount()), "count", "", "")));
-		return new CsvExport(
-				"camel-arxiv-" + view + "-" + LocalDate.now(clock) + ".csv",
-				"\uFEFF" + String.join("\r\n", rows) + "\r\n");
+				"funnel", escaped(item.key()), escaped(item.label()), Double.toString(item.rateFromPrevious()),
+				Long.toString(item.count()), Long.toString(item.previousCount()), "rate", "", "")));
+	}
+
+	private void addDuration(List<String> rows, AnalyticsDtos.DurationStats duration) {
+		rows.add(String.join(",", "duration", "average", "Average", Double.toString(duration.averageMs()),
+				"", Long.toString(duration.samples()), "milliseconds", "", ""));
+		rows.add(String.join(",", "duration", "p50", "P50", Long.toString(duration.p50Ms()), "", "",
+				"milliseconds", "", ""));
+		rows.add(String.join(",", "duration", "p90", "P90", Long.toString(duration.p90Ms()), "", "",
+				"milliseconds", "", ""));
+		rows.add(String.join(",", "duration", "p95", "P95", Long.toString(duration.p95Ms()), "", "",
+				"milliseconds", "", ""));
+		rows.add(String.join(",", "duration", "p99", "P99", Long.toString(duration.p99Ms()), "", "",
+				"milliseconds", "", ""));
+	}
+
+	private void addDailySeries(
+			List<String> rows, String section, List<AnalyticsDtos.DailySeriesPoint> values
+	) {
+		values.forEach(item -> rows.add(String.join(",", escaped(section), escaped(item.key()),
+				escaped(item.label()), Long.toString(item.count()), "", "", "count",
+				item.date().toString(), "")));
+	}
+
+	private boolean included(String selected, String dataset) {
+		return selected.equals("all") || selected.equals(dataset);
+	}
+
+	private void validateDataset(String view, String dataset) {
+		Set<String> allowed = switch (view) {
+			case "overview" -> Set.of("all", "metrics", "daily-imported", "primary-categories", "funnel", "active-jobs");
+			case "ingestion" -> Set.of("all", "metrics", "funnel", "duration", "daily-imported", "extraction-statuses", "worker-errors", "job-throughput");
+			case "papers" -> Set.of("all", "metrics", "groups", "archives", "primary-categories", "all-categories", "cross-list-categories", "category-relations", "publication-months", "update-months", "author-counts", "version-counts", "source-formats");
+			case "contacts" -> Set.of("all", "metrics", "confidence", "domains", "domain-classes", "category-discovery", "document-classes", "extraction-rules", "reuse-buckets", "coauthor-pairs");
+			default -> throw new AnalyticsValidationException("Unknown analytics export view");
+		};
+		if (!allowed.contains(dataset)) {
+			throw new AnalyticsValidationException("Unknown analytics export dataset");
+		}
 	}
 
 	private String escaped(String value) {
@@ -317,6 +459,7 @@ public class AnalyticsService {
 	private Mono<Void> auditExport(
 			UUID actorId,
 			String view,
+			String dataset,
 			AnalyticsFilter filter,
 			AuthenticationRequestContext context
 	) {
@@ -327,7 +470,7 @@ public class AnalyticsService {
 				actorId, "ANALYTICS_EXPORT_CREATED", "ANALYTICS_VIEW", view,
 				hasher.hash(context.ipAddress()), context.userAgentSummary(), context.traceId(), Map.of(),
 				Map.of("from", filter.fromDate().toString(), "to", filter.toDate().toString(),
-						"dateBasis", "papers.imported_at"), AuditResult.SUCCESS, null));
+						"dateBasis", "papers.imported_at", "dataset", dataset), AuditResult.SUCCESS, null));
 	}
 
 	public record CsvExport(String filename, String content) { }

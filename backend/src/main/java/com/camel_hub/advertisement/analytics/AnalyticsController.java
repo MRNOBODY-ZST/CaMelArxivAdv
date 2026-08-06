@@ -8,10 +8,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -58,22 +60,28 @@ public class AnalyticsController {
 
 	@GetMapping("/filters")
 	@PreAuthorize("hasAuthority('analytics:read')")
-	Mono<AnalyticsDtos.FilterOptionsResponse> filters(@ModelAttribute AnalyticsQuery query) {
-		return service.filters(query);
+	Mono<AnalyticsDtos.FilterOptionsResponse> filters(
+			@ModelAttribute AnalyticsQuery query, Authentication authentication
+	) {
+		boolean includeUsers = authentication != null && authentication.getAuthorities().stream()
+				.anyMatch(authority -> authority.getAuthority().equals("user:read"));
+		return service.filters(query, includeUsers);
 	}
 
 	@GetMapping(value = "/{view}/export", produces = "text/csv;charset=UTF-8")
 	@PreAuthorize("hasAuthority('analytics:read')")
 	Mono<ResponseEntity<String>> export(
 			@PathVariable String view,
+			@RequestParam(defaultValue = "all") String dataset,
 			@ModelAttribute AnalyticsQuery query,
 			Principal principal,
 			ServerWebExchange exchange
 	) {
 		return service.export(
-				view, query, RequestContextSupport.actorId(principal), RequestContextSupport.context(exchange))
+				view, dataset, query, RequestContextSupport.actorId(principal), RequestContextSupport.context(exchange))
 				.map(export -> ResponseEntity.ok()
 						.contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
+						.header("X-Content-Type-Options", "nosniff")
 						.header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
 								.filename(export.filename(), StandardCharsets.UTF_8).build().toString())
 						.body(export.content()));

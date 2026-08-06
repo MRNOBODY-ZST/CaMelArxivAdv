@@ -36,7 +36,8 @@ class AnalyticsApiTest {
 				"papers.imported_at", "UTC");
 		var response = new AnalyticsDtos.OverviewResponse(
 				window, new AnalyticsDtos.Freshness(
-				Instant.parse("2026-08-06T10:00:00Z"), Instant.parse("2026-08-06T11:00:00Z")),
+						Instant.parse("2026-08-06T10:00:00Z"), "CURRENT",
+						Instant.parse("2026-08-06T11:00:00Z")),
 				List.of(new AnalyticsDtos.Metric(
 						"cohortPapers", "Imported papers", 12, 12, 1, "count", "definition")),
 				List.of(), List.of(), List.of(), List.of());

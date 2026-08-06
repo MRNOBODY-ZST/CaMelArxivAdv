@@ -1,6 +1,6 @@
 import type { EChartsCoreOption } from 'echarts/core'
 
-import type { Breakdown, DailyCount, FunnelStep, NamedCount } from '@/modules/analytics/analytics.types'
+import type { Breakdown, DailyCount, DailySeriesPoint, FunnelStep, NamedCount } from '@/modules/analytics/analytics.types'
 
 export const palette = ['#4f6ef7', '#22c55e', '#f59e0b', '#8b5cf6', '#06b6d4', '#ef4444', '#64748b']
 
@@ -38,6 +38,25 @@ export function dailyOption(data: DailyCount[] | NamedCount[]): EChartsCoreOptio
       areaStyle: line ? { color: 'rgba(79,110,247,.10)' } : undefined,
       itemStyle: { borderRadius: line ? 0 : [4, 4, 0, 0] }, barMaxWidth: 34,
     }],
+  }
+}
+
+export function dailySeriesOption(data: DailySeriesPoint[]): EChartsCoreOption {
+  const dates = [...new Set(data.map((item) => item.date))]
+  const groups = [...new Map(data.map((item) => [item.key, item.label])).entries()]
+  const line = dates.length >= 8
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'axis' },
+    legend: { bottom: 0, type: 'scroll', textStyle: { color: '#64748b', fontSize: 11 } },
+    grid: { left: 48, right: 18, top: 16, bottom: 70 },
+    xAxis: { type: 'category', data: dates, boundaryGap: !line, ...axis, axisLabel: { ...axis.axisLabel, rotate: dates.length > 8 ? 35 : 0 } },
+    yAxis: { type: 'value', minInterval: 1, ...axis, splitLine: { lineStyle: { color: '#eef2f7' } } },
+    series: groups.map(([key, label]) => ({
+      name: label, type: line ? 'line' : 'bar', stack: line ? undefined : 'throughput',
+      data: dates.map((date) => data.find((item) => item.date === date && item.key === key)?.count ?? 0),
+      smooth: false, symbol: 'circle', symbolSize: 6, barMaxWidth: 34,
+    })),
   }
 }
 

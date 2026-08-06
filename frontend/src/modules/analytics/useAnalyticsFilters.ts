@@ -1,4 +1,4 @@
-import { computed, reactive } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import type { AnalyticsQuery } from '@/modules/analytics/analytics.types'
@@ -33,21 +33,37 @@ export function useAnalyticsFilters() {
     confidence: text(route.query.confidence) as AnalyticsQuery['confidence'],
   })
 
+  watch(() => route.query, (routeQuery) => {
+    const fresh = defaultWindow()
+    Object.assign(filter, {
+      from: text(routeQuery.from) ?? fresh.from,
+      to: text(routeQuery.to) ?? fresh.to,
+      categoryId: text(routeQuery.categoryId),
+      relation: (text(routeQuery.relation) as AnalyticsQuery['relation']) ?? 'ALL',
+      jobId: text(routeQuery.jobId),
+      userId: text(routeQuery.userId),
+      domain: text(routeQuery.domain),
+      confidence: text(routeQuery.confidence) as AnalyticsQuery['confidence'],
+    })
+  }, { deep: true })
+
   const query = computed<AnalyticsQuery>(() => Object.fromEntries(
     Object.entries(filter).filter(([, value]) => value !== undefined && value !== ''),
   ) as unknown as AnalyticsQuery)
 
-  async function sync(): Promise<void> {
+  async function sync(): Promise<boolean> {
+    const before = route.fullPath
     await router.replace({ query: { ...query.value } })
+    return route.fullPath !== before
   }
 
-  async function reset(): Promise<void> {
+  async function reset(): Promise<boolean> {
     const fresh = defaultWindow()
     Object.assign(filter, {
       ...fresh, categoryId: undefined, relation: 'ALL', jobId: undefined,
       userId: undefined, domain: undefined, confidence: undefined,
     })
-    await sync()
+    return sync()
   }
 
   return { filter, query, reset, sync }

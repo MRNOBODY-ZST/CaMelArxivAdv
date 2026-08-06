@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -90,6 +91,32 @@ class FlywayMigrationTest {
 		assertThat(queryLong("SELECT count(*) FROM users")).isZero();
 	}
 
+	@Test
+	void upgradesAnExistingV8SchemaWithoutChangingPublishedChecksums() throws SQLException {
+		String schema = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+		Flyway throughV8 = Flyway.configure()
+				.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+				.schemas(schema)
+				.defaultSchema(schema)
+				.locations("classpath:db/migration")
+				.target("8")
+				.load();
+
+		try {
+			assertThat(throughV8.migrate().targetSchemaVersion.toString()).isEqualTo("8");
+			Flyway latest = Flyway.configure()
+					.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+					.schemas(schema)
+					.defaultSchema(schema)
+					.locations("classpath:db/migration")
+					.load();
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+		} finally {
+			dropSchema(schema);
+		}
+	}
+
 	private Flyway flyway() {
 		return Flyway.configure()
 				.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
@@ -144,6 +171,14 @@ class FlywayMigrationTest {
 			statement.executeUpdate("INSERT INTO ingestion_daily_stats (stat_date, category_id) VALUES (CURRENT_DATE, NULL)");
 			statement.executeUpdate("INSERT INTO contact_daily_stats (stat_date, category_id) VALUES (CURRENT_DATE, NULL)");
 			return true;
+		}
+	}
+
+	private void dropSchema(String schema) throws SQLException {
+		try (Connection connection = DriverManager.getConnection(
+				POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+			 var statement = connection.createStatement()) {
+			statement.execute("DROP SCHEMA " + schema + " CASCADE");
 		}
 	}
 }

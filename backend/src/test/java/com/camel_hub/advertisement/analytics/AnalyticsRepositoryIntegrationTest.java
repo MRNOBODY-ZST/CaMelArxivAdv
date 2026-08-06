@@ -1,5 +1,9 @@
 package com.camel_hub.advertisement.analytics;
 
+import com.camel_hub.advertisement.audit.AuditEvent;
+import com.camel_hub.advertisement.audit.AuditService;
+import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
+import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import io.r2dbc.spi.ConnectionFactories;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -15,6 +19,11 @@ import java.time.ZoneOffset;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AnalyticsRepositoryIntegrationTest {
 
@@ -101,6 +110,120 @@ class AnalyticsRepositoryIntegrationTest {
 		var contacts = service.contacts(empty).block();
 		assertThat(contacts.metrics()).allSatisfy(metric -> assertThat(metric.value()).isFinite());
 		assertThat(metric(contacts.metrics(), "discoveryRate").value()).isZero();
+		assertThat(contacts.freshness().status()).isEqualTo("NO_DATA");
+		assertThat(contacts.freshness().dataThrough()).isNull();
+	}
+
+	@Test
+	void zeroFillsDailySeriesAndKeepsDailyJobStatusDimensions() {
+		var ingestion = service.ingestion(query(null)).block();
+
+		assertThat(ingestion.dailyImported()).extracting(AnalyticsDtos.DailyCount::date)
+				.containsExactly(LocalDate.parse("2026-08-01"), LocalDate.parse("2026-08-02"),
+						LocalDate.parse("2026-08-03"));
+		assertThat(ingestion.dailyImported()).extracting(AnalyticsDtos.DailyCount::count)
+				.containsExactly(0L, 1L, 1L);
+		assertThat(ingestion.jobThroughput()).extracting(AnalyticsDtos.DailySeriesPoint::date)
+				.containsExactly(LocalDate.parse("2026-08-01"), LocalDate.parse("2026-08-02"),
+						LocalDate.parse("2026-08-03"));
+		assertThat(ingestion.jobThroughput()).extracting(AnalyticsDtos.DailySeriesPoint::count)
+				.containsExactly(0L, 3L, 0L);
+	}
+
+	@Test
+	void countsCanonicalAuthorsAcrossPapersAndReturnsDocumentClassDenominators() {
+		sql("""
+				INSERT INTO paper_authors (id, paper_id, author_id, author_order, raw_name)
+				VALUES ('51000000-0000-0000-0000-000000000004',
+				        '40000000-0000-0000-0000-000000000002',
+				        '50000000-0000-0000-0000-000000000001', 2, 'Alice');
+				INSERT INTO paper_author_contacts (
+				  id, paper_author_id, paper_id, contact_id, extraction_run_id, confidence,
+				  corresponding_author, human_verified, verification_status, created_at)
+				VALUES ('80000000-0000-0000-0000-000000000004',
+				        '51000000-0000-0000-0000-000000000004',
+				        '40000000-0000-0000-0000-000000000002',
+				        '70000000-0000-0000-0000-000000000001',
+				        '60000000-0000-0000-0000-000000000003', 'HIGH', false, false,
+				        'UNVERIFIED', '2026-08-03T01:01:00Z');
+				""");
+
+		var contacts = service.contacts(query(null)).block();
+		assertThat(metric(contacts.metrics(), "uniqueAuthors").value()).isEqualTo(2);
+		assertThat(contacts.documentClasses()).anySatisfy(row -> {
+			if (row.key().equals("revtex4-2")) {
+				assertThat(row.numerator()).isEqualTo(1);
+				assertThat(row.denominator()).isEqualTo(1);
+			}
+		});
+	}
+
+	@Test
+	void separatesPrimaryAllAndCrossListCategories() {
+		sql("""
+				INSERT INTO arxiv_categories (
+				  id, group_ref_id, archive_ref_id, group_id, group_name,
+				  archive_id, archive_name, category_id, category_name)
+				VALUES ('22000000-0000-0000-0000-000000000002',
+				        '20000000-0000-0000-0000-000000000001',
+				        '21000000-0000-0000-0000-000000000001',
+				        'cs', 'Computer Science', 'cs', 'Computer Science',
+				        'cs.HC', 'Human-Computer Interaction');
+				INSERT INTO paper_categories (paper_id, category_id, relation_type)
+				VALUES ('40000000-0000-0000-0000-000000000001',
+				        '22000000-0000-0000-0000-000000000002', 'CROSS_LIST');
+				""");
+
+		var papers = service.papers(query(null)).block();
+		assertThat(papers.categories()).extracting(AnalyticsDtos.NamedCount::key)
+				.containsExactly("cs.AI");
+		assertThat(papers.allCategories()).extracting(AnalyticsDtos.NamedCount::key)
+				.contains("cs.AI", "cs.HC");
+		assertThat(papers.crossListCategories()).singleElement()
+				.extracting(AnalyticsDtos.NamedCount::key).isEqualTo("cs.HC");
+	}
+
+	@Test
+	void exportUsesAnAllowlistedDatasetAndFiltersUserDirectoryOptions() {
+		var csv = service.export("contacts", "document-classes", query(null), ACTOR, null).block();
+
+		assertThat(csv.filename()).contains("contacts-document-classes");
+		assertThat(csv.content()).contains("document-classes").doesNotContain("domain-classes");
+		assertThatThrownBy(() -> service.export("contacts", "not-allowed", query(null), ACTOR, null))
+				.isInstanceOf(AnalyticsValidationException.class);
+		assertThat(service.filters(query(null), false).block().users()).isEmpty();
+		assertThat(service.filters(query(null), true).block().users()).singleElement()
+				.extracting(AnalyticsDtos.Option::label).asString().contains("analyst");
+	}
+
+	@Test
+	void allDatasetIncludesWindowFreshnessAndFunnelRate() {
+		var csv = service.export("ingestion", "all", query(null), ACTOR, null).block();
+
+		assertThat(csv.content())
+				.contains("window,from,From")
+				.contains("window,date-basis,\"papers.imported_at\"")
+				.contains("freshness,status,\"CURRENT\"")
+				.contains("funnel,\"imported\",\"已导入\",1.0,2,2,rate");
+	}
+
+	@Test
+	void csvHardensFormulaCellsAndAuditsTheSelectedDataset() {
+		sql("UPDATE arxiv_categories SET category_name = '=SUM(1,1)' WHERE category_id = 'cs.AI'");
+		AuditService audit = mock(AuditService.class);
+		SensitiveValueHasher hasher = mock(SensitiveValueHasher.class);
+		when(audit.record(any())).thenReturn(reactor.core.publisher.Mono.empty());
+		when(hasher.hash(any())).thenReturn(new byte[] {1, 2, 3});
+		service = new AnalyticsService(new AnalyticsRepository(databaseClient), audit, hasher);
+
+		var csv = service.export("overview", "primary-categories", query(null), ACTOR,
+				new AuthenticationRequestContext("127.0.0.1", "JUnit", "analytics-export-test")).block();
+
+		assertThat(csv.content()).startsWith("\uFEFFsection,key,label")
+				.contains("\"'=SUM(1,1)\"");
+		var captor = org.mockito.ArgumentCaptor.forClass(AuditEvent.class);
+		verify(audit).record(captor.capture());
+		assertThat(captor.getValue().afterSummary().get("dataset")).isEqualTo("primary-categories");
 	}
 
 	private AnalyticsQuery query(String domain) {

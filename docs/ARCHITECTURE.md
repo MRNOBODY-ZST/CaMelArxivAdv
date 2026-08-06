@@ -42,7 +42,7 @@ flowchart LR
 - Extraction：Source 处理、提取运行、联系人映射、证据和置信度。
 - Jobs：任务、任务项、事件、错误、worker 心跳和消息幂等。
 - Messaging：模板、SMTP 账户、Segment、Campaign、Recipient、Delivery。
-- Tracking/Analytics：签名 Token、事件、聚合、保留策略。
+- Analytics：对有界论文队列执行只读聚合、数据集导出和新鲜度说明；Tracking 在后续阶段提供签名 Token、事件与活动聚合。
 
 模块间通过应用服务和版本化消息交互，不允许跨模块绕过状态机直接修改核心状态。
 
@@ -52,7 +52,7 @@ flowchart LR
 2. Worker 按消息 `version`、`messageId`、`idempotencyKey` 验证并处理。
 3. 结果回写前检查 `processed_messages`，重复消息只 ACK，不重复产生业务副作用。
 4. `job_events` 驱动 SSE；客户端断线时使用任务详情轮询回退。
-5. 分析读取预聚合表/物化视图，不在请求路径扫描原始大表。
+5. Phase 5 分析按页面顺序执行有界、索引支持的事务事实聚合，避免单请求并发占满连接池；不扫描原始追踪事件。活动数据量增长后再切换到带新鲜度状态的 V4 预聚合表/物化视图。
 
 ## Phase 3 arXiv 数据路径
 
@@ -67,6 +67,12 @@ Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者
 授权用户从论文库发起单篇或有界批量提取。API 在一个事务内创建 `ARXIV_FETCH_AND_PARSE_SOURCE` Job、任务项、CREATED 事件和 Outbox 命令，并拒绝同一论文/解析器版本的并发非终态任务。Worker 只根据已验证 arXiv ID 构造官方 `e-print` URL；逐跳白名单、共享限速、流式大小/MIME/magic 检查后，在 tmpfs 中执行有界归档读取和 TeX/include 解析，从不执行 Source 内容。
 
 每篇结构化结果在后端信任边界再次校验。联系人以独立 AES-GCM nonce 加密，独立 HMAC 去重；论文作者、机构、映射、脱敏证据、提取运行、任务项和消息幂等标记原子写入。terminal 消息还要核对每个任务项已收到结果及计数总和，防止 poison result 进入 DLQ 后出现假成功。完整 Source 不进入 RabbitMQ、PostgreSQL 或 MinIO，Worker 只在临时目录删除后发布 `cleanupConfirmed=true`。
+
+## Phase 5 分析数据路径
+
+四类分析响应从同一个 `papers.imported_at` UTC 半开区间队列派生。最新 Source run 按论文去重，最新联系人映射先按论文/联系人去重再应用域名与置信度；作者按 canonical `authors.id` 跨论文去重。日期与任务状态序列补零，发现率类维度保留分子和分母。空队列返回 `freshness.status=NO_DATA` 和空 `dataThrough`，不会把筛选开始日伪装成数据时间。
+
+每个页面的 SQL 依次订阅，限制单请求同时占用的 R2DBC 连接。`analytics:read` 允许聚合和不含完整邮箱的 CSV；用户目录筛选选项还需 `user:read`。CSV `dataset` 使用固定 allowlist，`all` 精确覆盖当前响应的窗口、新鲜度和所有图表数据，并在审计中记录数据集。V8 保持不可变；V9 以追加迁移修正两个索引顺序并设置 5 秒锁等待上限，生产升级必须使用运维文档中的停写维护窗口。
 
 ## 安全设计
 

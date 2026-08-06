@@ -93,8 +93,8 @@ public class AnalyticsRepository {
 				  (SELECT count(*) FROM latest_runs WHERE status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED'))
 				    AS parsed_papers,
 				  (SELECT count(DISTINCT paper_id) FROM latest_mappings) AS papers_with_email,
-				  (SELECT count(DISTINCT paper_author_id) FROM latest_mappings
-				     WHERE paper_author_id IS NOT NULL) AS unique_authors,
+				  (SELECT count(DISTINCT pa.author_id) FROM latest_mappings lm
+				     JOIN paper_authors pa ON pa.id = lm.paper_author_id) AS unique_authors,
 				  (SELECT count(DISTINCT contact_id) FROM latest_mappings) AS unique_contacts,
 				  (SELECT count(*) FROM latest_mappings) AS mappings,
 				  (SELECT count(*) FROM latest_mappings WHERE corresponding_author) AS corresponding_mappings,
@@ -118,8 +118,15 @@ public class AnalyticsRepository {
 
 	Flux<AnalyticsDtos.DailyCount> dailyImported(AnalyticsFilter filter) {
 		return bind(databaseClient.sql(FILTERED_PAPERS + """
-				SELECT (imported_at AT TIME ZONE 'UTC')::date AS day, count(*) AS count
-				FROM filtered_papers GROUP BY day ORDER BY day
+				, dates AS (
+				  SELECT generate_series(:fromInclusive::date, (:toExclusive - interval '1 day')::date,
+				                         interval '1 day')::date AS day
+				), imported AS (
+				  SELECT (imported_at AT TIME ZONE 'UTC')::date AS day, count(*) AS count
+				  FROM filtered_papers GROUP BY day
+				)
+				SELECT dates.day, coalesce(imported.count, 0) AS count
+				FROM dates LEFT JOIN imported USING (day) ORDER BY dates.day
 				"""), filter).map((row, metadata) -> new AnalyticsDtos.DailyCount(
 				row.get("day", LocalDate.class), longValue(row, "count"))).all();
 	}
@@ -168,6 +175,21 @@ public class AnalyticsRepository {
 		return counts(filter, sql);
 	}
 
+	Flux<AnalyticsDtos.NamedCount> allCategories(AnalyticsFilter filter, boolean crossListOnly, int limit) {
+		String sql = """
+				SELECT c.category_id AS key, c.category_name AS label,
+				       count(DISTINCT pc.paper_id) AS count
+				FROM paper_categories pc
+				JOIN filtered_papers fp ON fp.id = pc.paper_id
+				JOIN arxiv_categories c ON c.id = pc.category_id
+				WHERE (:allCategoryRelations OR pc.relation_type = 'CROSS_LIST')
+				GROUP BY c.category_id, c.category_name
+				ORDER BY count DESC, c.category_id LIMIT %d
+				""".formatted(limit);
+		return bind(databaseClient.sql(FILTERED_PAPERS + sql), filter)
+				.bind("allCategoryRelations", !crossListOnly).map(this::namedCount).all();
+	}
+
 	Flux<AnalyticsDtos.NamedCount> extractionStatuses(AnalyticsFilter filter) {
 		return counts(filter, """
 				SELECT status AS key, initcap(replace(status, '_', ' ')) AS label, count(*) AS count
@@ -187,17 +209,33 @@ public class AnalyticsRepository {
 				"""), filter).map(this::namedCount).all();
 	}
 
-	Flux<AnalyticsDtos.NamedCount> jobThroughput(AnalyticsFilter filter) {
+	Flux<AnalyticsDtos.DailySeriesPoint> jobThroughput(AnalyticsFilter filter) {
 		return bindOperational(databaseClient.sql("""
-				SELECT j.status AS key, initcap(replace(j.status, '_', ' ')) AS label,
-				       coalesce(sum(j.processed_count), 0) AS count
-				FROM jobs j
-				WHERE j.created_at >= :fromInclusive AND j.created_at < :toExclusive
-				  AND j.type LIKE 'ARXIV_%'
-				  AND (:jobEmpty OR j.id = :jobId)
-				  AND (:userEmpty OR j.created_by = :userId)
-				GROUP BY j.status ORDER BY count DESC, j.status
-				"""), filter).map(this::namedCount).all();
+				WITH dates AS (
+				  SELECT generate_series(:fromInclusive::date, (:toExclusive - interval '1 day')::date,
+				                         interval '1 day')::date AS day
+				), scoped_jobs AS (
+				  SELECT (j.created_at AT TIME ZONE 'UTC')::date AS day, j.status, j.processed_count
+				  FROM jobs j
+				  WHERE j.created_at >= :fromInclusive AND j.created_at < :toExclusive
+				    AND j.type LIKE 'ARXIV_%'
+				    AND (:jobEmpty OR j.id = :jobId)
+				    AND (:userEmpty OR j.created_by = :userId)
+				), statuses AS (
+				  SELECT DISTINCT status FROM scoped_jobs
+				), totals AS (
+				  SELECT day, status, sum(processed_count) AS count
+				  FROM scoped_jobs GROUP BY day, status
+				)
+				SELECT dates.day, statuses.status AS key,
+				       initcap(replace(statuses.status, '_', ' ')) AS label,
+				       coalesce(totals.count, 0) AS count
+				FROM dates CROSS JOIN statuses
+				LEFT JOIN totals ON totals.day = dates.day AND totals.status = statuses.status
+				ORDER BY dates.day, statuses.status
+				"""), filter).map((row, metadata) -> new AnalyticsDtos.DailySeriesPoint(
+				row.get("day", LocalDate.class), row.get("key", String.class),
+				row.get("label", String.class), longValue(row, "count"))).all();
 	}
 
 	Flux<AnalyticsDtos.NamedCount> activeJobs(AnalyticsFilter filter) {
@@ -342,15 +380,20 @@ public class AnalyticsRepository {
 		}).all();
 	}
 
-	Flux<AnalyticsDtos.NamedCount> documentClasses(AnalyticsFilter filter) {
-		return counts(filter, """
+	Flux<AnalyticsDtos.Breakdown> documentClasses(AnalyticsFilter filter) {
+		return bind(databaseClient.sql(FILTERED_PAPERS + """
 				SELECT coalesce(lr.document_class, 'UNKNOWN') AS key,
 				       coalesce(lr.document_class, 'Unknown') AS label,
-				       count(DISTINCT lr.paper_id) AS count
-				FROM latest_runs lr WHERE EXISTS (
-				  SELECT 1 FROM latest_mappings lm WHERE lm.paper_id = lr.paper_id)
-				GROUP BY key, label ORDER BY count DESC, key
-				""");
+				       count(DISTINCT lr.paper_id) FILTER (WHERE lm.paper_id IS NOT NULL) AS numerator,
+				       count(DISTINCT lr.paper_id) AS denominator
+				FROM latest_runs lr LEFT JOIN latest_mappings lm ON lm.paper_id = lr.paper_id
+				GROUP BY key, label ORDER BY denominator DESC, key
+				"""), filter).map((row, metadata) -> {
+			long numerator = longValue(row, "numerator");
+			long denominator = longValue(row, "denominator");
+			return new AnalyticsDtos.Breakdown(row.get("key", String.class),
+					row.get("label", String.class), numerator, denominator, rate(numerator, denominator));
+		}).all();
 	}
 
 	Flux<AnalyticsDtos.NamedCount> extractionRules(AnalyticsFilter filter) {
@@ -393,19 +436,28 @@ public class AnalyticsRepository {
 				""");
 	}
 
-	Mono<Instant> freshness(AnalyticsFilter filter) {
+	Mono<DataFreshness> freshness(AnalyticsFilter filter, boolean includeOperational) {
 		return bind(databaseClient.sql(FILTERED_PAPERS + """
 				SELECT greatest(
 				  (SELECT max(imported_at) FROM filtered_papers),
 				  (SELECT max(completed_at) FROM latest_runs),
+				  (SELECT max(greatest(created_at, verified_at)) FROM latest_mappings),
 				  (SELECT max(c.last_extracted_at) FROM contacts c
-				     JOIN latest_mappings lm ON lm.contact_id = c.id)
+				     JOIN latest_mappings lm ON lm.contact_id = c.id),
+				  (SELECT max(j.updated_at) FROM jobs j
+				     WHERE :includeOperational AND j.type LIKE 'ARXIV_%'
+				       AND j.created_at >= :fromInclusive AND j.created_at < :toExclusive
+				       AND (:jobEmpty OR j.id = :jobId)
+				       AND (:userEmpty OR j.created_by = :userId)),
+				  (SELECT max(je.occurred_at) FROM job_errors je JOIN jobs j ON j.id = je.job_id
+				     WHERE :includeOperational AND j.type LIKE 'ARXIV_%'
+				       AND je.occurred_at >= :fromInclusive AND je.occurred_at < :toExclusive
+				       AND (:jobEmpty OR j.id = :jobId)
+				       AND (:userEmpty OR j.created_by = :userId))
 				) AS data_through
-				"""), filter).map((row, metadata) -> {
-					Instant value = row.get("data_through", Instant.class);
-					return value == null ? filter.fromInclusive() : value;
-				})
-				.one().defaultIfEmpty(filter.fromInclusive());
+				"""), filter).bind("includeOperational", includeOperational)
+				.map((row, metadata) -> new DataFreshness(
+				row.get("data_through", Instant.class))).one();
 	}
 
 	Mono<DateBounds> dateBounds() {
@@ -537,4 +589,6 @@ public class AnalyticsRepository {
 	) { }
 
 	record DateBounds(LocalDate minimum, LocalDate maximum) { }
+
+	record DataFreshness(Instant dataThrough) { }
 }

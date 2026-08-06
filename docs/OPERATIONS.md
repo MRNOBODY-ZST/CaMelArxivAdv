@@ -126,6 +126,10 @@ docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source
 
 开发/CI 只使用 Mailpit。后续启用真实 SMTP 前必须确认活动已审批、Recipient 快照已冻结、抑制/退订已应用、频率上限有效、域名认证完成。紧急停止应暂停 Campaign 消费者并保留队列，不删除 Recipient/Attempt 审计记录。
 
+## V9 分析索引修正维护窗口
+
+已发布 V8 必须保持 checksum 不变。V9 在 PostgreSQL 事务中删除并重建两条索引以修正日期前导列；`DROP/CREATE INDEX` 会与写入竞争。生产升级必须先进入停写维护窗口：停止 `backend-api`、`mail-worker`、`arxiv-worker`，确认 RabbitMQ 业务队列无进行中消息并记录积压，确认 PostgreSQL 有足够临时/索引磁盘空间和无长事务，再只启动一个迁移实例。V9 设置 `lock_timeout=5s`，仍有写事务时升级应快速失败，不得无限等待或反复重启争锁。成功后检查 `pg_stat_user_indexes` 中九个 `ix_*_analytics_*` 索引有效、应用只读对账和 `EXPLAIN` 命中，再恢复 API/Worker。若 5 秒锁超时，先找出并正常结束写入方；不得直接杀死未知事务。
+
 ## 保留与隐私
 
 `data_retention_policies` 是保留任务的事实配置。原始追踪事件、IP/User-Agent 派生数据、审计和导出文件应按不同期限清理。打开事件只能解释为估算信号；报告中明确 SMTP accepted 不等同 delivered。
@@ -140,4 +144,4 @@ Phase 3 于 2026-08-06 实测：Flyway V6 后为 53 张表、1 个物化视图�
 
 Phase 4 于 2026-08-06 实测：Flyway V7；后端 153 tests、Worker 68 tests、前端 30 tests 及各自完整质量门通过，Compose 九服务和三个镜像契约通过。真实 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 对 `2212.02256` 完成 TAR_GZIP 下载、解包、作者/联系人提取和原子回写，归档/展开尺寸为 488,729/913,762 bytes，临时目录清理确认。数据库密文不含 `@`、nonce 独立、HMAC 唯一；受权联系人列表脱敏、完整披露审计与 `mail-worker` 业务 API 404 均通过。桌面 1280×720 和移动 390×844 无页面级横向溢出，控制台零 warning/error；Worker RestartCount=0，验收后四个 arXiv 队列均为空。
 
-Phase 5 于 2026-08-06 实测：Flyway V8 分析索引生效；真实队列独立 SQL 与 overview/contact API 在论文、解析、邮箱论文、唯一联系人和映射数上完全一致，导出审计成功。桌面 1440×900 和移动 390×844 的三个分析页无横向溢出且控制台零 warning/error，联系人页不显示完整邮箱；九服务 healthy、应用容器 RestartCount=0、队列为空。详细口径与对账 SQL 见 [ANALYTICS.md](ANALYTICS.md)。
+Phase 5 于 2026-08-06 实测并经独立复核修正：Flyway V8 九条分析索引及追加式 V9 顺序修正生效；真实队列独立 SQL 与 API 的 canonical author、唯一联系人和映射数一致，导入日期、错误日期和最新映射查询计划均命中专用索引。受权 `dataset=domains` CSV 的 nosniff/文件名/审计正确；非法数据集 400、未认证 401、无 `user:read` 时用户选项为空。后端 170、Worker 68、前端 37 项测试和全部静态/构建门通过。桌面 1440×900 和移动 390×844 的三个分析页无横向溢出且控制台零 warning/error，联系人页不显示完整邮箱；九服务 healthy、应用容器 RestartCount=0、队列为空。详细口径与对账 SQL 见 [ANALYTICS.md](ANALYTICS.md)。

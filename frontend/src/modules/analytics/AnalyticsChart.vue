@@ -30,10 +30,14 @@ const props = withDefaults(defineProps<{
 const chartElement = ref<InstanceType<typeof globalThis.HTMLElement> | null>(null)
 let chart: EChartsType | null = null
 let observer: InstanceType<typeof globalThis.ResizeObserver> | null = null
+let reducedMotionQuery: ReturnType<typeof globalThis.matchMedia> | null = null
 
 function render(): void {
   if (!chart || props.loading || props.empty || props.error) return
-  chart.setOption(props.option, { notMerge: true })
+  const reducedMotion = reducedMotionQuery?.matches
+    ?? globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ?? false
+  chart.setOption({ ...props.option, animation: !reducedMotion }, { notMerge: true })
 }
 
 function downloadPng(): void {
@@ -48,6 +52,8 @@ onMounted(async () => {
   await nextTick()
   if (!chartElement.value) return
   chart = init(chartElement.value, undefined, { renderer: 'canvas' })
+  reducedMotionQuery = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null
+  reducedMotionQuery?.addEventListener('change', render)
   observer = new globalThis.ResizeObserver(() => chart?.resize())
   observer.observe(chartElement.value)
   render()
@@ -56,6 +62,7 @@ onMounted(async () => {
 watch(() => [props.option, props.loading, props.empty, props.error], render, { deep: true })
 
 onBeforeUnmount(() => {
+  reducedMotionQuery?.removeEventListener('change', render)
   observer?.disconnect()
   chart?.dispose()
 })
