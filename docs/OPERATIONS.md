@@ -34,6 +34,11 @@ docker compose logs --since=15m postgres rabbitmq redis
 | arXiv 预览 503 | Redis、`backend-api` 日志、官方状态 | Redis 故障时保持 fail-closed；不要临时绕过全局限速 |
 | 分类同步停在 PENDING | `outbox_messages.published_at`、`arxiv.jobs.worker` binding | 先修复 Outbox/RabbitMQ；不要直接手工替换 active snapshot |
 | OAI 同步反复重试 | Job checkpoint、`badResumptionToken`、官方 OAI 状态 | 让 Worker 按保存日期安全重启游标；不要编辑不透明 token |
+| Source 为 `SOURCE_UNAVAILABLE` | 官方论文 Source 可用性、Job 事件 | 这是论文级可接受终态；不要换第三方镜像或伪造 Source |
+| Source 为 `SECURITY_REJECTED` | 非敏感错误码、归档尺寸/格式、Worker 版本 | 保留归档边界，不手工解包；确认是否为格式变化后以测试夹具升级解析器 |
+| Source Job 已完成但无联系人 | 提取运行、作者、规则和脱敏证据 | 无邮箱是有效结果；不要按姓名/域名猜测或外部丰富 |
+| Source Job 无法进入终态 | `job_items`、结果队列/DLQ、`processed_messages` | 先处理未持久化的 item result；禁止直接把 Job 改为成功 |
+| Worker tmpfs 增长 | 当前 Job、heartbeat、容器 RestartCount | 暂停新任务，保留日志后安全重建 Worker；确认临时根为空再恢复 |
 | 邮件没有进入 Mailpit | `ALLOW_LIVE_SMTP`、mail-worker、Mailpit accepted 数 | 不改为真实 SMTP 作为排障手段 |
 | 数据库迁移失败 | `flyway_schema_history` 与 API logs | 停止扩容，修正新迁移；不要编辑已发布迁移 |
 
@@ -87,6 +92,19 @@ docker compose exec -T postgres psql -U camel -d camel_arxiv \
 
 正常拓扑包含 `arxiv.jobs.worker <- arxiv.#`、`arxiv.results.backend <- arxiv.#` 和 `arxiv.results.backend <- worker.heartbeat`。`mail-worker` 不应消费 arXiv 结果队列，且其 `mail-worker` profile 不注册 `/api/v1/**` 业务 Controller。
 
+Phase 4 Source 快速检查：
+
+```bash
+docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+docker compose exec -T postgres psql -U camel -d camel_arxiv \
+  -c "select id,status,current_stage,total_count,processed_count,success_count,failed_count from jobs where type='ARXIV_FETCH_AND_PARSE_SOURCE' order by created_at desc limit 20;"
+docker compose exec -T postgres psql -U camel -d camel_arxiv \
+  -c "select paper_id,status,source_format,archive_size_bytes,extracted_size_bytes,files_inspected,contacts_found,cleanup_confirmed from extraction_runs order by started_at desc limit 20;"
+docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source -mindepth 1 -maxdepth 1 -print -quit)"'
+```
+
+最后一条只判断临时根是否为空，不输出 Source 文件名/内容。联系人检查应比较记录数、nonce 是否不同、密文是否含 `@` 等布尔结果；不要把解密值打印到终端。完整邮箱的合规验证应通过受权 API 完成，并核对 `CONTACT_EMAIL_DISCLOSED` 审计数量。
+
 ## arXiv 限速、分类与 OAI
 
 - `ARXIV_MIN_REQUEST_INTERVAL` 不得小于 `PT3S`；Worker 同步使用 `ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS=3`。两端共享 Redis 全局预约协议。
@@ -95,6 +113,14 @@ docker compose exec -T postgres psql -U camel -d camel_arxiv \
 - 分类读取不依赖上游；首次空库从版本化 JSON 快照启动。管理员同步使用 OAI `ListSets`，保留两段式 physics set、离线描述和 alias；active snapshot 与 Job 成功终态原子切换。
 - OAI `resumptionToken` 是不透明短期值。Worker 将其保存在 Redis 用于 pause/requeue 恢复，后端在 `jobs.checkpoint` 和 `arxiv_sync_cursors` 保存持久状态；排障时只能查看长度、存在性和接收时间，不把 token 全文写日志或工单。
 - 暂停/取消是协作式的：当前官方 HTTP 请求完成后、下一次租约/请求前生效。重试保留原 Job 历史并创建新 lineage。
+
+## Source 提取运维
+
+- 官方 Source 请求与 Legacy/OAI 共用全局三秒租约；禁止为了吞吐建立绕过 Redis 的 Worker 池。
+- 默认只允许 tar/tar.gz/zip/gzip TeX/纯 TeX，并同时执行下载、展开、单文件、文件数、路径深度、include 深度、压缩比和解析时间上限。
+- Source 归档/展开文件只存在于 Worker tmpfs。`cleanup_confirmed=false` 不是可忽略告警，应隔离该 Worker 并确认目录和挂载生命周期。
+- 结果消息永久校验失败时可能进入 `arxiv.dead.archive`。先按 Job/Message ID 验证其确为本平台消息和失败根因；未知积压不得 purge。修复消费者后以原幂等键定点重放，重复结果会安全 ACK。
+- 联系人列表按论文筛选时选择该论文范围内最新映射；全局列表选择联系人全局最新映射。人工验证使用 `mappingId` 与 `expectedVersion`，409 表示应刷新而不是覆盖。
 
 ## 邮件安全操作
 
@@ -111,3 +137,5 @@ docker compose exec -T postgres psql -U camel -d camel_arxiv \
 Phase 2 同日实测：Flyway 更新到 V5；初始管理员强制改密；改密后旧 access/refresh 均为 401；refresh 单次轮换成功，旧值重放后整族失效且写入 `AUTH_REFRESH_REPLAY`；权限目录为 26 项；普通 `ADMIN` 的四类 `SUPER_ADMIN` 接管请求均为 403 并落审计，`VIEWER` 管理端请求为带 Trace ID 的 403；logout 后 refresh 为 401。用户/角色/审计三页通过桌面与 390×844 浏览器检查，页面无全局横向溢出且控制台零 warning/error。
 
 Phase 3 于 2026-08-06 实测：Flyway V6 后为 53 张表、1 个物化视图；后端 132 tests/`clean check`/`bootJar`、Worker 31 tests/Ruff/MyPy、前端 27 tests/ESLint/`vue-tsc`/Vite build 全部通过。真实官方查询 `reliable agents` 返回结果，选中导入 Job `e42fd065-25ce-42d7-a639-090c6913625f` 完成并持久化论文 `2212.02256`。OAI 分类同步 Job `18fed311-b1af-4dd7-ae09-148a867aac71` 原子完成 166 个分类、6 个 alias 和 155 条描述，包含 `hep-th`、`math-ph`、`quant-ph` 等两段式 set；`mail-worker` 的业务健康 API 返回 404。任务详情显示 CREATED/STARTED/BATCH/PROGRESS/COMPLETED 事件和新鲜 Worker 心跳；发现、任务、论文页面桌面无 console error，390×844 发现页 `scrollWidth=clientWidth=390`。
+
+Phase 4 于 2026-08-06 实测：Flyway V7；后端 153 tests、Worker 68 tests、前端 30 tests 及各自完整质量门通过，Compose 九服务和三个镜像契约通过。真实 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 对 `2212.02256` 完成 TAR_GZIP 下载、解包、作者/联系人提取和原子回写，归档/展开尺寸为 488,729/913,762 bytes，临时目录清理确认。数据库密文不含 `@`、nonce 独立、HMAC 唯一；受权联系人列表脱敏、完整披露审计与 `mail-worker` 业务 API 404 均通过。桌面 1280×720 和移动 390×844 无页面级横向溢出，控制台零 warning/error；Worker RestartCount=0，验收后四个 arXiv 队列均为空。

@@ -16,7 +16,7 @@ flowchart LR
     Q --> M["Spring Mail Worker"]
     W -->|"版本化结果/心跳"| Q
     W --> L["arXiv Legacy API"]
-    W --> H["arXiv OAI-PMH / ListSets"]
+    W --> H["arXiv OAI-PMH / ListSets / Source"]
     M --> D["Mailpit 或经批准 SMTP"]
     M --> P
 ```
@@ -28,7 +28,7 @@ flowchart LR
 | `frontend` | Nginx 静态站点、API/Tracking 反向代理、安全头 | 无 | 生产唯一入口 8080 |
 | `backend-api` | WebFlux API、授权、任务编排、Flyway | PostgreSQL | 仅内部 8080 |
 | `mail-worker` | 邮件快照消费、频控、SMTP 发送与回写；`mail-worker` profile 不注册任何业务 API Controller | PostgreSQL/RabbitMQ | 仅内部 Actuator 健康端口 |
-| `arxiv-worker` | Legacy/OAI 元数据和分类同步；Phase 4 再增加 Source 安全解包/提取 | Redis 租约/RabbitMQ | 不暴露端口 |
+| `arxiv-worker` | Legacy/OAI 元数据、分类同步，以及 Source 安全下载/解包/TeX 提取 | Redis 租约/RabbitMQ；Source 仅在 tmpfs 短暂存在 | 不暴露端口 |
 | `postgres` | 业务事实、审计、任务、分析聚合 | named volume | 内部 |
 | `redis` | 限速、短期锁、缓存、SSE 协调 | named volume | 内部 |
 | `rabbitmq` | 版本化异步消息、重试、死信 | named volume | 内部 |
@@ -62,6 +62,12 @@ Java 与 Python 使用同一 Redis server-time Lua 协议和租约键，所有�
 
 Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者在同一事务中写 `processed_messages`、论文/分类、任务计数和 `job_events`。分类内容只随成功 terminal 结果提交，快照激活和 Job `SUCCEEDED` 原子完成；ListSets 数据会与当前离线元数据合并以保留描述和 alias。消失分类只标记 inactive，既有论文关系不会被删除。重复消息 ACK 但不重复副作用，重复快照内容复用既有 snapshot。
 
+## Phase 4 Source 数据路径
+
+授权用户从论文库发起单篇或有界批量提取。API 在一个事务内创建 `ARXIV_FETCH_AND_PARSE_SOURCE` Job、任务项、CREATED 事件和 Outbox 命令，并拒绝同一论文/解析器版本的并发非终态任务。Worker 只根据已验证 arXiv ID 构造官方 `e-print` URL；逐跳白名单、共享限速、流式大小/MIME/magic 检查后，在 tmpfs 中执行有界归档读取和 TeX/include 解析，从不执行 Source 内容。
+
+每篇结构化结果在后端信任边界再次校验。联系人以独立 AES-GCM nonce 加密，独立 HMAC 去重；论文作者、机构、映射、脱敏证据、提取运行、任务项和消息幂等标记原子写入。terminal 消息还要核对每个任务项已收到结果及计数总和，防止 poison result 进入 DLQ 后出现假成功。完整 Source 不进入 RabbitMQ、PostgreSQL 或 MinIO，Worker 只在临时目录删除后发布 `cleanupConfirmed=true`。
+
 ## 安全设计
 
 - Nginx 设置 CSP、`nosniff`、拒绝 frame、权限策略和严格 Referrer Policy。
@@ -69,6 +75,8 @@ Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者
 - 生产 Compose 只发布 Nginx；开发覆盖才发布 Mailpit/MinIO 控制台。
 - 所有响应携带或生成 Trace ID；错误不暴露堆栈和 Secret。
 - `ALLOW_LIVE_SMTP=false` 是默认值和 Compose 契约，后续真实发送还需要审批状态机。
+- Source 出站 URL 固定为官方 HTTPS；归档路径、链接、文件数/尺寸/深度/压缩比和解析时间均有上限，且禁止运行 TeX 或 shell。
+- 完整联系人只允许显式单条披露；列表/证据默认脱敏，披露和人工验证均审计。
 
 ## 前端设计基线
 

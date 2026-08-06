@@ -39,13 +39,16 @@
 - Phase 1（工程基础）：**已完成，2026-08-05 验收**。
 - Phase 2（认证与 RBAC）：**已完成，2026-08-05 验收**。
 - Phase 3（arXiv 发现与导入）：**已完成，2026-08-06 验收**。
-- Phase 4–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
+- Phase 4（Source 解析）：**已完成，2026-08-06 验收**。
+- Phase 5–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
 
 Phase 1 实际证据：后端 `clean check bootJar` 成功；Testcontainers 从空 PostgreSQL 执行 4 个 Flyway 迁移并建立 50 张表；Python 8 tests、Ruff、MyPy strict 成功；前端 7 tests、ESLint、`vue-tsc`、Vite build 成功；Compose/镜像契约成功；九服务均健康，外部健康 API、Mailpit 和 MinIO Console 可达。浏览器验证桌面 1280×720、移动 390×844 均无横向溢出和 console warning/error，移动抽屉焦点恢复正常。
 
 Phase 2 实际证据：Flyway V5 幂等建立 26 项权限和 5 个系统角色；后端全量 `clean check bootJar`、前端 25 项 Vitest/ESLint/`vue-tsc`/Vite build 均通过。真实 HTTP 验证了初始管理员强制改密、改密后 access/refresh 立即失效、refresh 轮换及重放整族撤销、logout、拒绝/重放审计、普通 `ADMIN` 无法接管 `SUPER_ADMIN`、角色不变量以及 `VIEWER` 403。真实 `ForwardedHeaderTransformer` 和容器内 HTTP 验证两个代理客户端形成独立 IP 限流桶。生产 Compose 缺失认证密钥时拒绝渲染，九服务重建后健康；用户、角色、审计页面在桌面与 390×844 下无页面级横向溢出，控制台零 warning/error。
 
 Phase 3 实际证据：Flyway V6 从空库建立 53 张表和 1 个物化视图；后端 132 tests/`clean check`/`bootJar`、Python 31 tests/Ruff/MyPy、前端 27 tests/ESLint/`vue-tsc`/Vite build 均通过。真实 Compose 运行验证了官方分类离线读取、Legacy API 查询预览、Redis 全局租约、Outbox/RabbitMQ、Worker 心跳、选中论文导入、任务事件/终态和论文持久化；真实导入 `2212.02256` 成功。管理员分类同步通过 OAI `ListSets` 形成完整 Job → Outbox → Worker → 结果快照闭环，Job `18fed311-b1af-4dd7-ae09-148a867aac71` 原子完成 166 个分类、6 个 alias 和 155 条描述；两段式 physics set 被保留，重复内容复用既有快照且历史分类只失活不删除。`mail-worker` Profile 的业务 API 真实请求返回 404。桌面发现/任务/论文流程与 390×844 发现页均无全局横向溢出，控制台零 error。
+
+Phase 4 实际证据：Flyway V7 后保持 53 张表和 1 个物化视图并增加 Source 幂等/尺寸/清理证明、独立显示 nonce 与映射乐观版本；后端 153 tests/`clean check`/`bootJar`、Python 68 tests/Ruff/MyPy strict（41 files）、前端 30 tests/ESLint/`vue-tsc`/Vite build 全部通过，Compose 九服务与三个非 root 镜像契约通过。真实官方 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 解析论文 `2212.02256`：`TAR_GZIP` 归档 488,729 bytes、展开 913,762 bytes、检查 1 个 TeX 文件，按顺序保留 2 位作者并得到 2 个 `HIGH`/`UNVERIFIED` 明确联系人；数据库验证规范化/显示 nonce 全部不同、HMAC 唯一、两类密文均不含 `@`，Worker 临时根为空且 RestartCount=0。受权 HTTP 验证列表始终脱敏、单条完整披露和披露审计成功、论文提取记录清理确认可见；`mail-worker` 业务 API 为 404。桌面 1280×720 与移动 390×844 的联系人/论文详情均 `scrollWidth=clientWidth`，七个指定标签页可用，控制台零 warning/error；验收 QA 账号及失败试跑的单条 DLQ 消息均已删除，四个 arXiv 队列最终为空。
 
 ## 阶段验收规则
 

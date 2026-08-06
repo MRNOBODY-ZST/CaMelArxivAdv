@@ -112,7 +112,36 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 | `POST /api/v1/jobs/{id}/cancel` | `job:manage` | 在下一官方请求前协作式取消 |
 | `POST /api/v1/jobs/{id}/retry` | `job:manage` | 从终态创建新 execution lineage，并在同一事务写入使用新 Job/Message/幂等键的 Outbox 命令 |
 | `GET /api/v1/papers` | `paper:read` | 数据库侧筛选、稳定排序与分页；支持分类、日期、标题、作者、Source、DOI、期刊引用 |
-| `GET /api/v1/papers/{id}` | `paper:read` | 返回元数据、作者、分类、版本、导入来源和已清理原始元数据 |
+| `GET /api/v1/papers/{id}` | `paper:read` | 返回元数据、通讯作者标记、分类、版本、导入来源、Source 状态、提取运行和已清理原始元数据 |
+| `POST /api/v1/papers/{id}/extract` | `paper:import` | 为一篇已导入论文创建 Source 下载/解析任务，返回 202 与 Job ID |
+| `POST /api/v1/papers/batch-extract` | `paper:import` | 接受唯一 `paperIds` 数组并创建有界批量任务；缺失、重复或存在并发非终态任务时原子拒绝 |
+
+批量请求示例：
+
+```json
+{"paperIds":["615e263f-0041-48f6-9331-7a3e909344c6"]}
+```
+
+### 联系人与证据
+
+| 方法与路径 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/contacts` | `contact:read_masked` | 按 `domain`、`confidence`、`verificationStatus`、`corresponding`、`paperId` 和分页筛选；邮箱始终脱敏 |
+| `GET /api/v1/contacts/{id}` | `contact:read_masked` | 返回最新映射与截断脱敏证据；默认不解密完整地址 |
+| `GET /api/v1/contacts/{id}?full=true` | `contact:read_full` | 显式单条解密；成功后写 `CONTACT_EMAIL_DISCLOSED` 审计 |
+| `PATCH /api/v1/contacts/{id}/verification` | `contact:verify` | 以 `mappingId`、`expectedVersion` 和 `CONFIRMED`/`REJECTED` 做乐观并发更新并审计 |
+
+验证请求示例：
+
+```json
+{
+  "mappingId":"0bb1cd2a-5a5d-4492-95b6-3f4fb3eb92fe",
+  "expectedVersion":0,
+  "status":"CONFIRMED"
+}
+```
+
+机器提取的联系人默认 `UNVERIFIED`。API 不支持批量完整邮箱披露；列表、Job 事件和错误体不会返回完整地址。
 
 ## 统一错误
 
@@ -162,6 +191,8 @@ RabbitMQ 信封固定包含：
 不支持的 `version` 必须拒绝；消费者只有在幂等写入成功后 ACK。
 
 Phase 3 的 RabbitMQ 拓扑使用 `arxiv.jobs`、`arxiv.results`、`arxiv.retry` 和 `arxiv.dead` 四个 durable topic exchange。命令 routing key 为 `arxiv.import.metadata`、`arxiv.sync.oai`、`arxiv.sync.taxonomy`；结果和 `worker.heartbeat` 均进入 API 结果队列。元数据批次最多 100 条，分类最多 500 条；分类内容随 `ARXIV_JOB_COMPLETED` 传输，使 active snapshot 与成功终态在一个数据库事务中提交。所有消息按数据库列宽做严格版本、大小和字段校验，永久约束错误进入 DLQ。
+
+Phase 4 增加命令 `arxiv.extract.source` 和结果 `ARXIV_EXTRACTION_RESULT`。命令只含 Job、解析器版本及有界 `{paperId, arxivId}` 目标，不含 URL；结果只含 Source 状态/格式/尺寸、检查文件数、作者/机构、规范化联系人、置信度和脱敏证据，不含归档或 TeX 正文。API 在每篇结果事务中写提取运行、加密联系人、映射、证据、任务项、事件与幂等标记；只有全部任务项结果已持久化且计数一致，`ARXIV_JOB_COMPLETED` 才能提交任务终态。
 
 ## 追踪入口预留
 

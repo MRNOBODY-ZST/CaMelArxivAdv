@@ -1,6 +1,6 @@
 # Phase 4 Source Extraction Implementation Plan
 
-**Status:** In progress.
+**Status:** Completed and accepted on 2026-08-06.
 
 **Goal:** Let an authorized user enqueue source extraction for imported arXiv papers, safely download and inspect official source packages in the isolated Python Worker, persist authors/contacts/evidence without retaining source files, and review the result through protected APIs and responsive UI.
 
@@ -104,3 +104,11 @@
 - Review authorization, SSRF, archive traversal/bomb, parser execution, privacy/log, crypto, idempotency, transaction, and secret-leak boundaries before marking Phase 4 complete.
 
 **Final checkpoint:** update Phase 4 to complete only after all observed evidence passes, then commit `feat: complete phase four source extraction`.
+
+## Acceptance evidence
+
+- Backend: 153 tests plus `clean check bootJar`; Worker: 68 tests, Ruff, MyPy strict over 41 files; frontend: 30 tests, ESLint, `vue-tsc`, production build.
+- Compose: nine running/healthy services; three application images run as non-root and include the Phase 4 worker imports; API and Mail Worker profiles remain isolated.
+- Real official paper: Job `81f0900e-2865-4044-8c42-dff7899505db` parsed `2212.02256` as `TAR_GZIP` (488,729 archive bytes, 913,762 expanded bytes), preserved two authors, stored two encrypted contacts, and confirmed cleanup.
+- Privacy/runtime: separate normalized/display nonces, unique HMACs, no `@` byte in either ciphertext, masked list/evidence, audited authorized disclosure, empty Worker temp root, zero Worker restarts, no plaintext email pattern in application logs.
+- Browser: contacts and all seven paper-detail tabs passed at 1280×720 and 390×844 with no page-level overflow or authenticated-flow console warnings/errors. Evidence screenshots are `docs/design/phase4-contacts-desktop.png` and `docs/design/phase4-contacts-mobile.png`.

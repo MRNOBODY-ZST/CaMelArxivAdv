@@ -30,6 +30,8 @@ x-backend-environment: &backend-environment
   AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-Strict}
   JWT_SIGNING_KEY_BASE64: ${JWT_SIGNING_KEY_BASE64:?JWT_SIGNING_KEY_BASE64 is required}
   AUTH_FINGERPRINT_HMAC_KEY_BASE64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:?AUTH_FINGERPRINT_HMAC_KEY_BASE64 is required}
+  APP_ENCRYPTION_KEY_BASE64: ${APP_ENCRYPTION_KEY_BASE64:?APP_ENCRYPTION_KEY_BASE64 is required}
+  APP_EMAIL_HMAC_KEY_BASE64: ${APP_EMAIL_HMAC_KEY_BASE64:?APP_EMAIL_HMAC_KEY_BASE64 is required}
   ARXIV_LEGACY_BASE_URL: https://export.arxiv.org/api/query
   ARXIV_OAI_BASE_URL: https://oaipmh.arxiv.org/oai
   ARXIV_OFFICIAL_HOSTS: export.arxiv.org,oaipmh.arxiv.org,arxiv.org
@@ -193,7 +195,16 @@ services:
       ARXIV_WORKER_REDIS_URL: redis://redis:6379/0
       ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS: "3"
       ARXIV_WORKER_LOG_LEVEL: INFO
+      ARXIV_WORKER_SOURCE_BASE_URL: https://export.arxiv.org/e-print
+      ARXIV_WORKER_TEMP_ROOT: /var/tmp/arxiv-source
+      ARXIV_WORKER_MAX_ARCHIVE_BYTES: ${ARXIV_SOURCE_MAX_ARCHIVE_BYTES:-52428800}
+      ARXIV_WORKER_MAX_EXTRACTED_BYTES: ${ARXIV_SOURCE_MAX_EXTRACTED_BYTES:-262144000}
+      ARXIV_WORKER_MAX_SINGLE_FILE_BYTES: ${ARXIV_SOURCE_MAX_SINGLE_FILE_BYTES:-20971520}
+      ARXIV_WORKER_MAX_FILE_COUNT: ${ARXIV_SOURCE_MAX_FILE_COUNT:-5000}
+      ARXIV_WORKER_MAX_COMPRESSION_RATIO: ${ARXIV_SOURCE_MAX_COMPRESSION_RATIO:-100}
     entrypoint: ["python", "-m", "app.main"]
+    tmpfs:
+      - /var/tmp/arxiv-source:size=536870912,mode=1777
     depends_on:
       rabbitmq: { condition: service_healthy }
       redis: { condition: service_healthy }

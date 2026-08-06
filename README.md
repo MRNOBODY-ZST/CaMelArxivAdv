@@ -1,22 +1,24 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–3：生产形态基础设施、认证/RBAC、官方分类离线回退与同步、查询预览/缓存、保存查询、可控异步导入、OAI-PMH 增量同步、任务 SSE/轮询和论文库均已形成可运行垂直切片。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–4：生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务，以及 Source 安全下载/解包、TeX 作者/邮箱提取、加密联系人、脱敏证据和人工验证均已形成可运行垂直切片。
 
-> Source 解析、联系人提取、统计、模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 4–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
+> 数据统计、模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 5–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
 
 ## 快速启动
 
-要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为两个必填认证密钥分别生成独立的 32 字节 Base64 值：
+要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为四个当前必填密钥分别生成独立的 32 字节 Base64 值：
 
 ```bash
 cp .env.example .env
 openssl rand -base64 32  # 填入 JWT_SIGNING_KEY_BASE64
 openssl rand -base64 32  # 另生成一次，填入 AUTH_FINGERPRINT_HMAC_KEY_BASE64
+openssl rand -base64 32  # 另生成一次，填入 APP_ENCRYPTION_KEY_BASE64
+openssl rand -base64 32  # 另生成一次，填入 APP_EMAIL_HMAC_KEY_BASE64
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 ```
 
-不要复用两次输出，也不要提交 `.env`。其余空白 `*_KEY_BASE64` 应在相应业务阶段启用前同样使用独立随机值填充。
+不要复用任何一次输出，也不要提交 `.env`。其余空白 `*_KEY_BASE64` 应在相应业务阶段启用前同样使用独立随机值填充。
 
 启动后：
 
@@ -27,6 +29,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - 论文发现：[http://localhost:8080/arxiv/discovery](http://localhost:8080/arxiv/discovery)
 - 导入任务：[http://localhost:8080/jobs](http://localhost:8080/jobs)
 - 论文库：[http://localhost:8080/papers](http://localhost:8080/papers)
+- 作者与联系人：[http://localhost:8080/contacts](http://localhost:8080/contacts)
 
 首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
 
@@ -69,7 +72,7 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–3 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+Phase 1–4 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 ## 文档
 
@@ -77,6 +80,8 @@ Phase 1–3 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 - [数据模型与 ERD](docs/ERD.md)
 - [API 约定](docs/API.md)
 - [认证与 RBAC](docs/RBAC.md)
+- [TeX Source 提取](docs/TEX_EXTRACTION.md)
+- [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
 - [部署](docs/DEPLOYMENT.md)
 - [运维](docs/OPERATIONS.md)
 - [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)
@@ -85,7 +90,8 @@ Phase 1–3 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 
 ## 安全边界
 
-- arXiv Legacy API、OAI-PMH 和分类同步只允许配置中的官方 HTTPS 主机；Java/Python 共享 Redis 全局三秒租约。Source 阶段仍须增加大小上限、安全解包和临时目录清理。
+- arXiv Legacy API、OAI-PMH、分类和 Source 只允许固定官方 HTTPS 主机；Java/Python 共享 Redis 全局三秒租约。Source 下载、重定向、归档尺寸/路径/链接/压缩比、include 深度和解析时间均有边界，临时文件只在有界 tmpfs 存在并在结果发布前清理。
+- 联系人规范化值和显示值用独立随机 nonce 做 AES-256-GCM 加密，另一把 HMAC 密钥去重；列表和证据默认脱敏，完整披露必须单条授权并审计。
 - SMTP、JWT、HMAC 与追踪密钥必须由独立随机值提供；数据库只保存受保护的 Secret 材料。
 - 邮箱、Token、Authorization、Cookie 和 Source 内容不得写入日志。
 - 邮件发送必须经过快照、抑制、退订、频控和审批状态机；SMTP 接受不等于最终送达。

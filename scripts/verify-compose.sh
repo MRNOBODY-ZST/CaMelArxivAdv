@@ -9,6 +9,8 @@ development_compose_file="$project_root/docker-compose.dev.yml"
 # must reject missing runtime authentication keys.
 export JWT_SIGNING_KEY_BASE64=${JWT_SIGNING_KEY_BASE64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
 export AUTH_FINGERPRINT_HMAC_KEY_BASE64=${AUTH_FINGERPRINT_HMAC_KEY_BASE64:-YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=}
+export APP_ENCRYPTION_KEY_BASE64=${APP_ENCRYPTION_KEY_BASE64:-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU=}
+export APP_EMAIL_HMAC_KEY_BASE64=${APP_EMAIL_HMAC_KEY_BASE64:-emFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg=}
 
 if [[ ! -f "$compose_file" ]]; then
   echo "Missing root docker-compose.yml" >&2
@@ -52,6 +54,14 @@ for backend_service in backend-api mail-worker; do
     echo "$backend_service must receive JWT signing key material" >&2
     exit 1
   fi
+  if [[ -z $(jq -r --arg service "$backend_service" '.services[$service].environment.APP_ENCRYPTION_KEY_BASE64' <<<"$compose_json") ]]; then
+    echo "$backend_service must receive contact encryption key material" >&2
+    exit 1
+  fi
+  if [[ -z $(jq -r --arg service "$backend_service" '.services[$service].environment.APP_EMAIL_HMAC_KEY_BASE64' <<<"$compose_json") ]]; then
+    echo "$backend_service must receive contact HMAC key material" >&2
+    exit 1
+  fi
 done
 
 if [[ $(jq -r '.services["backend-api"].profiles // [] | length' <<<"$compose_json") != "0" ]]; then
@@ -74,6 +84,33 @@ if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_MIN_REQUEST_IN
   exit 1
 fi
 
+if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_SOURCE_BASE_URL' <<<"$compose_json") != "https://export.arxiv.org/e-print" ]]; then
+  echo "arxiv-worker must use the official arXiv Source endpoint" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_TEMP_ROOT' <<<"$compose_json") != "/var/tmp/arxiv-source" ]]; then
+  echo "arxiv-worker must use the bounded Source temporary root" >&2
+  exit 1
+fi
+
+if ! jq -e '.services["arxiv-worker"].tmpfs | index("/var/tmp/arxiv-source:size=536870912,mode=1777")' <<<"$compose_json" >/dev/null; then
+  echo "arxiv-worker must mount the bounded Source temporary root as tmpfs" >&2
+  exit 1
+fi
+
+for source_limit in \
+  ARXIV_WORKER_MAX_ARCHIVE_BYTES \
+  ARXIV_WORKER_MAX_EXTRACTED_BYTES \
+  ARXIV_WORKER_MAX_SINGLE_FILE_BYTES \
+  ARXIV_WORKER_MAX_FILE_COUNT \
+  ARXIV_WORKER_MAX_COMPRESSION_RATIO; do
+  if [[ -z $(jq -r --arg key "$source_limit" '.services["arxiv-worker"].environment[$key]' <<<"$compose_json") ]]; then
+    echo "arxiv-worker must receive $source_limit" >&2
+    exit 1
+  fi
+done
+
 if [[ $(jq -r '.services["backend-api"].environment.ARXIV_LEGACY_BASE_URL' <<<"$compose_json") != "https://export.arxiv.org/api/query" ]]; then
   echo "backend-api must use the official arXiv Legacy API endpoint" >&2
   exit 1
@@ -91,6 +128,16 @@ fi
 
 if ! grep -Fq 'AUTH_FINGERPRINT_HMAC_KEY_BASE64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:?' "$compose_file"; then
   echo "Production Compose must require authentication fingerprint key material" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'APP_ENCRYPTION_KEY_BASE64: ${APP_ENCRYPTION_KEY_BASE64:?' "$compose_file"; then
+  echo "Production Compose must require contact encryption key material" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'APP_EMAIL_HMAC_KEY_BASE64: ${APP_EMAIL_HMAC_KEY_BASE64:?' "$compose_file"; then
+  echo "Production Compose must require contact HMAC key material" >&2
   exit 1
 fi
 
