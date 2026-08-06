@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.arxiv.api;
 import com.camel_hub.advertisement.arxiv.paper.PaperQueryService;
 import com.camel_hub.advertisement.common.api.PageResponse;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,6 +19,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/papers")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

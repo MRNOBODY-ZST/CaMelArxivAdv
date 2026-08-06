@@ -20,6 +20,7 @@ import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -132,13 +133,29 @@ public class ArxivImportService {
 		});
 	}
 
+	public Mono<JobSubmission> createTaxonomySync(
+			UUID actorId, AuthenticationRequestContext context
+	) {
+		Map<String, Object> payload = Map.of(
+				"requestedDate", LocalDate.now(ZoneOffset.UTC).toString());
+		return submit(actorId, "ARXIV_SYNC_TAXONOMY", "arxiv.sync.taxonomy",
+				payload, 0, context, "system");
+	}
+
 	private Mono<JobSubmission> submit(
 			UUID actorId, String type, String routingKey, Map<String, Object> payload,
 			long totalCount, AuthenticationRequestContext context
 	) {
+		return submit(actorId, type, routingKey, payload, totalCount, context, actorId.toString());
+	}
+
+	private Mono<JobSubmission> submit(
+			UUID actorId, String type, String routingKey, Map<String, Object> payload,
+			long totalCount, AuthenticationRequestContext context, String idempotencyScope
+	) {
 		String parametersJson = json(payload);
 		String idempotencyKey = "arxiv:" + type.toLowerCase(java.util.Locale.ROOT) + ":"
-				+ sha256(actorId + ":" + type + ":" + parametersJson);
+				+ sha256(idempotencyScope + ":" + type + ":" + parametersJson);
 		UUID jobId = UUID.randomUUID();
 		UUID messageId = UUID.randomUUID();
 		String traceId = safeTrace(context.traceId());

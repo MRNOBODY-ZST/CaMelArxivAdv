@@ -111,6 +111,16 @@ class JobServiceIntegrationTest {
 		assertThat(retry.parentJobId()).isEqualTo(failedId);
 		assertThat(retry.rootJobId()).isEqualTo(failedId);
 		assertThat(service.get(failedId).block().status()).isEqualTo(JobStatus.FAILED);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM outbox_messages
+				WHERE aggregate_id = :jobId AND routing_key = 'arxiv.import.metadata'
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isEqualTo(1L);
+		assertThat(databaseClient.sql("""
+				SELECT payload->>'jobId' FROM outbox_messages WHERE aggregate_id = :jobId
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get(0, String.class)).one().block())
+				.isEqualTo(retry.id().toString());
 	}
 
 	private UUID insertJob(JobStatus status, boolean terminal) {

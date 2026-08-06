@@ -8,6 +8,7 @@ import httpx
 
 from app.arxiv.http import PermitLease, request_xml, validate_official_endpoint
 from app.arxiv.models import ArxivAuthor, ArxivMetadata, OaiRecord, OaiRecordPage
+from app.arxiv.taxonomy import TaxonomyCategory, parse_list_sets
 from app.arxiv.xml import (
     normalized_text,
     optional_text,
@@ -75,16 +76,59 @@ class OaiClient:
             self._max_response_bytes,
             self._max_retries,
         )
-        return parse_oai_page(body)
+        try:
+            return parse_oai_page(body)
+        except (OaiProtocolError, OaiTokenExpiredError):
+            raise
+        except ValueError as exception:
+            raise OaiProtocolError("OAI ListRecords response is invalid") from exception
 
     async def iter_record_pages(
-        self, set_spec: str, from_date: date | None = None
+        self,
+        set_spec: str,
+        from_date: date | None = None,
+        *,
+        resumption_token: str | None = None,
     ) -> AsyncIterator[OaiRecordPage]:
-        page = await self.list_records(set_spec, from_date)
+        page = await self.list_records(
+            set_spec, from_date, resumption_token=resumption_token
+        )
         yield page
         while page.resumption_token is not None:
             page = await self.list_records(resumption_token=page.resumption_token)
             yield page
+
+    async def list_sets(
+        self, *, resumption_token: str | None = None
+    ) -> tuple[tuple[TaxonomyCategory, ...], str | None]:
+        if resumption_token is not None:
+            if not resumption_token.strip() or len(resumption_token) > 4000:
+                raise ValueError("OAI resumption token is invalid")
+            params = {"verb": "ListSets", "resumptionToken": resumption_token}
+        else:
+            params = {"verb": "ListSets"}
+        body = await request_xml(
+            self._client,
+            self._lease,
+            self._base_url,
+            params,
+            self._user_agent,
+            self._max_response_bytes,
+            self._max_retries,
+        )
+        try:
+            return parse_list_sets(body)
+        except ValueError as exception:
+            raise OaiProtocolError("OAI ListSets response is invalid") from exception
+
+    async def fetch_taxonomy(self) -> tuple[TaxonomyCategory, ...]:
+        categories: dict[str, TaxonomyCategory] = {}
+        page, token = await self.list_sets()
+        categories.update((category.category_id, category) for category in page)
+        while token is not None:
+            page, token = await self.list_sets(resumption_token=token)
+            categories.update((category.category_id, category) for category in page)
+        return tuple(categories[key] for key in sorted(categories))
 
 
 def parse_oai_page(body: bytes) -> OaiRecordPage:

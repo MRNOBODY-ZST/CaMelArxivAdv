@@ -31,6 +31,9 @@ docker compose logs --since=15m postgres rabbitmq redis
 | 前端 502 | `backend-api` health/logs | 先处理 Flyway/依赖连接，不循环重启数据库 |
 | Worker 重启 | `docker inspect ... RestartCount` 与 worker logs | 检查入口、消息版本、RabbitMQ 凭据 |
 | 任务长时间 RUNNING | `jobs.heartbeat_at`、worker heartbeat、队列积压 | 标记失联任务并按幂等键安全重试 |
+| arXiv 预览 503 | Redis、`backend-api` 日志、官方状态 | Redis 故障时保持 fail-closed；不要临时绕过全局限速 |
+| 分类同步停在 PENDING | `outbox_messages.published_at`、`arxiv.jobs.worker` binding | 先修复 Outbox/RabbitMQ；不要直接手工替换 active snapshot |
+| OAI 同步反复重试 | Job checkpoint、`badResumptionToken`、官方 OAI 状态 | 让 Worker 按保存日期安全重启游标；不要编辑不透明 token |
 | 邮件没有进入 Mailpit | `ALLOW_LIVE_SMTP`、mail-worker、Mailpit accepted 数 | 不改为真实 SMTP 作为排障手段 |
 | 数据库迁移失败 | `flyway_schema_history` 与 API logs | 停止扩容，修正新迁移；不要编辑已发布迁移 |
 
@@ -71,6 +74,28 @@ docker compose exec -T postgres pg_dump -U camel -d camel_arxiv -Fc > camel_arxi
 - Outbox 发布后设置 `published_at`；消费者完成业务事务后记录 `processed_messages` 再 ACK。
 - 不手工删除未知积压，也不直接把失败任务改为成功。
 
+Phase 3 队列快速检查：
+
+```bash
+docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+docker compose exec -T rabbitmq rabbitmqctl list_bindings source_name destination_name routing_key
+docker compose exec -T postgres psql -U camel -d camel_arxiv \
+  -c "select id,type,status,current_stage,progress_percent,heartbeat_at from jobs where type like 'ARXIV_%' order by created_at desc limit 20;"
+docker compose exec -T postgres psql -U camel -d camel_arxiv \
+  -c "select worker_id,status,current_job_id,last_seen_at from worker_heartbeats order by last_seen_at desc;"
+```
+
+正常拓扑包含 `arxiv.jobs.worker <- arxiv.#`、`arxiv.results.backend <- arxiv.#` 和 `arxiv.results.backend <- worker.heartbeat`。`mail-worker` 不应消费 arXiv 结果队列，且其 `mail-worker` profile 不注册 `/api/v1/**` 业务 Controller。
+
+## arXiv 限速、分类与 OAI
+
+- `ARXIV_MIN_REQUEST_INTERVAL` 不得小于 `PT3S`；Worker 同步使用 `ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS=3`。两端共享 Redis 全局预约协议。
+- `ARXIV_CONTACT_EMAIL` 必须是受监控地址，用于描述性 User-Agent；生产不得保留 `.invalid` 默认值。
+- 预览缓存默认 24 小时。清缓存只会导致下一次查询重新取得全局租约，不能用来绕过官方限制。
+- 分类读取不依赖上游；首次空库从版本化 JSON 快照启动。管理员同步使用 OAI `ListSets`，保留两段式 physics set、离线描述和 alias；active snapshot 与 Job 成功终态原子切换。
+- OAI `resumptionToken` 是不透明短期值。Worker 将其保存在 Redis 用于 pause/requeue 恢复，后端在 `jobs.checkpoint` 和 `arxiv_sync_cursors` 保存持久状态；排障时只能查看长度、存在性和接收时间，不把 token 全文写日志或工单。
+- 暂停/取消是协作式的：当前官方 HTTP 请求完成后、下一次租约/请求前生效。重试保留原 Job 历史并创建新 lineage。
+
 ## 邮件安全操作
 
 开发/CI 只使用 Mailpit。后续启用真实 SMTP 前必须确认活动已审批、Recipient 快照已冻结、抑制/退订已应用、频率上限有效、域名认证完成。紧急停止应暂停 Campaign 消费者并保留队列，不删除 Recipient/Attempt 审计记录。
@@ -84,3 +109,5 @@ docker compose exec -T postgres pg_dump -U camel -d camel_arxiv -Fc > camel_arxi
 2026-08-05 实测：4 个 Flyway 迁移成功、50 张 public 表、9 个容器健康；Nginx/API/Mailpit/MinIO 宿主入口可达；后端、Python、Vue 全量质量门通过；桌面 1280×720 与移动 390×844 无横向溢出、零 console warning/error，移动抽屉关闭后焦点回到触发按钮。
 
 Phase 2 同日实测：Flyway 更新到 V5；初始管理员强制改密；改密后旧 access/refresh 均为 401；refresh 单次轮换成功，旧值重放后整族失效且写入 `AUTH_REFRESH_REPLAY`；权限目录为 26 项；普通 `ADMIN` 的四类 `SUPER_ADMIN` 接管请求均为 403 并落审计，`VIEWER` 管理端请求为带 Trace ID 的 403；logout 后 refresh 为 401。用户/角色/审计三页通过桌面与 390×844 浏览器检查，页面无全局横向溢出且控制台零 warning/error。
+
+Phase 3 于 2026-08-06 实测：Flyway V6 后为 53 张表、1 个物化视图；后端 132 tests/`clean check`/`bootJar`、Worker 31 tests/Ruff/MyPy、前端 27 tests/ESLint/`vue-tsc`/Vite build 全部通过。真实官方查询 `reliable agents` 返回结果，选中导入 Job `e42fd065-25ce-42d7-a639-090c6913625f` 完成并持久化论文 `2212.02256`。OAI 分类同步 Job `18fed311-b1af-4dd7-ae09-148a867aac71` 原子完成 166 个分类、6 个 alias 和 155 条描述，包含 `hep-th`、`math-ph`、`quant-ph` 等两段式 set；`mail-worker` 的业务健康 API 返回 404。任务详情显示 CREATED/STARTED/BATCH/PROGRESS/COMPLETED 事件和新鲜 Worker 心跳；发现、任务、论文页面桌面无 console error，390×844 发现页 `scrollWidth=clientWidth=390`。

@@ -78,6 +78,23 @@ class TaxonomyRepositoryTest {
 		assertThat(repository.isCategoryActive("cs.AI").block()).isFalse();
 	}
 
+	@Test
+	void reusesAnExistingSnapshotWhenListSetsContentHasNotChanged() {
+		List<TaxonomyCategory> categories = List.of(
+				category("cs", "Computer Science", "cs", "Computer Science",
+						"cs.AI", "Artificial Intelligence"));
+		TaxonomySnapshot first = snapshot("v1", categories);
+		TaxonomySnapshot sameContent = new TaxonomySnapshot(
+				"v2", "OAI_LIST_SETS", List.of("https://oaipmh.arxiv.org/oai"),
+				Instant.parse("2026-08-06T00:00:00Z"), Instant.parse("2026-08-06T01:00:00Z"),
+				first.payloadSha256(), categories);
+
+		repository.applySnapshot(first).as(transactions::transactional).block();
+		repository.applySnapshot(sameContent).as(transactions::transactional).block();
+
+		assertThat(repository.loadActive().block().snapshotVersion()).isEqualTo("v1");
+	}
+
 	private TaxonomySnapshot snapshot(String version, List<TaxonomyCategory> categories) {
 		return new TaxonomySnapshot(
 				version, "OFFLINE_SNAPSHOT", List.of("https://arxiv.org/category_taxonomy"),

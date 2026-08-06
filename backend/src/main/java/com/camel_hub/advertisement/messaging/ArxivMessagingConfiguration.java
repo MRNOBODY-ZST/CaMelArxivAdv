@@ -3,6 +3,8 @@ package com.camel_hub.advertisement.messaging;
 import com.camel_hub.advertisement.arxiv.paper.PaperRepository;
 import com.camel_hub.advertisement.arxiv.paper.PaperQueryRepository;
 import com.camel_hub.advertisement.arxiv.paper.PaperQueryService;
+import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyRepository;
+import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomySnapshotLoader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Declarables;
@@ -12,10 +14,11 @@ import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.annotation.EnableRabbit;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -47,8 +50,17 @@ public class ArxivMessagingConfiguration {
 				jobs, results, retry, dead, worker, resultConsumer, retryQueue, deadQueue,
 				BindingBuilder.bind(worker).to(jobs).with("arxiv.#"),
 				BindingBuilder.bind(resultConsumer).to(results).with("arxiv.#"),
+				BindingBuilder.bind(resultConsumer).to(results).with("worker.heartbeat"),
 				BindingBuilder.bind(retryQueue).to(retry).with("arxiv.#"),
 				BindingBuilder.bind(deadQueue).to(dead).with("#"));
+	}
+
+	@Bean
+	@Profile("api")
+	RabbitAdmin arxivRabbitAdmin(ConnectionFactory connectionFactory) {
+		RabbitAdmin admin = new RabbitAdmin(connectionFactory);
+		admin.setAutoStartup(true);
+		return admin;
 	}
 
 	@Bean
@@ -59,7 +71,7 @@ public class ArxivMessagingConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean({RabbitTemplate.class, OutboxRepository.class})
+	@Profile("api")
 	ArxivCommandPublisher arxivCommandPublisher(RabbitTemplate rabbitTemplate, OutboxRepository repository) {
 		return new ArxivCommandPublisher(rabbitTemplate, repository, 20);
 	}
@@ -98,14 +110,17 @@ public class ArxivMessagingConfiguration {
 	ArxivResultHandler arxivResultHandler(
 			ArxivResultRepository repository,
 			PaperRepository papers,
+			TaxonomyRepository taxonomy,
+			TaxonomySnapshotLoader snapshotLoader,
 			ObjectMapper objectMapper,
 			TransactionalOperator transactions
 	) {
-		return new ArxivResultHandler(repository, papers, objectMapper, transactions);
+		return new ArxivResultHandler(
+				repository, papers, taxonomy, snapshotLoader, objectMapper, transactions);
 	}
 
 	@Bean
-	@ConditionalOnBean({ConnectionFactory.class, ArxivResultHandler.class})
+	@Profile("api")
 	ArxivResultConsumer arxivResultConsumer(ArxivResultHandler handler) {
 		return new ArxivResultConsumer(handler);
 	}

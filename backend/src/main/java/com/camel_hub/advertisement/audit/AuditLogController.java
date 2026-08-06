@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.audit;
 
 import com.camel_hub.advertisement.common.api.PageResponse;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,6 +15,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/audit-logs")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

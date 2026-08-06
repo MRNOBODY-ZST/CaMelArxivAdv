@@ -3,27 +3,39 @@ from __future__ import annotations
 import asyncio
 import secrets
 import signal
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import uuid4
+from typing import Literal
+from uuid import UUID, uuid4
 
 import aio_pika
 import httpx
 import redis.asyncio as redis_async
 from aio_pika import DeliveryMode, ExchangeType, Message
+from pydantic import ValidationError
 from structlog.typing import FilteringBoundLogger
 
 from app.arxiv.api_client import LegacyApiClient
 from app.arxiv.oai_client import OaiClient
 from app.arxiv.rate_limit import RedisGlobalArxivRateLease
 from app.config import Settings
-from app.jobs.arxiv_consumer import ArxivCommandProcessor
+from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import RedisJobStore
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
 from app.messaging.rabbit import RabbitResultPublisher, settle_delivery
 from app.observability.logging import configure_logging, get_logger
 
 
-def build_heartbeat_message(settings: Settings) -> MessageEnvelope[WorkerHeartbeat]:
+@dataclass(slots=True)
+class WorkerRuntimeState:
+    status: Literal["IDLE", "BUSY", "DRAINING", "UNHEALTHY"] = "IDLE"
+    current_job_id: UUID | None = None
+
+
+def build_heartbeat_message(
+    settings: Settings, state: WorkerRuntimeState | None = None
+) -> MessageEnvelope[WorkerHeartbeat]:
+    runtime = state or WorkerRuntimeState()
     occurred_at = datetime.now(UTC)
     message_id = uuid4()
     return MessageEnvelope[WorkerHeartbeat](
@@ -36,7 +48,8 @@ def build_heartbeat_message(settings: Settings) -> MessageEnvelope[WorkerHeartbe
             worker_id=settings.worker_id,
             worker_type="ARXIV",
             version=settings.worker_version,
-            status="IDLE",
+            status=runtime.status,
+            current_job_id=runtime.current_job_id,
         ),
     )
 
@@ -51,6 +64,7 @@ async def run(settings: Settings | None = None) -> None:
         loop.add_signal_handler(handled_signal, stop_event.set)
 
     logger.info("worker_starting", version=active_settings.worker_version)
+    runtime_state = WorkerRuntimeState()
     connection = await aio_pika.connect_robust(
         active_settings.rabbitmq_url.get_secret_value(),
         timeout=active_settings.request_timeout_seconds,
@@ -79,6 +93,7 @@ async def run(settings: Settings | None = None) -> None:
         )
         await queue.bind(jobs_exchange, "arxiv.import.metadata")
         await queue.bind(jobs_exchange, "arxiv.sync.oai")
+        await queue.bind(jobs_exchange, "arxiv.sync.taxonomy")
         redis = redis_async.from_url(  # type: ignore[no-untyped-call]
             active_settings.redis_url.get_secret_value()
         )
@@ -108,12 +123,24 @@ async def run(settings: Settings | None = None) -> None:
             )
 
             async def consume(message: aio_pika.abc.AbstractIncomingMessage) -> None:
-                outcome = await processor.process(message.body)
-                await settle_delivery(message, outcome, retry_exchange)
+                runtime_state.status = "BUSY"
+                runtime_state.current_job_id = _command_job_id(message.body)
+                try:
+                    try:
+                        outcome = await processor.process(message.body)
+                    except Exception:
+                        logger.exception("command_processing_failed_unexpectedly")
+                        outcome = CommandOutcome.REQUEUE
+                    await settle_delivery(message, outcome, retry_exchange)
+                finally:
+                    runtime_state.status = "IDLE"
+                    runtime_state.current_job_id = None
 
             consumer_tag = await queue.consume(consume, no_ack=False)
             try:
-                await _heartbeat_loop(active_settings, exchange, stop_event, logger)
+                await _heartbeat_loop(
+                    active_settings, exchange, stop_event, logger, runtime_state
+                )
             finally:
                 await queue.cancel(consumer_tag)
                 await redis.aclose()
@@ -127,9 +154,10 @@ async def _heartbeat_loop(
     exchange: aio_pika.abc.AbstractExchange,
     stop_event: asyncio.Event,
     logger: FilteringBoundLogger,
+    state: WorkerRuntimeState,
 ) -> None:
     while not stop_event.is_set():
-        heartbeat = build_heartbeat_message(active_settings)
+        heartbeat = build_heartbeat_message(active_settings, state)
         await exchange.publish(
             Message(
                 body=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
@@ -147,6 +175,13 @@ async def _heartbeat_loop(
             )
         except TimeoutError:
             continue
+
+
+def _command_job_id(body: bytes) -> UUID | None:
+    try:
+        return MessageEnvelope[dict[str, object]].model_validate_json(body).job_id
+    except (ValidationError, ValueError, UnicodeDecodeError):
+        return None
 
 
 def cli() -> None:

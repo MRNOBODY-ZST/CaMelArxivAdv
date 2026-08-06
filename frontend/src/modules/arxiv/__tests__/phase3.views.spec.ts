@@ -3,6 +3,7 @@ import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-uti
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { arxivApi } from '@/modules/arxiv/arxiv.api'
+import type { NormalizedSearchCriteria } from '@/modules/arxiv/arxiv.types'
 import ArxivDiscoveryView from '@/modules/arxiv/ArxivDiscoveryView.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import ImportJobsView from '@/modules/jobs/ImportJobsView.vue'
@@ -29,14 +30,14 @@ describe('Phase 3 arXiv workspace', () => {
 
   it('submits a normalized preview request and renders official results', async () => {
     vi.mocked(arxivApi.preview).mockResolvedValue({
-      queryHash: 'hash', criteria: criteria(), officialTotal: 1, totalIsExact: true,
-      page: 1, pageSize: 20, cacheStatus: 'MISS', annotations: [],
+      queryHash: 'hash', criteria: criteria(), officialTotal: 1, totalIsEstimate: false,
+      page: 1, pageSize: 20, cacheStatus: 'MISS', filters: [],
       papers: [{
         arxivId: '2608.00001', title: 'Reliable Agents', abstractText: 'Summary',
         authors: [{ name: 'Ada Lovelace', affiliations: [] }], primaryCategory: 'cs.AI',
-        categories: ['cs.AI'], publishedAt: '2026-08-01T00:00:00Z',
+        categoryIds: ['cs.AI'], publishedAt: '2026-08-01T00:00:00Z',
         updatedAt: '2026-08-04T00:00:00Z', doi: null, journalReference: null,
-        pdfUrl: 'https://arxiv.org/pdf/2608.00001v1', version: 1,
+        pdfUrl: 'https://arxiv.org/pdf/2608.00001v1', versionCount: 1,
       }],
     })
     const wrapper = mountWithSession(ArxivDiscoveryView)
@@ -104,10 +105,12 @@ function button(wrapper: VueWrapper, label: string): DOMWrapper<HTMLButtonElemen
   return match as DOMWrapper<HTMLButtonElement>
 }
 
-function criteria() {
+function criteria(): NormalizedSearchCriteria {
   return {
     categoryIds: [], categoryMode: 'ANY' as const, titleKeywords: 'reliable agents',
-    abstractKeywords: '', authorKeywords: '', sortBy: 'RELEVANCE' as const,
+    abstractKeywords: null, authorKeywords: null, submittedFrom: null, submittedTo: null,
+    updatedFrom: null, updatedTo: null, hasDoi: null, hasJournalReference: null,
+    sourceAvailable: null, sortBy: 'RELEVANCE' as const,
     sortOrder: 'DESCENDING' as const, page: 1, pageSize: 20,
   }
 }

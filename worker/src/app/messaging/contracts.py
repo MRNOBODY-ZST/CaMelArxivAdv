@@ -54,6 +54,10 @@ class OaiSyncCommand(ContractModel):
     )
 
 
+class TaxonomySyncCommand(ContractModel):
+    requested_date: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
 class ResultPayload(ContractModel):
     status: Literal["RUNNING", "PAUSED", "CANCELED", "SUCCEEDED", "FAILED"]
     stage: str = Field(min_length=1, max_length=80)
@@ -66,6 +70,9 @@ class ResultPayload(ContractModel):
     papers: tuple[dict[str, object], ...] = Field(default=(), max_length=100)
     error_code: str | None = Field(default=None, max_length=80)
     error_summary: str | None = Field(default=None, max_length=500)
+    snapshot_version: str | None = Field(default=None, max_length=80)
+    taxonomy_source_updated_at: datetime | None = None
+    taxonomy_categories: tuple[dict[str, object], ...] = Field(default=(), max_length=500)
 
 
 class MessageEnvelope[PayloadT](ContractModel):

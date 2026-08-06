@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.system;
 
 import org.springframework.boot.health.actuate.endpoint.HealthDescriptor;
 import org.springframework.boot.health.actuate.endpoint.HealthEndpoint;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -11,6 +12,7 @@ import reactor.core.scheduler.Schedulers;
 import java.time.Instant;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/system")
 public class SystemHealthController {
 

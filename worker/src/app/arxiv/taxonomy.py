@@ -30,10 +30,10 @@ def parse_list_sets(body: bytes) -> tuple[tuple[TaxonomyCategory, ...], str | No
     for item in container.findall(f"{OAI}set"):
         set_spec = required_text(item.find(f"{OAI}setSpec"), "set spec")
         parts = set_spec.split(":")
-        if len(parts) != 3 or not all(parts):
+        if len(parts) not in {2, 3} or not all(parts):
             continue
-        group_id, archive_id, leaf = parts
-        category_id = f"{archive_id}.{leaf}"
+        group_id, archive_id = parts[:2]
+        category_id = archive_id if len(parts) == 2 else f"{archive_id}.{parts[2]}"
         categories.append(
             TaxonomyCategory(
                 set_spec=set_spec,

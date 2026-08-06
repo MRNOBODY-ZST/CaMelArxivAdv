@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 import httpx
 from pydantic import ValidationError
 
 from app.arxiv.models import ArxivMetadata, OaiRecordPage
-from app.arxiv.oai_client import OaiProtocolError
+from app.arxiv.oai_client import OaiProtocolError, OaiTokenExpiredError
+from app.arxiv.taxonomy import TaxonomyCategory
 from app.messaging.contracts import (
     ImportMetadataCommand,
     MessageEnvelope,
     MessageType,
     OaiSyncCommand,
     ResultPayload,
+    TaxonomySyncCommand,
 )
 
 
@@ -35,8 +37,14 @@ class LegacyClient(Protocol):
 
 class OaiMetadataClient(Protocol):
     def iter_record_pages(
-        self, set_spec: str, from_date: date | None = None
+        self,
+        set_spec: str,
+        from_date: date | None = None,
+        *,
+        resumption_token: str | None = None,
     ) -> AsyncIterator[OaiRecordPage]: ...
+
+    async def fetch_taxonomy(self) -> tuple[TaxonomyCategory, ...]: ...
 
 
 class ResultPublisher(Protocol):
@@ -49,6 +57,12 @@ class JobStore(Protocol):
     async def mark_processed(self, key: str) -> None: ...
 
     async def control_for(self, job_id: UUID) -> str: ...
+
+    async def cursor_for(self, idempotency_key: str) -> str | None: ...
+
+    async def save_cursor(self, idempotency_key: str, token: str) -> None: ...
+
+    async def clear_cursor(self, idempotency_key: str) -> None: ...
 
 
 class CommandOutcome(StrEnum):
@@ -85,11 +99,13 @@ class ArxivCommandProcessor:
             if envelope.job_id is None:
                 return CommandOutcome.DEAD
             if envelope.type == MessageType.ARXIV_IMPORT_METADATA:
-                command: ImportMetadataCommand | OaiSyncCommand = (
+                command: ImportMetadataCommand | OaiSyncCommand | TaxonomySyncCommand = (
                     ImportMetadataCommand.model_validate(envelope.payload)
                 )
             elif envelope.type == MessageType.ARXIV_SYNC_OAI:
                 command = OaiSyncCommand.model_validate(envelope.payload)
+            elif envelope.type == MessageType.ARXIV_SYNC_TAXONOMY:
+                command = TaxonomySyncCommand.model_validate(envelope.payload)
             else:
                 return CommandOutcome.DEAD
         except (ValidationError, UnicodeDecodeError, ValueError):
@@ -115,33 +131,57 @@ class ArxivCommandProcessor:
             await self._store.mark_processed(envelope.idempotency_key)
             return CommandOutcome.ACK
         try:
+            starting_stage = (
+                "FETCHING_TAXONOMY"
+                if isinstance(command, TaxonomySyncCommand)
+                else "FETCHING_METADATA"
+            )
             await self._publish(
                 envelope,
                 MessageType.ARXIV_JOB_STARTED,
-                ResultPayload(status="RUNNING", stage="FETCHING_METADATA"),
+                ResultPayload(status="RUNNING", stage=starting_stage),
                 0,
             )
             if isinstance(command, ImportMetadataCommand):
                 processed = await self._process_import(envelope, command)
-            else:
+            elif isinstance(command, OaiSyncCommand):
                 processed = await self._process_oai(envelope, command)
+            else:
+                processed = await self._process_taxonomy(envelope)
             if processed is None:
                 return CommandOutcome.REQUEUE
-            await self._publish(
-                envelope,
-                MessageType.ARXIV_JOB_COMPLETED,
-                ResultPayload(
-                    status="SUCCEEDED",
-                    stage="COMPLETED",
-                    processed_count=processed,
-                    success_count=processed,
-                    total_count=processed,
-                    progress_percent=100,
-                ),
-                processed + 2,
-            )
+            if not isinstance(command, TaxonomySyncCommand):
+                await self._publish(
+                    envelope,
+                    MessageType.ARXIV_JOB_COMPLETED,
+                    ResultPayload(
+                        status="SUCCEEDED",
+                        stage="COMPLETED",
+                        processed_count=processed,
+                        success_count=processed,
+                        total_count=processed,
+                        progress_percent=100,
+                    ),
+                    processed + 2,
+                )
+            if isinstance(command, OaiSyncCommand):
+                await self._store.clear_cursor(envelope.idempotency_key)
             await self._store.mark_processed(envelope.idempotency_key)
             return CommandOutcome.ACK
+        except OaiTokenExpiredError:
+            await self._store.clear_cursor(envelope.idempotency_key)
+            await self._publish(
+                envelope,
+                MessageType.ARXIV_JOB_PROGRESS,
+                ResultPayload(
+                    status="RUNNING",
+                    stage="RESTARTING_EXPIRED_CURSOR",
+                    error_code="ARXIV_CURSOR_EXPIRED",
+                    error_summary="The expired OAI cursor was cleared for a safe restart",
+                ),
+                999_998,
+            )
+            return CommandOutcome.REQUEUE
         except (httpx.HTTPError, OaiProtocolError, TimeoutError, ConnectionError):
             await self._publish(
                 envelope,
@@ -202,7 +242,10 @@ class ArxivCommandProcessor:
     ) -> int | None:
         processed = 0
         from_date = date.fromisoformat(command.from_date) if command.from_date else None
-        async for page in self._oai.iter_record_pages(command.set_spec, from_date):
+        cursor = await self._store.cursor_for(envelope.idempotency_key)
+        async for page in self._oai.iter_record_pages(
+            command.set_spec, from_date, resumption_token=cursor
+        ):
             if await self._pause_or_cancel(envelope, processed):
                 return None
             papers = tuple(
@@ -226,7 +269,45 @@ class ArxivCommandProcessor:
                 ),
                 processed + 1,
             )
+            if page.resumption_token is None:
+                await self._store.clear_cursor(envelope.idempotency_key)
+            else:
+                await self._store.save_cursor(
+                    envelope.idempotency_key, page.resumption_token
+                )
+            if await self._pause_or_cancel(envelope, processed):
+                return None
         return processed
+
+    async def _process_taxonomy(
+        self, envelope: MessageEnvelope[dict[str, object]]
+    ) -> int | None:
+        if await self._pause_or_cancel(envelope, 0):
+            return None
+        categories = await self._oai.fetch_taxonomy()
+        if not categories:
+            raise OaiProtocolError("OAI ListSets returned no arXiv categories")
+        observed_at = datetime.now(UTC)
+        await self._publish(
+            envelope,
+            MessageType.ARXIV_JOB_COMPLETED,
+            ResultPayload(
+                status="SUCCEEDED",
+                stage="COMPLETED",
+                processed_count=len(categories),
+                success_count=len(categories),
+                total_count=len(categories),
+                progress_percent=100,
+                snapshot_version="oai-listsets-"
+                + observed_at.strftime("%Y-%m-%dT%H-%M-%SZ"),
+                taxonomy_source_updated_at=observed_at,
+                taxonomy_categories=tuple(
+                    _taxonomy_payload(category) for category in categories
+                ),
+            ),
+            len(categories) + 2,
+        )
+        return len(categories)
 
     async def _pause_or_cancel(
         self, envelope: MessageEnvelope[dict[str, object]], processed: int
@@ -236,7 +317,9 @@ class ArxivCommandProcessor:
         control = await self._store.control_for(envelope.job_id)
         if control == "RUN":
             return False
-        status = "PAUSED" if control == "PAUSE" else "CANCELED"
+        status: Literal["PAUSED", "CANCELED"] = (
+            "PAUSED" if control == "PAUSE" else "CANCELED"
+        )
         event_type = (
             MessageType.ARXIV_JOB_PROGRESS
             if status == "PAUSED"
@@ -329,6 +412,44 @@ def _paper_payload(paper: ArxivMetadata) -> dict[str, object]:
         "comment": paper.comment,
         "licenseUrl": paper.license_url,
         "pdfUrl": paper.pdf_url or f"https://arxiv.org/pdf/{paper.arxiv_id}",
+    }
+
+
+_GROUP_NAMES = {
+    "cs": "Computer Science",
+    "econ": "Economics",
+    "eess": "Electrical Engineering and Systems Science",
+    "math": "Mathematics",
+    "physics": "Physics",
+    "q-bio": "Quantitative Biology",
+    "q-fin": "Quantitative Finance",
+    "stat": "Statistics",
+}
+
+
+def _taxonomy_payload(category: TaxonomyCategory) -> dict[str, object]:
+    group_name = _GROUP_NAMES.get(category.group_id, category.group_id)
+    archive_name = group_name if category.archive_id == category.group_id else category.archive_id
+    if (
+        len(category.group_id) > 40
+        or len(group_name) > 120
+        or len(category.archive_id) > 40
+        or len(archive_name) > 160
+        or len(category.category_id) > 80
+        or not category.category_name.strip()
+        or len(category.category_name) > 200
+    ):
+        raise OaiProtocolError("OAI taxonomy value exceeds the supported schema")
+    return {
+        "groupId": category.group_id,
+        "groupName": group_name,
+        "archiveId": category.archive_id,
+        "archiveName": archive_name,
+        "categoryId": category.category_id,
+        "categoryName": category.category_name,
+        "description": "",
+        "alias": False,
+        "aliasTarget": None,
     }
 
 

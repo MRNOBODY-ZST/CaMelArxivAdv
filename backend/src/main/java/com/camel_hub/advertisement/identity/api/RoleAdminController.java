@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -27,6 +28,7 @@ import java.util.Set;
 import java.util.UUID;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

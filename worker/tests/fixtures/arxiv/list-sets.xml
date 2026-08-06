@@ -6,5 +6,6 @@
     <set><setSpec>cs:cs:AI</setSpec><setName>Artificial Intelligence</setName></set>
     <set><setSpec>math:math:NA</setSpec><setName>Numerical Analysis</setName></set>
     <set><setSpec>physics:astro-ph:GA</setSpec><setName>Astrophysics of Galaxies</setName></set>
+    <set><setSpec>physics:hep-th</setSpec><setName>High Energy Physics - Theory</setName></set>
   </ListSets>
 </OAI-PMH>

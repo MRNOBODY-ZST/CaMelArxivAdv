@@ -1,6 +1,6 @@
 # 数据模型与 ERD
 
-Flyway 从空库按四个不可变迁移建立 50 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+Flyway 从空库按六个不可变迁移建立 53 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
 
 ## 领域关系概览
 
@@ -13,9 +13,11 @@ erDiagram
 
     ARXIV_GROUPS ||--o{ ARXIV_ARCHIVES : contains
     ARXIV_ARCHIVES ||--o{ ARXIV_CATEGORIES : contains
+    ARXIV_CATEGORY_SNAPSHOTS ||--o{ ARXIV_CATEGORIES : versions
     PAPERS }o--o{ ARXIV_CATEGORIES : paper_categories
     PAPERS ||--o{ PAPER_VERSIONS : versions
     PAPERS }o--o{ AUTHORS : paper_authors
+    PAPERS ||--o{ PAPER_IMPORTS : provenance
     PAPERS ||--o{ EXTRACTION_RUNS : extracted_by
     PAPER_AUTHORS ||--o{ PAPER_AUTHOR_CONTACTS : maps
     CONTACTS ||--o{ PAPER_AUTHOR_CONTACTS : evidence_for
@@ -24,6 +26,8 @@ erDiagram
     JOBS ||--o{ JOB_ITEMS : contains
     JOBS ||--o{ JOB_EVENTS : emits
     JOBS ||--o{ JOB_ERRORS : records
+    JOBS ||--o{ PAPER_IMPORTS : imports
+    JOBS ||--o{ JOBS : retry_lineage
 
     EMAIL_TEMPLATES ||--o{ EMAIL_TEMPLATE_VERSIONS : versions
     SEGMENTS ||--o{ SEGMENT_RULES : contains
@@ -42,10 +46,17 @@ erDiagram
 | `V2__arxiv_papers_contacts_jobs.sql` | 分类、论文、作者、联系人、证据、任务 | arXiv ID 唯一；分类/时间/Source 状态索引；任务活跃心跳与明细状态索引；消息幂等 |
 | `V3__templates_campaigns_tracking.sql` | SMTP、模板、Segment、Campaign、发送、追踪、抑制、Outbox | 活动状态/计划时间索引；Recipient 快照唯一；待发布 Outbox 部分索引 |
 | `V4__analytics_and_retention.sql` | 日/小时聚合、刷新日志、保留策略、活动物化视图 | 维度唯一键；活动/链接时间索引；物化视图 Campaign 唯一索引 |
+| `V5__rbac_defaults_and_auth_hardening.sql` | 26 项权限、5 个系统角色、认证加固 | 默认授权矩阵；token version/强制改密；refresh family 与登录审计索引 |
+| `V6__arxiv_discovery_and_job_runtime.sql` | 分类快照、OAI 游标、保存查询哈希、Job runtime、论文导入来源/搜索 | 单 active snapshot；同步 token 一致性；Job lineage/重放索引；论文全文 GIN 与稳定筛选索引 |
 
 ## 数据语义
 
 - `papers` 保存规范化 arXiv 元数据；`paper_versions` 保留版本历史。
+- `arxiv_category_snapshots` 保存离线/OAI `ListSets` 版本；同一时刻仅一条 active。分类从新快照消失时只把 `arxiv_categories.active` 置 false。
+- `arxiv_sync_cursors` 持久化 API 已接收的 OAI set、from datestamp、opaque resumption token、响应时间和最后 Job；Worker Redis 游标负责暂停/重投恢复。token 与接收时间必须同时为空或同时存在，终态原子清空 active token。
+- `saved_searches.criteria_hash` 是规范化条件的 SHA-256，用于所有者范围内缓存与幂等。
+- `jobs.version` 支持乐观并发；`parent_job_id`/`root_job_id` 保留重试 lineage；Retry Job 与新 Outbox command 同事务创建。`checkpoint` 保存可观测进度，`job_events` 支持 SSE replay。
+- `paper_imports` 记录论文与 Job 的来源（Legacy/OAI）和导入时间，同一论文/Job 只记录一次。
 - `contacts` 是去重后的邮箱实体；论文作者与联系人通过 `paper_author_contacts` 关联，证据片段单独存放。
 - `extraction_runs` 记录一次可重放处理；Source 原始归档不长期保存。
 - `campaign_recipients` 是活动获批时的不可变收件人快照，不从实时 Contact 关系直接发送。

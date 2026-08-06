@@ -54,6 +54,36 @@ for backend_service in backend-api mail-worker; do
   fi
 done
 
+if [[ $(jq -r '.services["backend-api"].profiles // [] | length' <<<"$compose_json") != "0" ]]; then
+  echo "backend-api must be present in the default production profile" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.SPRING_PROFILES_ACTIVE' <<<"$compose_json") != "api" ]]; then
+  echo "backend-api must activate only the API runtime profile" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["mail-worker"].environment.SPRING_PROFILES_ACTIVE' <<<"$compose_json") != "mail-worker" ]]; then
+  echo "mail-worker must activate only the isolated worker runtime profile" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS' <<<"$compose_json") != "3" ]]; then
+  echo "arxiv-worker must enforce the three-second official request floor" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.ARXIV_LEGACY_BASE_URL' <<<"$compose_json") != "https://export.arxiv.org/api/query" ]]; then
+  echo "backend-api must use the official arXiv Legacy API endpoint" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.ARXIV_OAI_BASE_URL' <<<"$compose_json") != "https://oaipmh.arxiv.org/oai" ]]; then
+  echo "backend-api must use the official arXiv OAI endpoint" >&2
+  exit 1
+fi
+
 if ! grep -Fq 'JWT_SIGNING_KEY_BASE64: ${JWT_SIGNING_KEY_BASE64:?' "$compose_file"; then
   echo "Production Compose must require JWT signing key material" >&2
   exit 1

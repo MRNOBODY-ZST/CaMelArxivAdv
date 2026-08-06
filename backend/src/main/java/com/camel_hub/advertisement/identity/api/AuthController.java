@@ -9,6 +9,7 @@ import com.camel_hub.advertisement.identity.service.AuthenticationService;
 import com.camel_hub.advertisement.identity.service.InvalidRefreshTokenException;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.CookieValue;
@@ -24,6 +25,7 @@ import java.security.Principal;
 import java.util.UUID;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/auth")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

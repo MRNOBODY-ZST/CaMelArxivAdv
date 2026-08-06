@@ -7,6 +7,7 @@ import com.camel_hub.advertisement.job.domain.JobStatus;
 import com.camel_hub.advertisement.job.service.JobService;
 import com.camel_hub.advertisement.job.service.JobEventStream;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/jobs")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

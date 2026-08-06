@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import ClassVar
-
 import pytest
 
 from app.jobs.arxiv_consumer import CommandOutcome
@@ -14,11 +12,11 @@ class FakeIncoming:
     content_encoding = "utf-8"
     message_id = "message-1"
     type = "ARXIV_IMPORT_METADATA"
-    headers: ClassVar[dict[str, object]] = {}
     routing_key = "arxiv.import.metadata"
 
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], retry_count: int = 0) -> None:
         self.events = events
+        self.headers = {"camelRetryCount": retry_count}
 
     async def ack(self) -> None:
         self.events.append("ack")
@@ -61,3 +59,16 @@ async def test_terminal_delivery_settlement(outcome: CommandOutcome, expected: l
         FakeExchange(events),  # type: ignore[arg-type]
     )
     assert events == expected
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_dead_letters_instead_of_looping_forever() -> None:
+    events: list[str] = []
+
+    await settle_delivery(
+        FakeIncoming(events, retry_count=5),  # type: ignore[arg-type]
+        CommandOutcome.REQUEUE,
+        FakeExchange(events),  # type: ignore[arg-type]
+    )
+
+    assert events == ["reject:False"]

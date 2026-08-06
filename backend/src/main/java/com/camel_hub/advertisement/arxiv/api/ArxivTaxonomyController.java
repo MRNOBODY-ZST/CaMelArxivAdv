@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.arxiv.api;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyService;
 import com.camel_hub.advertisement.common.api.RequestContextSupport;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -16,6 +17,7 @@ import reactor.core.publisher.Mono;
 import java.security.Principal;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/arxiv/taxonomy")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

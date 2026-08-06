@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
 
 public class TaxonomySnapshotLoader {
 
-	private static final Pattern ID_PATTERN = Pattern.compile("^[A-Za-z0-9.-]{1,80}$");
+	private static final Pattern ID_PATTERN = Pattern.compile("^[A-Za-z0-9.-]+$");
 	private static final Pattern SHA_256_PATTERN = Pattern.compile("^[0-9a-f]{64}$");
 	private static final String DEFAULT_RESOURCE = "arxiv/taxonomy-2026-08.json";
 
@@ -59,6 +59,9 @@ public class TaxonomySnapshotLoader {
 
 	private void validate(TaxonomySnapshot snapshot) {
 		requireText(snapshot.snapshotVersion(), "snapshot version");
+		if (snapshot.snapshotVersion().length() > 80) {
+			throw new IllegalArgumentException("snapshot version is too long");
+		}
 		if (!"OFFLINE_SNAPSHOT".equals(snapshot.sourceType())) {
 			throw new IllegalArgumentException("offline taxonomy source type is invalid");
 		}
@@ -101,17 +104,17 @@ public class TaxonomySnapshotLoader {
 		if (category == null) {
 			throw new IllegalArgumentException("taxonomy category must not be null");
 		}
-		requireId(category.groupId(), "group ID");
-		requireText(category.groupName(), "group name");
-		requireId(category.archiveId(), "archive ID");
-		requireText(category.archiveName(), "archive name");
-		requireId(category.categoryId(), "category ID");
-		requireText(category.categoryName(), "category name");
+		requireId(category.groupId(), 40, "group ID");
+		requireText(category.groupName(), 120, "group name");
+		requireId(category.archiveId(), 40, "archive ID");
+		requireText(category.archiveName(), 160, "archive name");
+		requireId(category.categoryId(), 80, "category ID");
+		requireText(category.categoryName(), 200, "category name");
 		if (category.description() == null) {
 			throw new IllegalArgumentException("category description must not be null");
 		}
 		if (category.alias()) {
-			requireId(category.aliasTarget(), "alias target");
+			requireId(category.aliasTarget(), 80, "alias target");
 		}
 		else if (category.aliasTarget() != null) {
 			throw new IllegalArgumentException("non-alias category must not have an alias target");
@@ -128,8 +131,8 @@ public class TaxonomySnapshotLoader {
 		}
 	}
 
-	private void requireId(String value, String field) {
-		if (value == null || !ID_PATTERN.matcher(value).matches()) {
+	private void requireId(String value, int maximumLength, String field) {
+		if (value == null || value.length() > maximumLength || !ID_PATTERN.matcher(value).matches()) {
 			throw new IllegalArgumentException(field + " is invalid");
 		}
 	}
@@ -137,6 +140,13 @@ public class TaxonomySnapshotLoader {
 	private void requireText(String value, String field) {
 		if (value == null || value.isBlank()) {
 			throw new IllegalArgumentException(field + " is required");
+		}
+	}
+
+	private void requireText(String value, int maximumLength, String field) {
+		requireText(value, field);
+		if (value.length() > maximumLength || value.chars().anyMatch(Character::isISOControl)) {
+			throw new IllegalArgumentException(field + " is invalid");
 		}
 	}
 }

@@ -102,21 +102,33 @@ public class TaxonomyRepository {
 				});
 	}
 
-	public Mono<SyncJob> createOrFindDailySyncJob(UUID actorUserId, String dayKey) {
-		String idempotencyKey = "arxiv-taxonomy-sync:" + dayKey;
-		return databaseClient.sql("""
-				INSERT INTO jobs (type, status, created_by, parameters, idempotency_key, current_stage)
-				VALUES ('ARXIV_SYNC_TAXONOMY', 'PENDING', :actorUserId, '{}'::jsonb, :idempotencyKey, 'WAITING_FOR_WORKER')
-				ON CONFLICT (idempotency_key) DO NOTHING
-				RETURNING id, status
-				""")
-				.bind("actorUserId", actorUserId)
-				.bind("idempotencyKey", idempotencyKey)
-				.map((row, metadata) -> new SyncJob(
-						row.get("id", UUID.class), row.get("status", String.class), true))
-				.one()
-				.flatMap(job -> appendCreatedEvent(job.id()).thenReturn(job))
-				.switchIfEmpty(findSyncJob(idempotencyKey));
+	public Mono<List<TaxonomyCategory>> mergeWithActiveMetadata(
+			List<TaxonomyCategory> incoming
+	) {
+		List<TaxonomyCategory> safeIncoming = List.copyOf(incoming);
+		return loadActive().map(active -> {
+			Map<String, TaxonomyCategory> previous = new LinkedHashMap<>();
+			active.categories().forEach(category -> previous.put(category.categoryId(), category));
+			Map<String, TaxonomyCategory> merged = new LinkedHashMap<>();
+			for (TaxonomyCategory category : safeIncoming) {
+				TaxonomyCategory metadata = previous.get(category.categoryId());
+				merged.put(category.categoryId(), metadata == null ? category : new TaxonomyCategory(
+						category.groupId(), category.groupName(), category.archiveId(), category.archiveName(),
+						category.categoryId(), category.categoryName(),
+						category.description().isBlank() ? metadata.description() : category.description(),
+						category.alias() || metadata.alias(),
+						category.alias() ? category.aliasTarget() : metadata.aliasTarget()));
+			}
+			previous.values().stream()
+					.filter(TaxonomyCategory::alias)
+					.filter(alias -> !merged.containsKey(alias.categoryId()))
+					.filter(alias -> merged.containsKey(alias.aliasTarget()))
+					.forEach(alias -> merged.put(alias.categoryId(), alias));
+			return merged.values().stream()
+					.sorted(java.util.Comparator.comparing(TaxonomyCategory::categoryId))
+					.toList();
+		}).switchIfEmpty(Mono.just(safeIncoming.stream()
+				.sorted(java.util.Comparator.comparing(TaxonomyCategory::categoryId)).toList()));
 	}
 
 	public Mono<Long> countCategoryRows(String categoryId) {
@@ -145,14 +157,7 @@ public class TaxonomyRepository {
 				    :version, :sourceType, :sourceUrl, :payloadSha256, :itemCount,
 				    :sourceUpdatedAt, :fetchedAt, CAST(:metadata AS jsonb)
 				)
-				ON CONFLICT (snapshot_version) DO UPDATE SET
-				    source_type = EXCLUDED.source_type,
-				    source_url = EXCLUDED.source_url,
-				    payload_sha256 = EXCLUDED.payload_sha256,
-				    item_count = EXCLUDED.item_count,
-				    source_updated_at = EXCLUDED.source_updated_at,
-				    fetched_at = EXCLUDED.fetched_at,
-				    metadata = EXCLUDED.metadata
+				ON CONFLICT DO NOTHING
 				RETURNING id
 				""")
 				.bind("version", snapshot.snapshotVersion())
@@ -164,7 +169,15 @@ public class TaxonomyRepository {
 				.bind("fetchedAt", snapshot.generatedAt())
 				.bind("metadata", metadata)
 				.map((row, ignored) -> row.get("id", UUID.class))
-				.one();
+				.one()
+				.switchIfEmpty(databaseClient.sql("""
+						SELECT id FROM arxiv_category_snapshots
+						WHERE payload_sha256 = :payloadSha256
+						""")
+						.bind("payloadSha256", snapshot.payloadSha256())
+						.map((row, ignored) -> row.get("id", UUID.class)).one())
+				.switchIfEmpty(Mono.error(new IllegalArgumentException(
+						"taxonomy snapshot version conflicts with different content")));
 	}
 
 	private Mono<Void> upsertGroups(List<TaxonomyCategory> categories) {
@@ -273,22 +286,6 @@ public class TaxonomyRepository {
 				.then();
 	}
 
-	private Mono<Void> appendCreatedEvent(UUID jobId) {
-		return databaseClient.sql("""
-				INSERT INTO job_events (job_id, event_type, stage, message)
-				VALUES (:jobId, 'JOB_CREATED', 'WAITING_FOR_WORKER', 'Taxonomy synchronization requested')
-				""")
-				.bind("jobId", jobId).fetch().rowsUpdated().then();
-	}
-
-	private Mono<SyncJob> findSyncJob(String idempotencyKey) {
-		return databaseClient.sql("SELECT id, status FROM jobs WHERE idempotency_key = :idempotencyKey")
-				.bind("idempotencyKey", idempotencyKey)
-				.map((row, metadata) -> new SyncJob(
-						row.get("id", UUID.class), row.get("status", String.class), false))
-				.one();
-	}
-
 	private List<String> sourceUrls(SnapshotRow row) {
 		try {
 			Map<String, Object> metadata = objectMapper.readValue(
@@ -325,6 +322,4 @@ public class TaxonomyRepository {
 	) {
 	}
 
-	public record SyncJob(UUID id, String status, boolean created) {
-	}
 }

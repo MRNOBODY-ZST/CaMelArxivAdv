@@ -24,9 +24,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -43,7 +43,7 @@ public class ArxivConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	@Profile("api")
 	GlobalArxivRateLease globalArxivRateLease(
 			ReactiveStringRedisTemplate redis,
 			ArxivProperties properties
@@ -67,7 +67,7 @@ public class ArxivConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean(GlobalArxivRateLease.class)
+	@Profile("api")
 	ArxivLegacyClient arxivLegacyClient(
 			GlobalArxivRateLease rateLease,
 			ArxivProperties properties,
@@ -81,7 +81,7 @@ public class ArxivConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	@Profile("api")
 	ArxivPreviewCache arxivPreviewCache(
 			ReactiveStringRedisTemplate redis,
 			ObjectMapper objectMapper,
@@ -91,7 +91,7 @@ public class ArxivConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean({ArxivLegacyClient.class, ArxivPreviewCache.class})
+	@Profile("api")
 	@ConditionalOnProperty(
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	ArxivPreviewService arxivPreviewService(
@@ -117,11 +117,10 @@ public class ArxivConfiguration {
 	TaxonomyService taxonomyService(
 			TaxonomyRepository repository,
 			TaxonomySnapshotLoader snapshotLoader,
-			AuditService auditService,
-			SensitiveValueHasher hasher,
+			ArxivImportService importService,
 			TransactionalOperator transactions
 	) {
-		return new TaxonomyService(repository, snapshotLoader, auditService, hasher, transactions);
+		return new TaxonomyService(repository, snapshotLoader, importService, transactions);
 	}
 
 	@Bean

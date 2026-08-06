@@ -1,12 +1,14 @@
 # Phase 3 arXiv Discovery and Import Implementation Plan
 
+**Status:** Completed and accepted on 2026-08-06. Full backend/Worker/frontend quality gates, Compose/image contracts, real official Legacy metadata import, desktop browser QA, and 390×844 responsive QA passed. The final runtime audit also closed API profile wiring, Worker heartbeat routing, frontend preview contract alignment, and the complete OAI `ListSets` taxonomy synchronization loop.
+
 > **Execution mode:** Apply the repository's test-driven workflow task by task. Every behavior change starts with a failing focused test, then the smallest implementation, then the relevant regression suite. Commit at the checkpoints below.
 
 **Goal:** Deliver a production-shaped vertical slice in which an authorized user can browse the official arXiv taxonomy, preview a normalized category query, save it, create an idempotent asynchronous metadata import, observe and control the job through SSE or polling, and browse the imported papers.
 
 **Architecture:** Keep interactive preview in the Spring WebFlux API so it can return immediately, but put bulk Legacy/OAI harvesting in the isolated Python arXiv worker. Both clients use the same Redis-backed global lease key, enforcing one official request across all instances no sooner than three seconds after the previous lease. Spring owns PostgreSQL state, job transitions, authorization, audit, SSE, RabbitMQ publishing, and result persistence. The worker validates versioned commands, manually ACKs only after publishing a durable result, and treats pause/cancel as cooperative checkpoints between official requests.
 
-**Current official protocol facts:** The Legacy API returns Atom and asks clients making repeated calls to wait three seconds and cache queries. Bulk harvesting should use OAI-PMH. Since March 2025 the OAI base URL is `https://oaipmh.arxiv.org/oai`; the set hierarchy is `group:archive:CATEGORY`; resumption tokens expire daily and no longer contain a cursor or total. Sources: [API manual](https://info.arxiv.org/help/api/user-manual.html), [OAI harvester notes](https://info.arxiv.org/help/oa/index.html), and [category taxonomy](https://arxiv.org/category_taxonomy).
+**Current official protocol facts:** The Legacy API returns Atom and asks clients making repeated calls to wait three seconds and cache queries. Bulk harvesting should use OAI-PMH. Since March 2025 the OAI base URL is `https://oaipmh.arxiv.org/oai`; sets include both `group:archive:CATEGORY` and legacy two-part physics forms such as `physics:hep-th`; resumption tokens expire daily and no longer contain a cursor or total. Sources: [API manual](https://info.arxiv.org/help/api/user-manual.html), [OAI harvester notes](https://info.arxiv.org/help/oa/index.html), and [category taxonomy](https://arxiv.org/category_taxonomy).
 
 **Technology:** Java 25, Spring Boot 4.1 WebFlux/R2DBC/Security/Redis/RabbitMQ, PostgreSQL/Flyway, Python 3.12/httpx/aio-pika/redis/Pydantic, Vue 3/TypeScript/Pinia/Axios/Tailwind Plus-derived design primitives, JUnit/Testcontainers, pytest, Vitest, and browser QA.
 

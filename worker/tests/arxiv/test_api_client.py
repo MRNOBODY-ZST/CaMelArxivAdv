@@ -82,5 +82,5 @@ async def test_rejects_oversized_and_entity_xml() -> None:
         )
         with pytest.raises(ValueError, match="size"):
             await client.fetch_ids(["2608.00001"])
-        with pytest.raises(ValueError):
+        with pytest.raises(httpx.RemoteProtocolError):
             await client.fetch_ids(["2608.00001"])

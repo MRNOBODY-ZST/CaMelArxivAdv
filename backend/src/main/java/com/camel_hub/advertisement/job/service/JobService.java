@@ -137,7 +137,7 @@ public class JobService {
 		catch (IllegalStateException exception) {
 			return Mono.error(new InvalidJobStateException(exception.getMessage()));
 		}
-		return repository.createRetry(original, actorUserId)
+		return repository.createRetry(original, actorUserId, context.traceId())
 				.switchIfEmpty(Mono.error(new JobConflictException("Retry job could not be created")))
 				.flatMap(retry -> repository.appendEvent(
 						original.id(), "JOB_RETRIED", original.currentStage(), "A retry job was created")

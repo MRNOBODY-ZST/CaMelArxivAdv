@@ -1,16 +1,11 @@
 package com.camel_hub.advertisement.arxiv.taxonomy;
 
 import com.camel_hub.advertisement.arxiv.api.ArxivTaxonomyDtos;
-import com.camel_hub.advertisement.audit.AuditEvent;
-import com.camel_hub.advertisement.audit.AuditResult;
-import com.camel_hub.advertisement.audit.AuditService;
-import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
+import com.camel_hub.advertisement.arxiv.importing.ArxivImportService;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
 
-import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,21 +16,18 @@ public class TaxonomyService {
 
 	private final TaxonomyRepository repository;
 	private final TaxonomySnapshotLoader snapshotLoader;
-	private final AuditService auditService;
-	private final SensitiveValueHasher hasher;
+	private final ArxivImportService importService;
 	private final TransactionalOperator transactions;
 
 	public TaxonomyService(
 			TaxonomyRepository repository,
 			TaxonomySnapshotLoader snapshotLoader,
-			AuditService auditService,
-			SensitiveValueHasher hasher,
+			ArxivImportService importService,
 			TransactionalOperator transactions
 	) {
 		this.repository = repository;
 		this.snapshotLoader = snapshotLoader;
-		this.auditService = auditService;
-		this.hasher = hasher;
+		this.importService = importService;
 		this.transactions = transactions;
 	}
 
@@ -54,16 +46,9 @@ public class TaxonomyService {
 			UUID actorUserId,
 			AuthenticationRequestContext context
 	) {
-		String dayKey = LocalDate.now(ZoneOffset.UTC).toString();
-		return repository.createOrFindDailySyncJob(actorUserId, dayKey)
-				.flatMap(job -> auditService.record(new AuditEvent(
-						actorUserId, "ARXIV_TAXONOMY_SYNC_REQUESTED", "JOB", job.id().toString(),
-						hasher.hash(context.ipAddress()), context.userAgentSummary(), context.traceId(),
-						Map.of(), Map.of("jobStatus", job.status(), "created", job.created()),
-						AuditResult.SUCCESS, null))
-						.thenReturn(new ArxivTaxonomyDtos.TaxonomySyncResponse(
-								job.id(), job.status(), job.created())))
-				.as(transactions::transactional);
+		return importService.createTaxonomySync(actorUserId, context)
+				.map(job -> new ArxivTaxonomyDtos.TaxonomySyncResponse(
+						job.jobId(), job.status(), job.created()));
 	}
 
 	private ArxivTaxonomyDtos.TaxonomyResponse toResponse(TaxonomyRepository.TaxonomyData data) {

@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.reactive.TransactionalOperator;
 
 import java.time.Duration;
@@ -52,7 +52,7 @@ public class JobConfiguration {
 	}
 
 	@Bean
-	@ConditionalOnBean(ReactiveStringRedisTemplate.class)
+	@Profile("api")
 	JobControlSignal jobControlSignal(ReactiveStringRedisTemplate redis) {
 		return new RedisJobControlSignal(redis);
 	}

@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -29,6 +30,11 @@ public class ArxivResultConsumer {
 		}
 		catch (IllegalArgumentException exception) {
 			LOGGER.warn("Rejected invalid arXiv result message: {}", exception.getMessage());
+			channel.basicReject(tag, false);
+		}
+		catch (DataIntegrityViolationException exception) {
+			LOGGER.warn("Rejected arXiv result that violates persistence constraints: {}",
+					exception.getMessage());
 			channel.basicReject(tag, false);
 		}
 		catch (RuntimeException exception) {

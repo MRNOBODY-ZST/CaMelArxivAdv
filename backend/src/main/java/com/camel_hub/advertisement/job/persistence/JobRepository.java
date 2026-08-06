@@ -78,9 +78,12 @@ public class JobRepository {
 				.fetch().rowsUpdated().map(Long::intValue);
 	}
 
-	public Mono<JobRecord> createRetry(JobRecord original, UUID actorUserId) {
+	public Mono<JobRecord> createRetry(JobRecord original, UUID actorUserId, String traceId) {
 		UUID newId = UUID.randomUUID();
+		UUID messageId = UUID.randomUUID();
 		UUID rootId = original.rootJobId() == null ? original.id() : original.rootJobId();
+		String idempotencyKey = original.idempotencyKey() + ":retry:" + newId;
+		String routingKey = routingKey(original.type());
 		return databaseClient.sql("""
 				INSERT INTO jobs (
 				    id, type, status, created_by, parameters, idempotency_key, total_count,
@@ -91,10 +94,39 @@ public class JobRepository {
 				FROM jobs WHERE id = :originalId
 				""")
 				.bind("newId", newId).bind("actorUserId", actorUserId)
-				.bind("idempotencyKey", original.idempotencyKey() + ":retry:" + newId)
+				.bind("idempotencyKey", idempotencyKey)
 				.bind("rootId", rootId).bind("originalId", original.id())
 				.fetch().rowsUpdated()
-				.flatMap(rows -> rows == 1 ? find(newId) : Mono.empty());
+				.flatMap(rows -> rows == 1
+						? insertRetryOutbox(
+								newId, messageId, original.type(), routingKey,
+								idempotencyKey, safeTrace(traceId)).then(find(newId))
+						: Mono.empty());
+	}
+
+	private Mono<Void> insertRetryOutbox(
+			UUID jobId, UUID messageId, String type, String routingKey,
+			String idempotencyKey, String traceId
+	) {
+		return databaseClient.sql("""
+				INSERT INTO outbox_messages (
+				    id, exchange_name, routing_key, message_type, message_version,
+				    aggregate_id, idempotency_key, payload, trace_id
+				)
+				SELECT :messageId, 'arxiv.jobs', :routingKey, :type, 1,
+				       id, :outboxKey,
+				       jsonb_build_object(
+				         'version', 1, 'messageId', :messageId, 'type', type,
+				         'jobId', id, 'idempotencyKey', idempotency_key,
+				         'traceId', :traceId, 'occurredAt', now(), 'payload', parameters),
+				       :traceId
+				FROM jobs WHERE id = :jobId
+				""").bind("messageId", messageId).bind("routingKey", routingKey)
+				.bind("type", type).bind("outboxKey", "command:" + idempotencyKey)
+				.bind("traceId", traceId).bind("jobId", jobId)
+				.fetch().rowsUpdated()
+				.flatMap(rows -> rows == 1 ? Mono.empty()
+						: Mono.error(new IllegalStateException("Retry outbox could not be created")));
 	}
 
 	public Mono<Void> appendEvent(
@@ -171,6 +203,20 @@ public class JobRepository {
 				row.get("ended_at", Instant.class), row.get("heartbeat_at", Instant.class),
 				row.get("created_at", Instant.class), row.get("updated_at", Instant.class),
 				row.get("error_summary", String.class));
+	}
+
+	private String routingKey(String type) {
+		return switch (type) {
+			case "ARXIV_IMPORT_METADATA" -> "arxiv.import.metadata";
+			case "ARXIV_SYNC_OAI" -> "arxiv.sync.oai";
+			case "ARXIV_SYNC_TAXONOMY" -> "arxiv.sync.taxonomy";
+			default -> throw new IllegalArgumentException("Job type cannot be retried");
+		};
+	}
+
+	private String safeTrace(String traceId) {
+		return traceId != null && traceId.matches("[A-Za-z0-9_-]{8,64}")
+				? traceId : UUID.randomUUID().toString().replace("-", "");
 	}
 
 	private long value(Long value) {

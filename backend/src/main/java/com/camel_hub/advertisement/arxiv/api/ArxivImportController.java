@@ -4,6 +4,7 @@ import com.camel_hub.advertisement.arxiv.importing.ArxivImportService;
 import com.camel_hub.advertisement.common.api.RequestContextSupport;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,6 +18,7 @@ import reactor.core.publisher.Mono;
 import java.security.Principal;
 
 @RestController
+@Profile("!mail-worker")
 @RequestMapping("/api/v1/arxiv")
 @ConditionalOnProperty(
 		prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)

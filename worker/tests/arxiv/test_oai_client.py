@@ -77,3 +77,31 @@ async def test_classifies_expired_resumption_tokens() -> None:
         )
         with pytest.raises(OaiTokenExpiredError):
             await client.list_records(resumption_token="opaque-expired")
+
+
+@pytest.mark.asyncio
+async def test_fetches_the_official_list_sets_taxonomy() -> None:
+    body = (FIXTURES / "list-sets.xml").read_bytes()
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        categories = await OaiClient(
+            http,
+            ImmediateLease(),
+            "https://oaipmh.arxiv.org/oai",
+            {"oaipmh.arxiv.org"},
+            "agent",
+            max_retries=0,
+        ).fetch_taxonomy()
+
+    assert {category.category_id for category in categories} == {
+        "astro-ph.GA",
+        "cs.AI",
+        "math.NA",
+        "hep-th",
+    }
+    assert dict(requests[0].url.params) == {"verb": "ListSets"}

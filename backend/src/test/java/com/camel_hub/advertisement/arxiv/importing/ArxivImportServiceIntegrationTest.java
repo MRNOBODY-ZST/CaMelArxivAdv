@@ -32,6 +32,7 @@ class ArxivImportServiceIntegrationTest {
 	private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17.5-alpine")
 			.withDatabaseName("camel_import_test").withUsername("camel").withPassword("camel-test-only");
 	private static final UUID ACTOR = UUID.fromString("211982fa-03d6-462d-9bb7-f84097fda6fd");
+	private static final UUID OTHER_ACTOR = UUID.fromString("c76bb6eb-8fe2-46d0-8e2b-57056a73f143");
 	private DatabaseClient databaseClient;
 	private ArxivImportService service;
 
@@ -50,8 +51,9 @@ class ArxivImportServiceIntegrationTest {
 		databaseClient.sql("DELETE FROM users").fetch().rowsUpdated().block();
 		databaseClient.sql("""
 				INSERT INTO users (id, username, email, password_hash, display_name)
-				VALUES (:id, 'import-owner', 'import@example.invalid', 'hash', 'Importer')
-				""").bind("id", ACTOR).fetch().rowsUpdated().block();
+				VALUES (:id, 'import-owner', 'import@example.invalid', 'hash', 'Importer'),
+				       (:otherId, 'other-importer', 'other-importer@example.invalid', 'hash', 'Other Importer')
+				""").bind("id", ACTOR).bind("otherId", OTHER_ACTOR).fetch().rowsUpdated().block();
 		AuditService audit = mock(AuditService.class);
 		when(audit.record(any())).thenReturn(Mono.empty());
 		SensitiveValueHasher hasher = mock(SensitiveValueHasher.class);
@@ -93,6 +95,20 @@ class ArxivImportServiceIntegrationTest {
 		assertThatThrownBy(() -> service.createOaiSync(
 				ACTOR, new ArxivImportService.OaiSyncCommand("not:official:set", null), context()).block())
 				.isInstanceOf(ArxivImportValidationException.class);
+	}
+
+	@Test
+	void taxonomySyncIsIdempotentAndTransactionalWithAnOutboxCommand() {
+		var first = service.createTaxonomySync(ACTOR, context()).block();
+		var duplicate = service.createTaxonomySync(OTHER_ACTOR, context()).block();
+
+		assertThat(first.created()).isTrue();
+		assertThat(duplicate.created()).isFalse();
+		assertThat(duplicate.jobId()).isEqualTo(first.jobId());
+		assertThat(count("outbox_messages")).isEqualTo(1);
+		assertThat(text("SELECT payload::text FROM outbox_messages LIMIT 1"))
+				.contains("ARXIV_SYNC_TAXONOMY", "requestedDate")
+				.doesNotContain("email", "password");
 	}
 
 	@Test

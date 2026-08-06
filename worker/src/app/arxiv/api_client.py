@@ -48,7 +48,7 @@ class LegacyApiClient:
             self._max_response_bytes,
             self._max_retries,
         )
-        return parse_atom_feed(body)
+        return _parse_response(body)
 
     async def search_page(
         self,
@@ -83,7 +83,14 @@ class LegacyApiClient:
             self._max_response_bytes,
             self._max_retries,
         )
+        return _parse_response(body)
+
+
+def _parse_response(body: bytes) -> tuple[ArxivMetadata, ...]:
+    try:
         return parse_atom_feed(body)
+    except ValueError as exception:
+        raise httpx.RemoteProtocolError("Legacy API response is invalid") from exception
 
 
 def parse_atom_feed(body: bytes) -> tuple[ArxivMetadata, ...]:

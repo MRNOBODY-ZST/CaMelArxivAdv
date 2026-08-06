@@ -10,6 +10,8 @@ cp .env.example .env
 
 首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。真实 SMTP 仍保持 `ALLOW_LIVE_SMTP=false`，后续启用也只能由部署平台注入 Secret，不能写入 Compose 或镜像。
 
+Phase 3 还要求设置受监控的 `ARXIV_CONTACT_EMAIL`。官方端点固定为 `https://export.arxiv.org/api/query` 与 `https://oaipmh.arxiv.org/oai`，允许主机固定为 `export.arxiv.org,oaipmh.arxiv.org,arxiv.org`；不要用环境变量指向任意第三方镜像。`ARXIV_MIN_REQUEST_INTERVAL` 只能保持 `PT3S` 或更慢，多个 API/Worker 副本必须共享同一 Redis 实例。
+
 ## 开发环境
 
 ```bash
@@ -53,8 +55,12 @@ Compose 的 `deploy.resources` 是容量指导；非 Swarm 运行时应在编排
 3. 先启动 PostgreSQL/Redis/RabbitMQ/MinIO，等待健康。
 4. 单实例启动 API 执行 Flyway；迁移成功后扩容 API/worker。
 5. 启动前端，验证 `/healthz`、API readiness 和关键只读请求。
-6. 观察错误率、数据库连接、队列积压后再开放流量。
+6. 验证离线分类 API、Worker heartbeat、`arxiv.jobs.worker`/`arxiv.results.backend` bindings 和 Outbox 发布。
+7. 用少量明确 arXiv ID 做导入冒烟，确认 Job 终态、事件回放和论文库后再开放批量同步。
+8. 观察错误率、数据库连接、Redis 租约、队列积压后再开放流量。
 
 ## 回滚
 
 应用回滚通过 `APP_VERSION` 指向上一镜像。数据库采用前向兼容迁移，不自动 down migrate；如果新版本写入了不兼容数据，应按变更手册恢复备份或执行经过评审的修复迁移。
+
+V6 是向前兼容迁移：增加分类快照/同步游标/论文导入来源，并扩展 Job 与论文搜索索引。回滚应用时不要删除 V6 表或 active taxonomy；旧应用忽略新增列。若新 Worker 已发布 v1 结果，先停止 Worker 和 Outbox dispatcher，再回滚 API，避免没有相应消费者的消息继续积压。

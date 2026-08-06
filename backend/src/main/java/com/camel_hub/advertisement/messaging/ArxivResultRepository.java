@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.messaging;
 import org.springframework.r2dbc.core.DatabaseClient;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.UUID;
 
 public class ArxivResultRepository {
@@ -30,6 +31,30 @@ public class ArxivResultRepository {
 				.map((row, metadata) -> new JobRecord(
 						row.get("id", UUID.class), row.get("type", String.class),
 						row.get("status", String.class))).one();
+	}
+
+	public Mono<Void> upsertHeartbeat(ArxivResultMessage.Payload payload, Instant occurredAt) {
+		DatabaseClient.GenericExecuteSpec statement = databaseClient.sql("""
+				INSERT INTO worker_heartbeats (
+				  worker_id, worker_type, version, status, current_job_id, last_seen_at, details
+				) VALUES (
+				  :workerId, :workerType, :version, :status,
+				  (SELECT id FROM jobs WHERE id = :currentJobId), :occurredAt, '{}'::jsonb
+				)
+				ON CONFLICT (worker_id) DO UPDATE SET
+				  worker_type = EXCLUDED.worker_type,
+				  version = EXCLUDED.version,
+				  status = EXCLUDED.status,
+				  current_job_id = EXCLUDED.current_job_id,
+				  last_seen_at = EXCLUDED.last_seen_at
+				WHERE worker_heartbeats.last_seen_at <= EXCLUDED.last_seen_at
+				""").bind("workerId", payload.workerId()).bind("workerType", payload.workerType())
+				.bind("version", payload.version()).bind("status", payload.status())
+				.bind("occurredAt", occurredAt);
+		statement = payload.currentJobId() == null
+				? statement.bindNull("currentJobId", UUID.class)
+				: statement.bind("currentJobId", payload.currentJobId());
+		return statement.fetch().rowsUpdated().then();
 	}
 
 	public Mono<Void> applyStarted(UUID jobId, ArxivResultMessage.Payload payload) {
@@ -97,6 +122,39 @@ public class ArxivResultRepository {
 				.bind("progress", boundedProgress(payload.progressPercent()))
 				.bind("errorSummary", valueOrEmpty(safeError(payload.errorSummary()))).bind("jobId", jobId)
 				.fetch().rowsUpdated().then();
+	}
+
+	public Mono<Void> upsertSyncCursor(UUID jobId, String checkpointJson) {
+		return databaseClient.sql("""
+				INSERT INTO arxiv_sync_cursors (
+				  cursor_key, sync_type, set_spec, from_datestamp, resumption_token,
+				  token_received_at, last_response_date, last_job_id
+				)
+				SELECT 'oai:job:' || id, 'OAI_METADATA', parameters->>'setSpec',
+				       CAST(NULLIF(parameters->>'from', '') AS date),
+				       NULLIF(CAST(:checkpoint AS jsonb)->>'resumptionToken', ''),
+				       CASE WHEN NULLIF(CAST(:checkpoint AS jsonb)->>'resumptionToken', '') IS NULL
+				            THEN NULL ELSE now() END,
+				       CAST(CAST(:checkpoint AS jsonb)->>'responseDate' AS timestamptz), id
+				FROM jobs WHERE id = :jobId AND type = 'ARXIV_SYNC_OAI'
+				ON CONFLICT (cursor_key) DO UPDATE SET
+				  resumption_token = EXCLUDED.resumption_token,
+				  token_received_at = EXCLUDED.token_received_at,
+				  last_response_date = EXCLUDED.last_response_date,
+				  last_job_id = EXCLUDED.last_job_id,
+				  version = arxiv_sync_cursors.version + 1, updated_at = now()
+				""").bind("checkpoint", checkpointJson).bind("jobId", jobId)
+				.fetch().rowsUpdated().then();
+	}
+
+	public Mono<Void> markSyncComplete(UUID jobId) {
+		return databaseClient.sql("""
+				UPDATE arxiv_sync_cursors SET
+				  resumption_token = NULL, token_received_at = NULL,
+				  last_completed_datestamp = coalesce(last_response_date::date, current_date),
+				  version = version + 1, updated_at = now()
+				WHERE last_job_id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().then();
 	}
 
 	public Mono<Void> appendEvent(UUID jobId, String type, ArxivResultMessage.Payload payload, String details) {

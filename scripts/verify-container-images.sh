@@ -16,6 +16,6 @@ for image in "${images[@]}"; do
 done
 
 docker run --rm --entrypoint python camel-arxiv/arxiv-worker:dev \
-  -c "import app.main; print('arxiv worker import verified')"
+  -c "from app.main import run; from app.arxiv.oai_client import OaiClient; from app.messaging.contracts import MessageType; assert MessageType.ARXIV_SYNC_TAXONOMY.value == 'ARXIV_SYNC_TAXONOMY'; print('arxiv worker phase-three imports verified')"
 
 echo "Container image contracts verified for ${#images[@]} images"

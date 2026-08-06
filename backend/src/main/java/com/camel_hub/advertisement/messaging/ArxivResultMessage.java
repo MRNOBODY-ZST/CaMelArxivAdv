@@ -29,7 +29,27 @@ public record ArxivResultMessage(
 			JsonNode checkpoint,
 			List<Paper> papers,
 			String errorCode,
-			String errorSummary
+			String errorSummary,
+			String workerId,
+			String workerType,
+			String version,
+			UUID currentJobId,
+			String snapshotVersion,
+			Instant taxonomySourceUpdatedAt,
+			List<TaxonomyCategory> taxonomyCategories
+	) {
+	}
+
+	public record TaxonomyCategory(
+			String groupId,
+			String groupName,
+			String archiveId,
+			String archiveName,
+			String categoryId,
+			String categoryName,
+			String description,
+			boolean alias,
+			String aliasTarget
 	) {
 	}
 

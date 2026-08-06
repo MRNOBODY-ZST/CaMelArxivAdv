@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.main import build_heartbeat_message
+from app.main import WorkerRuntimeState, build_heartbeat_message
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
 
 
@@ -59,3 +59,13 @@ def test_runtime_heartbeat_contains_no_connection_secret() -> None:
     assert heartbeat.type == MessageType.WORKER_HEARTBEAT
     assert "password" not in serialized
     assert "rabbitmq_url" not in serialized
+
+
+def test_runtime_heartbeat_reports_the_active_job() -> None:
+    job_id = uuid4()
+    heartbeat = build_heartbeat_message(
+        Settings(), WorkerRuntimeState(status="BUSY", current_job_id=job_id)
+    )
+
+    assert heartbeat.payload.status == "BUSY"
+    assert heartbeat.payload.current_job_id == job_id

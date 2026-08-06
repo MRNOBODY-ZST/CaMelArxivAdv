@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { SearchCriteria } from '../arxiv.types'
-defineProps<{ criteria: SearchCriteria }>()
+import type { NormalizedSearchCriteria } from '../arxiv.types'
+defineProps<{ criteria: NormalizedSearchCriteria }>()
 </script>
 
 <template>

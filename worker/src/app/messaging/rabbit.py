@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from aio_pika import DeliveryMode, Message
@@ -41,6 +42,12 @@ async def settle_delivery(
     if outcome is CommandOutcome.DEAD:
         await incoming.reject(requeue=False)
         return
+    headers = dict(incoming.headers or {})
+    retry_count = _retry_count(headers)
+    if retry_count >= 5:
+        await incoming.reject(requeue=False)
+        return
+    headers["camelRetryCount"] = retry_count + 1
     await retry_exchange.publish(
         Message(
             body=incoming.body,
@@ -50,9 +57,20 @@ async def settle_delivery(
             message_id=incoming.message_id,
             timestamp=datetime.now(UTC),
             type=incoming.type,
-            headers=dict(incoming.headers or {}),
+            headers=headers,
         ),
         routing_key=incoming.routing_key or "arxiv.retry.unknown",
         mandatory=True,
     )
     await incoming.ack()
+
+
+def _retry_count(headers: Mapping[str, object]) -> int:
+    value = headers.get("camelRetryCount", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return 5
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 5
+    return parsed if 0 <= parsed <= 5 else 5

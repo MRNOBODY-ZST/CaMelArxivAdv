@@ -10,7 +10,7 @@ import DsSkeleton from '@/components/design-skill/DsSkeleton.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { ApiErrorResponse } from '@/modules/auth/auth.types'
 import { arxivApi } from './arxiv.api'
-import type { PreviewResult, SearchCriteria, TaxonomyResponse } from './arxiv.types'
+import type { PreviewResult, SearchCriteriaRequest, TaxonomyResponse } from './arxiv.types'
 import CategoryTree from './components/CategoryTree.vue'
 import SearchCriteriaSummary from './components/SearchCriteriaSummary.vue'
 
@@ -25,7 +25,7 @@ const error = ref('')
 const notice = ref('')
 const savedName = ref('')
 const importCeiling = ref('500')
-const criteria = reactive<SearchCriteria>({
+const criteria = reactive<SearchCriteriaRequest>({
   categoryIds: [], categoryMode: 'ANY', titleKeywords: '', abstractKeywords: '', authorKeywords: '',
   sortBy: 'RELEVANCE', sortOrder: 'DESCENDING', page: 1, pageSize: 20,
 })
@@ -247,7 +247,7 @@ function message(reason: unknown): string {
                     >{{ paper.title }}</a><p class="mt-1 line-clamp-2 text-xs/5 text-slate-500">
                       {{ paper.authors.map((item) => item.name).join(' · ') }}
                     </p><p class="mt-1 font-mono text-xs text-slate-400">
-                      {{ paper.arxivId }}v{{ paper.version }}
+                      {{ paper.arxivId }} · {{ paper.versionCount }} 个版本
                     </p>
                   </td><td class="px-4 py-4">
                     <span class="rounded bg-brand-50 px-2 py-1 text-xs font-medium text-brand-700">{{ paper.primaryCategory }}</span>

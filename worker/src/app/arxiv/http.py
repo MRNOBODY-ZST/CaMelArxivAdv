@@ -42,7 +42,8 @@ async def request_xml(
     for attempt in range(max_retries + 1):
         await lease.await_permit()
         try:
-            response = await client.get(
+            async with client.stream(
+                "GET",
                 url,
                 params=params,
                 headers={
@@ -50,17 +51,22 @@ async def request_xml(
                     "User-Agent": user_agent,
                 },
                 follow_redirects=False,
-            )
-            if response.status_code in {429, 500, 502, 503, 504}:
-                if attempt == max_retries:
-                    response.raise_for_status()
-                await _backoff(attempt)
-                continue
-            response.raise_for_status()
-            body = response.content
-            if len(body) > max_response_bytes:
-                raise ValueError("arXiv response exceeded the configured size limit")
-            return body
+            ) as response:
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    if attempt == max_retries:
+                        response.raise_for_status()
+                    await _backoff(attempt)
+                    continue
+                response.raise_for_status()
+                declared_length = response.headers.get("content-length")
+                if declared_length is not None and int(declared_length) > max_response_bytes:
+                    raise ValueError("arXiv response exceeded the configured size limit")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_response_bytes:
+                        raise ValueError("arXiv response exceeded the configured size limit")
+                return bytes(body)
         except (httpx.TimeoutException, httpx.NetworkError):
             if attempt == max_retries:
                 raise

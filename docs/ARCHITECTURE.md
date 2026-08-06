@@ -15,6 +15,8 @@ flowchart LR
     Q --> W["Python arXiv Worker"]
     Q --> M["Spring Mail Worker"]
     W -->|"版本化结果/心跳"| Q
+    W --> L["arXiv Legacy API"]
+    W --> H["arXiv OAI-PMH / ListSets"]
     M --> D["Mailpit 或经批准 SMTP"]
     M --> P
 ```
@@ -25,8 +27,8 @@ flowchart LR
 |---|---|---|---|
 | `frontend` | Nginx 静态站点、API/Tracking 反向代理、安全头 | 无 | 生产唯一入口 8080 |
 | `backend-api` | WebFlux API、授权、任务编排、Flyway | PostgreSQL | 仅内部 8080 |
-| `mail-worker` | 邮件快照消费、频控、SMTP 发送与回写 | PostgreSQL/RabbitMQ | 仅内部健康端口 |
-| `arxiv-worker` | arXiv/OAI 请求、Source 安全解包和证据提取 | 临时目录/RabbitMQ | 不暴露端口 |
+| `mail-worker` | 邮件快照消费、频控、SMTP 发送与回写；`mail-worker` profile 不注册任何业务 API Controller | PostgreSQL/RabbitMQ | 仅内部 Actuator 健康端口 |
+| `arxiv-worker` | Legacy/OAI 元数据和分类同步；Phase 4 再增加 Source 安全解包/提取 | Redis 租约/RabbitMQ | 不暴露端口 |
 | `postgres` | 业务事实、审计、任务、分析聚合 | named volume | 内部 |
 | `redis` | 限速、短期锁、缓存、SSE 协调 | named volume | 内部 |
 | `rabbitmq` | 版本化异步消息、重试、死信 | named volume | 内部 |
@@ -51,6 +53,14 @@ flowchart LR
 3. 结果回写前检查 `processed_messages`，重复消息只 ACK，不重复产生业务副作用。
 4. `job_events` 驱动 SSE；客户端断线时使用任务详情轮询回退。
 5. 分析读取预聚合表/物化视图，不在请求路径扫描原始大表。
+
+## Phase 3 arXiv 数据路径
+
+交互式预览由 API 调用 Legacy API：条件先规范化并生成 SHA-256 哈希，相同请求读取 Redis 缓存；仅缓存未命中者取得全局租约后访问官方主机。批量导入、OAI `ListRecords` 和分类 `ListSets` 均形成 PostgreSQL Job + Outbox，再由 Python Worker 单连接消费。
+
+Java 与 Python 使用同一 Redis server-time Lua 协议和租约键，所有实例的官方请求预约间隔不小于三秒。Redis 不可用时关闭外部请求，不降级为无限速访问。OAI resumption token 按不透明值原样续传，token 请求不混入 `set`、`from` 或 `metadataPrefix`；Worker 在 Redis 保存可恢复游标，API 同时把 progress checkpoint 投影到 PostgreSQL `arxiv_sync_cursors`。
+
+Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者在同一事务中写 `processed_messages`、论文/分类、任务计数和 `job_events`。分类内容只随成功 terminal 结果提交，快照激活和 Job `SUCCEEDED` 原子完成；ListSets 数据会与当前离线元数据合并以保留描述和 alias。消失分类只标记 inactive，既有论文关系不会被删除。重复消息 ACK 但不重复副作用，重复快照内容复用既有 snapshot。
 
 ## 安全设计
 

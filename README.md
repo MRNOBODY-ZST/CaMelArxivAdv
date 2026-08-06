@@ -1,8 +1,8 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1 工程基础和 Phase 2 认证/RBAC：生产形态数据库、统一 API、Python worker、授权 DesignSkill 管理端、短期 JWT、单次 refresh 轮换、五个默认角色、审计与可一键启动的九服务 Docker Compose 栈。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–3：生产形态基础设施、认证/RBAC、官方分类离线回退与同步、查询预览/缓存、保存查询、可控异步导入、OAI-PMH 增量同步、任务 SSE/轮询和论文库均已形成可运行垂直切片。
 
-> arXiv、解析、邮件和统计业务仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 3–9 继续开发。仪表盘使用真实健康接口；尚无业务数据时只显示空状态，不生成演示指标。
+> Source 解析、联系人提取、统计、模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 4–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
 
 ## 快速启动
 
@@ -24,6 +24,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - Mailpit：[http://localhost:8025](http://localhost:8025)
 - MinIO Console：[http://localhost:9001](http://localhost:9001)
 - 健康 API：[http://localhost:8080/api/v1/system/health](http://localhost:8080/api/v1/system/health)
+- 论文发现：[http://localhost:8080/arxiv/discovery](http://localhost:8080/arxiv/discovery)
+- 导入任务：[http://localhost:8080/jobs](http://localhost:8080/jobs)
+- 论文库：[http://localhost:8080/papers](http://localhost:8080/papers)
 
 首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
 
@@ -66,7 +69,7 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–2 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+Phase 1–3 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 ## 文档
 
@@ -82,7 +85,7 @@ Phase 1–2 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 
 ## 安全边界
 
-- arXiv Source 后续只允许官方主机、限速下载、大小上限和临时目录处理，不进入长期对象存储。
+- arXiv Legacy API、OAI-PMH 和分类同步只允许配置中的官方 HTTPS 主机；Java/Python 共享 Redis 全局三秒租约。Source 阶段仍须增加大小上限、安全解包和临时目录清理。
 - SMTP、JWT、HMAC 与追踪密钥必须由独立随机值提供；数据库只保存受保护的 Secret 材料。
 - 邮箱、Token、Authorization、Cookie 和 Source 内容不得写入日志。
 - 邮件发送必须经过快照、抑制、退订、频控和审批状态机；SMTP 接受不等于最终送达。
