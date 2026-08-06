@@ -18,6 +18,9 @@ from app.messaging.contracts import (
     MessageType,
     OaiSyncCommand,
     ResultPayload,
+    SourceExtractionCommand,
+    SourceExtractionResult,
+    SourceTarget,
     TaxonomySyncCommand,
 )
 
@@ -51,6 +54,10 @@ class ResultPublisher(Protocol):
     async def publish(self, message: MessageEnvelope[ResultPayload]) -> None: ...
 
 
+class SourceRunner(Protocol):
+    async def run(self, target: SourceTarget) -> SourceExtractionResult: ...
+
+
 class JobStore(Protocol):
     async def is_processed(self, key: str) -> bool: ...
 
@@ -81,6 +88,7 @@ class ArxivCommandProcessor:
         *,
         batch_size: int,
         maximum_command_bytes: int = 2 * 1024 * 1024,
+        source_runner: SourceRunner | None = None,
     ) -> None:
         if not 1 <= batch_size <= 100:
             raise ValueError("metadata batch size must be between one and 100")
@@ -90,6 +98,7 @@ class ArxivCommandProcessor:
         self._store = store
         self._batch_size = batch_size
         self._maximum_command_bytes = maximum_command_bytes
+        self._source_runner = source_runner
 
     async def process(self, body: bytes) -> CommandOutcome:
         if not body or len(body) > self._maximum_command_bytes:
@@ -99,13 +108,25 @@ class ArxivCommandProcessor:
             if envelope.job_id is None:
                 return CommandOutcome.DEAD
             if envelope.type == MessageType.ARXIV_IMPORT_METADATA:
-                command: ImportMetadataCommand | OaiSyncCommand | TaxonomySyncCommand = (
+                command: (
+                    ImportMetadataCommand
+                    | OaiSyncCommand
+                    | TaxonomySyncCommand
+                    | SourceExtractionCommand
+                ) = (
                     ImportMetadataCommand.model_validate(envelope.payload)
                 )
             elif envelope.type == MessageType.ARXIV_SYNC_OAI:
                 command = OaiSyncCommand.model_validate(envelope.payload)
             elif envelope.type == MessageType.ARXIV_SYNC_TAXONOMY:
                 command = TaxonomySyncCommand.model_validate(envelope.payload)
+            elif envelope.type in {
+                MessageType.ARXIV_FETCH_AND_PARSE_SOURCE,
+                MessageType.ARXIV_REEXTRACT_CONTACTS,
+            }:
+                if self._source_runner is None:
+                    return CommandOutcome.DEAD
+                command = SourceExtractionCommand.model_validate(envelope.payload)
             else:
                 return CommandOutcome.DEAD
         except (ValidationError, UnicodeDecodeError, ValueError):
@@ -134,6 +155,8 @@ class ArxivCommandProcessor:
             starting_stage = (
                 "FETCHING_TAXONOMY"
                 if isinstance(command, TaxonomySyncCommand)
+                else "DOWNLOADING_SOURCE"
+                if isinstance(command, SourceExtractionCommand)
                 else "FETCHING_METADATA"
             )
             await self._publish(
@@ -146,20 +169,39 @@ class ArxivCommandProcessor:
                 processed = await self._process_import(envelope, command)
             elif isinstance(command, OaiSyncCommand):
                 processed = await self._process_oai(envelope, command)
+            elif isinstance(command, SourceExtractionCommand):
+                summary = await self._process_source(envelope, command)
+                processed = None if summary is None else summary.processed
             else:
                 processed = await self._process_taxonomy(envelope)
             if processed is None:
                 return CommandOutcome.REQUEUE
             if not isinstance(command, TaxonomySyncCommand):
+                if isinstance(command, SourceExtractionCommand):
+                    if summary is None:
+                        raise RuntimeError("Source extraction summary is unavailable")
+                    terminal_status = _source_terminal_status(summary)
+                    success_count = summary.success
+                    skipped_count = summary.skipped
+                    failed_count = summary.failed
+                    total_count = len(command.targets)
+                else:
+                    terminal_status = "SUCCEEDED"
+                    success_count = processed
+                    skipped_count = 0
+                    failed_count = 0
+                    total_count = processed
                 await self._publish(
                     envelope,
                     MessageType.ARXIV_JOB_COMPLETED,
                     ResultPayload(
-                        status="SUCCEEDED",
+                        status=terminal_status,
                         stage="COMPLETED",
                         processed_count=processed,
-                        success_count=processed,
-                        total_count=processed,
+                        success_count=success_count,
+                        skipped_count=skipped_count,
+                        failed_count=failed_count,
+                        total_count=total_count,
                         progress_percent=100,
                     ),
                     processed + 2,
@@ -195,6 +237,58 @@ class ArxivCommandProcessor:
                 999_999,
             )
             return CommandOutcome.REQUEUE
+
+    async def _process_source(
+        self,
+        envelope: MessageEnvelope[dict[str, object]],
+        command: SourceExtractionCommand,
+    ) -> _SourceSummary | None:
+        if self._source_runner is None:
+            raise RuntimeError("Source extraction runner is not configured")
+        success = skipped = failed = 0
+        for index, target in enumerate(command.targets):
+            if await self._pause_or_cancel(envelope, index):
+                return None
+            result = await self._source_runner.run(target)
+            if result.status in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}:
+                success += 1
+            elif result.status == "SOURCE_UNAVAILABLE":
+                skipped += 1
+            else:
+                failed += 1
+            processed = index + 1
+            await self._publish(
+                envelope,
+                MessageType.ARXIV_EXTRACTION_RESULT,
+                ResultPayload(
+                    status="RUNNING",
+                    stage="PERSISTING_EXTRACTION",
+                    processed_count=processed,
+                    success_count=success,
+                    skipped_count=skipped,
+                    failed_count=failed,
+                    total_count=len(command.targets),
+                    progress_percent=processed * 100.0 / len(command.targets),
+                    extractions=(result,),
+                ),
+                index * 2 + 1,
+            )
+            await self._publish(
+                envelope,
+                MessageType.ARXIV_JOB_PROGRESS,
+                ResultPayload(
+                    status="RUNNING",
+                    stage="EXTRACTING_CONTACTS",
+                    processed_count=processed,
+                    success_count=success,
+                    skipped_count=skipped,
+                    failed_count=failed,
+                    total_count=len(command.targets),
+                    progress_percent=processed * 100.0 / len(command.targets),
+                ),
+                index * 2 + 2,
+            )
+        return _SourceSummary(len(command.targets), success, skipped, failed)
 
     async def _process_import(
         self,
@@ -455,6 +549,24 @@ def _taxonomy_payload(category: TaxonomyCategory) -> dict[str, object]:
 
 def _temporal(value: date | datetime) -> str:
     return value.isoformat()
+
+
+class _SourceSummary:
+    def __init__(self, processed: int, success: int, skipped: int, failed: int) -> None:
+        self.processed = processed
+        self.success = success
+        self.skipped = skipped
+        self.failed = failed
+
+
+def _source_terminal_status(
+    summary: _SourceSummary,
+) -> Literal["SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"]:
+    if summary.failed == 0:
+        return "SUCCEEDED"
+    if summary.success > 0 or summary.skipped > 0:
+        return "PARTIALLY_SUCCEEDED"
+    return "FAILED"
 
 
 def _legacy_query(criteria: dict[str, object]) -> tuple[str, str, str]:

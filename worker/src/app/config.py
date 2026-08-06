@@ -41,13 +41,16 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     legacy_base_url: str = "https://export.arxiv.org/api/query"
     oai_base_url: str = "https://oaipmh.arxiv.org/oai"
+    source_base_url: str = "https://export.arxiv.org/e-print"
     user_agent: str = "CaMelArxivAdv/0.1 (admin@example.invalid)"
     max_redirects: int = Field(default=3, ge=0, le=5)
+    max_request_retries: int = Field(default=3, ge=0, le=10)
     max_archive_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024)
     max_extracted_bytes: int = Field(default=250 * 1024 * 1024, ge=1024)
     max_single_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
     max_file_count: int = Field(default=5_000, ge=1, le=100_000)
     max_directory_depth: int = Field(default=20, ge=1, le=100)
+    max_compression_ratio: float = Field(default=100.0, ge=1.0, le=10_000.0)
     max_include_depth: int = Field(default=16, ge=1, le=100)
     max_parse_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     temp_root: Path | None = None

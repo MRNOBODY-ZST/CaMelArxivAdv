@@ -18,9 +18,12 @@ from structlog.typing import FilteringBoundLogger
 from app.arxiv.api_client import LegacyApiClient
 from app.arxiv.oai_client import OaiClient
 from app.arxiv.rate_limit import RedisGlobalArxivRateLease
+from app.arxiv.source_downloader import SourceDownloader
 from app.config import Settings
+from app.extraction.archive_guard import ArchiveLimits
 from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import RedisJobStore
+from app.jobs.source_extraction import SourceExtractionRunner
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
 from app.messaging.rabbit import RabbitResultPublisher, settle_delivery
 from app.observability.logging import configure_logging, get_logger
@@ -94,6 +97,8 @@ async def run(settings: Settings | None = None) -> None:
         await queue.bind(jobs_exchange, "arxiv.import.metadata")
         await queue.bind(jobs_exchange, "arxiv.sync.oai")
         await queue.bind(jobs_exchange, "arxiv.sync.taxonomy")
+        await queue.bind(jobs_exchange, "arxiv.source.extract")
+        await queue.bind(jobs_exchange, "arxiv.source.reextract")
         redis = redis_async.from_url(  # type: ignore[no-untyped-call]
             active_settings.redis_url.get_secret_value()
         )
@@ -120,6 +125,29 @@ async def run(settings: Settings | None = None) -> None:
                 store,
                 batch_size=active_settings.metadata_batch_size,
                 maximum_command_bytes=active_settings.command_max_bytes,
+                source_runner=SourceExtractionRunner(
+                    SourceDownloader(
+                        http,
+                        lease,
+                        base_url=active_settings.source_base_url,
+                        allowed_hosts=active_settings.allowed_arxiv_hosts,
+                        user_agent=active_settings.user_agent,
+                        maximum_bytes=active_settings.max_archive_bytes,
+                        maximum_redirects=active_settings.max_redirects,
+                        maximum_retries=active_settings.max_request_retries,
+                    ),
+                    archive_limits=ArchiveLimits(
+                        maximum_extracted_bytes=active_settings.max_extracted_bytes,
+                        maximum_single_file_bytes=active_settings.max_single_file_bytes,
+                        maximum_file_count=active_settings.max_file_count,
+                        maximum_directory_depth=active_settings.max_directory_depth,
+                        maximum_compression_ratio=active_settings.max_compression_ratio,
+                    ),
+                    maximum_include_depth=active_settings.max_include_depth,
+                    maximum_parse_seconds=active_settings.max_parse_seconds,
+                    temporary_root=active_settings.temp_root,
+                    parser_version=active_settings.worker_version,
+                ),
             )
 
             async def consume(message: aio_pika.abc.AbstractIncomingMessage) -> None:
