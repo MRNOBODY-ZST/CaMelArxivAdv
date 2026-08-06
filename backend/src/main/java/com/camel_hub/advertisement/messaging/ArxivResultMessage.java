@@ -23,6 +23,7 @@ public record ArxivResultMessage(
 			String stage,
 			long processedCount,
 			long successCount,
+			long skippedCount,
 			long failedCount,
 			long totalCount,
 			double progressPercent,
@@ -36,7 +37,8 @@ public record ArxivResultMessage(
 			UUID currentJobId,
 			String snapshotVersion,
 			Instant taxonomySourceUpdatedAt,
-			List<TaxonomyCategory> taxonomyCategories
+			List<TaxonomyCategory> taxonomyCategories,
+			List<SourceExtraction> extractions
 	) {
 	}
 
@@ -73,4 +75,49 @@ public record ArxivResultMessage(
 
 	public record Author(String name, List<String> affiliations) {
 	}
+
+	public record SourceExtraction(
+			UUID paperId,
+			String arxivId,
+			String parserVersion,
+			String status,
+			boolean cleanupConfirmed,
+			String sourceFormat,
+			long archiveSizeBytes,
+			long extractedSizeBytes,
+			int filesInspected,
+			long durationMs,
+			String documentClass,
+			List<SourceAuthor> authors,
+			List<SourceContact> contacts,
+			String errorCode,
+			String errorSummary
+	) { }
+
+	public record SourceAuthor(
+			int order,
+			String name,
+			List<String> affiliations,
+			boolean corresponding
+	) { }
+
+	public record SourceContact(
+			String normalizedEmail,
+			String displayEmail,
+			String domain,
+			boolean syntaxValid,
+			boolean exampleAddress,
+			Integer authorOrder,
+			String confidence,
+			boolean corresponding,
+			List<SourceEvidence> evidence
+	) { }
+
+	public record SourceEvidence(
+			String sourceRelativePath,
+			String ruleName,
+			Integer lineNumber,
+			String logicalLocation,
+			String maskedContext
+	) { }
 }

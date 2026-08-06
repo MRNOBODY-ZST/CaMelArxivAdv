@@ -61,6 +61,22 @@ class ArxivSchemaMigrationTest {
 	}
 
 	@Test
+	void hardensSourceExtractionHistoryAndContactVerification() throws SQLException {
+		assertThat(columnNames("extraction_runs")).contains(
+				"message_id", "idempotency_key", "archive_size_bytes", "extracted_size_bytes",
+				"cleanup_confirmed", "cleanup_confirmed_at");
+		assertThat(columnNames("paper_author_contacts")).contains("version");
+		assertThat(columnNames("contacts")).contains("display_nonce");
+		assertThat(constraintNames()).contains(
+				"fk_extraction_runs_job", "ck_extraction_run_sizes", "ck_extraction_run_cleanup",
+				"ck_paper_author_contacts_version");
+		assertThat(indexNames()).contains(
+				"uk_extraction_runs_message", "uk_extraction_runs_job_paper",
+				"ix_extraction_runs_job_status", "ix_paper_author_contacts_latest",
+				"ix_contacts_active_domain_time");
+	}
+
+	@Test
 	void databaseRejectsInvalidSnapshotAndJobRuntimeState() throws SQLException {
 		assertThat(fails("""
 				INSERT INTO arxiv_category_snapshots

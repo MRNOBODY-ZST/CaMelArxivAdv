@@ -85,3 +85,7 @@ app:
       email: ${INITIAL_ADMIN_EMAIL:}
       display-name: ${INITIAL_ADMIN_DISPLAY_NAME:Administrator}
       password: ${INITIAL_ADMIN_PASSWORD:}
+  contact:
+    data-protection:
+      encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}
+      email-hmac-key-base64: ${APP_EMAIL_HMAC_KEY_BASE64:}

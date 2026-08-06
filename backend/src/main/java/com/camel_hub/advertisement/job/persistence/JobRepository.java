@@ -210,6 +210,8 @@ public class JobRepository {
 			case "ARXIV_IMPORT_METADATA" -> "arxiv.import.metadata";
 			case "ARXIV_SYNC_OAI" -> "arxiv.sync.oai";
 			case "ARXIV_SYNC_TAXONOMY" -> "arxiv.sync.taxonomy";
+			case "ARXIV_FETCH_AND_PARSE_SOURCE" -> "arxiv.source.extract";
+			case "ARXIV_REEXTRACT_CONTACTS" -> "arxiv.source.reextract";
 			default -> throw new IllegalArgumentException("Job type cannot be retried");
 		};
 	}

@@ -38,20 +38,27 @@ public class PaperQueryService {
 		return repository.find(id).switchIfEmpty(Mono.error(new PaperNotFoundException()))
 				.flatMap(base -> Mono.zip(
 						repository.authors(id).collectList(), repository.categories(id).collectList(),
-						repository.versions(id).collectList(), repository.imports(id).collectList())
+						repository.versions(id).collectList(), repository.imports(id).collectList(),
+						repository.extractionRuns(id).collectList())
 						.map(tuple -> new PaperDetail(
 								base.id(), base.arxivId(), base.title(), base.abstractText(), base.primaryCategory(),
 								base.submittedAt(), base.updatedAt(), base.doi(), base.journalReference(),
 								base.comment(), base.licenseUrl(), base.pdfUrl(), base.sourceStatus(),
 								base.sourceFormat(), base.versionCount(),
 								tuple.getT1().stream().map(row -> new AuthorView(
-										row.order(), row.name(), row.affiliations())).toList(),
+										row.order(), row.name(), row.corresponding(), row.affiliations())).toList(),
 								tuple.getT2().stream().map(row -> new CategoryView(
 										row.categoryId(), row.categoryName(), row.relationType())).toList(),
 								tuple.getT3().stream().map(row -> new VersionView(
 										row.version(), row.submittedAt(), row.sizeBytes(), row.sourceFormat())).toList(),
 								tuple.getT4().stream().map(row -> new ImportView(
 										row.jobId(), row.metadataSource(), row.sourceDatestamp(), row.importedAt())).toList(),
+								tuple.getT5().stream().map(row -> new ExtractionRunView(
+										row.id(), row.jobId(), row.parserVersion(), row.status(),
+										row.documentClass(), row.sourceFormat(), row.filesInspected(),
+										row.contactsFound(), row.durationMs(), row.archiveSizeBytes(),
+										row.extractedSizeBytes(), row.cleanupConfirmed(), row.startedAt(),
+										row.completedAt(), row.errorCode(), row.errorSummary())).toList(),
 								sanitize(base.rawMetadata()), base.metadataSourceUpdatedAt(), base.importedAt())));
 	}
 
@@ -139,12 +146,19 @@ public class PaperQueryService {
 			Instant submittedAt, Instant updatedAt, String doi, String journalReference,
 			String comment, String licenseUrl, String pdfUrl, String sourceStatus, String sourceFormat,
 			int versionCount, List<AuthorView> authors, List<CategoryView> categories,
-			List<VersionView> versions, List<ImportView> imports, JsonNode rawMetadata,
+			List<VersionView> versions, List<ImportView> imports,
+			List<ExtractionRunView> extractionRuns, JsonNode rawMetadata,
 			Instant metadataSourceUpdatedAt, Instant importedAt
 	) { }
 
-	public record AuthorView(int order, String name, List<String> affiliations) { }
+	public record AuthorView(int order, String name, boolean corresponding, List<String> affiliations) { }
 	public record CategoryView(String categoryId, String categoryName, String relationType) { }
 	public record VersionView(int version, Instant submittedAt, Long sizeBytes, String sourceFormat) { }
 	public record ImportView(UUID jobId, String metadataSource, Instant sourceDatestamp, Instant importedAt) { }
+	public record ExtractionRunView(
+			UUID id, UUID jobId, String parserVersion, String status, String documentClass,
+			String sourceFormat, int filesInspected, int contactsFound, Long durationMs,
+			Long archiveSizeBytes, Long extractedSizeBytes, boolean cleanupConfirmed,
+			Instant startedAt, Instant completedAt, String errorCode, String errorSummary
+	) { }
 }

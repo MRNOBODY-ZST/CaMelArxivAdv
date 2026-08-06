@@ -115,6 +115,8 @@ class ArxivResultHandlerIntegrationTest {
 		assertThat(detail.categories()).extracting(PaperQueryService.CategoryView::categoryId)
 				.containsExactly("cs.AI");
 		assertThat(detail.imports()).hasSize(1);
+		assertThat(detail.authors().getFirst().corresponding()).isFalse();
+		assertThat(detail.extractionRuns()).isEmpty();
 	}
 
 	@Test

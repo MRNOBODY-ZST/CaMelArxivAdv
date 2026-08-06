@@ -6,11 +6,16 @@ import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchConflictExceptio
 import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchNotFoundException;
 import com.camel_hub.advertisement.arxiv.savedsearch.SavedSearchValidationException;
 import com.camel_hub.advertisement.arxiv.importing.ArxivImportValidationException;
+import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionConflictException;
+import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionNotFoundException;
+import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionValidationException;
 import com.camel_hub.advertisement.arxiv.paper.PaperNotFoundException;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.common.security.ClientAddressResolver;
+import com.camel_hub.advertisement.contact.ContactConflictException;
+import com.camel_hub.advertisement.contact.ContactNotFoundException;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import org.slf4j.Logger;
@@ -209,6 +214,46 @@ public class GlobalExceptionHandler {
 		HttpStatus resolved = status == null ? HttpStatus.INTERNAL_SERVER_ERROR : status;
 		String detail = exception.getReason() == null ? resolved.getReasonPhrase() : exception.getReason();
 		return response(exchange, resolved, "request_rejected", resolved.getReasonPhrase(), detail, Map.of());
+	}
+
+	@ExceptionHandler(SourceExtractionValidationException.class)
+	ResponseEntity<ApiError> handleSourceExtractionValidation(
+			SourceExtractionValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_source_extraction",
+				"Source extraction rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SourceExtractionNotFoundException.class)
+	ResponseEntity<ApiError> handleSourceExtractionNotFound(
+			SourceExtractionNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "paper_not_found",
+				"Paper not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SourceExtractionConflictException.class)
+	ResponseEntity<ApiError> handleSourceExtractionConflict(
+			SourceExtractionConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "source_extraction_conflict",
+				"Source extraction conflict", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(ContactNotFoundException.class)
+	ResponseEntity<ApiError> handleContactNotFound(
+			ContactNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "contact_not_found",
+				"Contact not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(ContactConflictException.class)
+	ResponseEntity<ApiError> handleContactConflict(
+			ContactConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "contact_conflict",
+				"Contact conflict", exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(JobNotFoundException.class)

@@ -1,6 +1,8 @@
 package com.camel_hub.advertisement.messaging;
 
 import com.camel_hub.advertisement.arxiv.paper.PaperRepository;
+import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionResultRepository;
+import com.camel_hub.advertisement.contact.security.ContactCrypto;
 import com.camel_hub.advertisement.arxiv.paper.PaperQueryRepository;
 import com.camel_hub.advertisement.arxiv.paper.PaperQueryService;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyRepository;
@@ -64,6 +66,7 @@ public class ArxivMessagingConfiguration {
 	}
 
 	@Bean
+	@Profile("api")
 	@ConditionalOnProperty(
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	OutboxRepository outboxRepository(DatabaseClient databaseClient) {
@@ -77,6 +80,7 @@ public class ArxivMessagingConfiguration {
 	}
 
 	@Bean
+	@Profile("api")
 	@ConditionalOnProperty(
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	ArxivResultRepository arxivResultRepository(DatabaseClient databaseClient) {
@@ -105,6 +109,7 @@ public class ArxivMessagingConfiguration {
 	}
 
 	@Bean
+	@Profile("api")
 	@ConditionalOnProperty(
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	ArxivResultHandler arxivResultHandler(
@@ -112,11 +117,15 @@ public class ArxivMessagingConfiguration {
 			PaperRepository papers,
 			TaxonomyRepository taxonomy,
 			TaxonomySnapshotLoader snapshotLoader,
+			ContactCrypto contactCrypto,
 			ObjectMapper objectMapper,
+			DatabaseClient databaseClient,
 			TransactionalOperator transactions
 	) {
+		SourceExtractionResultRepository extractionResults = new SourceExtractionResultRepository(
+				databaseClient, contactCrypto, objectMapper);
 		return new ArxivResultHandler(
-				repository, papers, taxonomy, snapshotLoader, objectMapper, transactions);
+				repository, papers, taxonomy, snapshotLoader, extractionResults, objectMapper, transactions);
 	}
 
 	@Bean

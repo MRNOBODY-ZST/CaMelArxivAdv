@@ -66,11 +66,33 @@ public class PaperQueryRepository {
 
 	public Flux<AuthorRow> authors(UUID paperId) {
 		return databaseClient.sql("""
-				SELECT pa.author_order, pa.raw_name, CAST(pa.affiliation_data AS text) AS affiliations
+				SELECT pa.author_order, pa.raw_name, pa.corresponding_author,
+				       CAST(pa.affiliation_data AS text) AS affiliations
 				FROM paper_authors pa WHERE pa.paper_id = :paperId ORDER BY pa.author_order
 				""").bind("paperId", paperId).map((row, metadata) -> new AuthorRow(
 						row.get("author_order", Integer.class), row.get("raw_name", String.class),
+						Boolean.TRUE.equals(row.get("corresponding_author", Boolean.class)),
 						strings(row.get("affiliations", String.class)))).all();
+	}
+
+	public Flux<ExtractionRunRow> extractionRuns(UUID paperId) {
+		return databaseClient.sql("""
+				SELECT id, job_id, parser_version, status, document_class, source_format,
+				       files_inspected, contacts_found, duration_ms, archive_size_bytes,
+				       extracted_size_bytes, cleanup_confirmed, started_at, completed_at,
+				       error_code, error_summary
+				FROM extraction_runs WHERE paper_id = :paperId
+				ORDER BY started_at DESC, id
+				""").bind("paperId", paperId).map((row, metadata) -> new ExtractionRunRow(
+						row.get("id", UUID.class), row.get("job_id", UUID.class),
+						row.get("parser_version", String.class), row.get("status", String.class),
+						row.get("document_class", String.class), row.get("source_format", String.class),
+						row.get("files_inspected", Integer.class), row.get("contacts_found", Integer.class),
+						row.get("duration_ms", Long.class), row.get("archive_size_bytes", Long.class),
+						row.get("extracted_size_bytes", Long.class),
+						Boolean.TRUE.equals(row.get("cleanup_confirmed", Boolean.class)),
+						row.get("started_at", Instant.class), row.get("completed_at", Instant.class),
+						row.get("error_code", String.class), row.get("error_summary", String.class))).all();
 	}
 
 	public Flux<CategoryRow> categories(UUID paperId) {
@@ -200,8 +222,14 @@ public class PaperQueryRepository {
 	) {
 	}
 
-	public record AuthorRow(int order, String name, List<String> affiliations) { }
+	public record AuthorRow(int order, String name, boolean corresponding, List<String> affiliations) { }
 	public record CategoryRow(String categoryId, String categoryName, String relationType) { }
 	public record VersionRow(int version, Instant submittedAt, Long sizeBytes, String sourceFormat) { }
 	public record ImportRow(UUID jobId, String metadataSource, Instant sourceDatestamp, Instant importedAt) { }
+	public record ExtractionRunRow(
+			UUID id, UUID jobId, String parserVersion, String status, String documentClass,
+			String sourceFormat, int filesInspected, int contactsFound, Long durationMs,
+			Long archiveSizeBytes, Long extractedSizeBytes, boolean cleanupConfirmed,
+			Instant startedAt, Instant completedAt, String errorCode, String errorSummary
+	) { }
 }

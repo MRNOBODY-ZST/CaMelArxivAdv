@@ -1,5 +1,6 @@
 package com.camel_hub.advertisement.messaging;
 
+import com.camel_hub.advertisement.arxiv.extraction.SourceExtractionResultRepository;
 import com.camel_hub.advertisement.arxiv.paper.PaperRepository;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyCategory;
 import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomyRepository;
@@ -24,11 +25,13 @@ public class ArxivResultHandler {
 
 	private static final Set<String> TYPES = Set.of(
 			"ARXIV_JOB_STARTED", "ARXIV_JOB_PROGRESS", "ARXIV_JOB_BATCH",
+			"ARXIV_EXTRACTION_RESULT",
 			"ARXIV_JOB_COMPLETED", "ARXIV_JOB_FAILED",
 			"WORKER_HEARTBEAT");
 	private final ArxivResultRepository repository;
 	private final PaperRepository papers;
 	private final TaxonomyRepository taxonomy;
+	private final SourceExtractionResultRepository extractions;
 	private final ObjectMapper objectMapper;
 	private final TransactionalOperator transactions;
 	private final List<TaxonomyCategory> baselineCategories;
@@ -41,7 +44,19 @@ public class ArxivResultHandler {
 			TransactionalOperator transactions
 	) {
 		this(repository, papers, taxonomy, new TaxonomySnapshotLoader(objectMapper),
-				objectMapper, transactions);
+				null, objectMapper, transactions);
+	}
+
+	public ArxivResultHandler(
+			ArxivResultRepository repository,
+			PaperRepository papers,
+			TaxonomyRepository taxonomy,
+			SourceExtractionResultRepository extractions,
+			ObjectMapper objectMapper,
+			TransactionalOperator transactions
+	) {
+		this(repository, papers, taxonomy, new TaxonomySnapshotLoader(objectMapper),
+				extractions, objectMapper, transactions);
 	}
 
 	public ArxivResultHandler(
@@ -49,12 +64,14 @@ public class ArxivResultHandler {
 			PaperRepository papers,
 			TaxonomyRepository taxonomy,
 			TaxonomySnapshotLoader snapshotLoader,
+			SourceExtractionResultRepository extractions,
 			ObjectMapper objectMapper,
 			TransactionalOperator transactions
 	) {
 		this.repository = repository;
 		this.papers = papers;
 		this.taxonomy = taxonomy;
+		this.extractions = extractions;
 		this.objectMapper = objectMapper.copy()
 				.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 		this.transactions = transactions;
@@ -89,6 +106,9 @@ public class ArxivResultHandler {
 			case "ARXIV_JOB_BATCH" -> papers.upsertBatch(
 					job.id(), safePapers(payload.papers()),
 					"ARXIV_SYNC_OAI".equals(job.type()) ? "OAI_PMH" : "LEGACY_API");
+			case "ARXIV_EXTRACTION_RESULT" -> applyExtraction(message, job)
+					.then(repository.applyProgress(
+							job.id(), payload, checkpoint(payload.checkpoint())));
 			case "ARXIV_JOB_PROGRESS" -> "ARXIV_SYNC_OAI".equals(job.type())
 					? applyOaiProgress(job.id(), payload)
 					: repository.applyProgress(job.id(), payload, checkpoint(payload.checkpoint()));
@@ -104,6 +124,22 @@ public class ArxivResultHandler {
 			default -> Mono.error(new IllegalArgumentException("Result message type is unsupported"));
 		};
 		return mutation.then(repository.appendEvent(job.id(), message.type(), payload, details));
+	}
+
+	private Mono<Void> applyExtraction(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job
+	) {
+		if (!Set.of("ARXIV_FETCH_AND_PARSE_SOURCE", "ARXIV_REEXTRACT_CONTACTS")
+				.contains(job.type()) || extractions == null) {
+			return Mono.error(new IllegalArgumentException("Extraction result job type is invalid"));
+		}
+		List<ArxivResultMessage.SourceExtraction> values = message.payload().extractions();
+		if (values == null || values.size() != 1) {
+			return Mono.error(new IllegalArgumentException("Extraction result batch is invalid"));
+		}
+		validateExtraction(values.getFirst());
+		return extractions.apply(message, values.getFirst());
 	}
 
 	private Mono<Void> applyOaiProgress(UUID jobId, ArxivResultMessage.Payload payload) {
@@ -229,7 +265,7 @@ public class ArxivResultHandler {
 	private void validatePayload(ArxivResultMessage.Payload payload) {
 		if (payload.stage() == null || payload.stage().isBlank() || payload.stage().length() > 80
 				|| payload.processedCount() < 0 || payload.successCount() < 0
-				|| payload.failedCount() < 0 || payload.totalCount() < 0
+				|| payload.skippedCount() < 0 || payload.failedCount() < 0 || payload.totalCount() < 0
 				|| payload.progressPercent() < 0 || payload.progressPercent() > 100
 				|| (payload.papers() != null && payload.papers().size() > 100)
 				|| (payload.errorSummary() != null && payload.errorSummary().length() > 500)) {
@@ -238,6 +274,104 @@ public class ArxivResultHandler {
 		if (payload.taxonomyCategories() != null && payload.taxonomyCategories().size() > 500) {
 			throw new IllegalArgumentException("Taxonomy snapshot is too large");
 		}
+		if (payload.extractions() != null && payload.extractions().size() > 10) {
+			throw new IllegalArgumentException("Extraction result batch is too large");
+		}
+	}
+
+	private void validateExtraction(ArxivResultMessage.SourceExtraction result) {
+		if (result == null || result.paperId() == null || result.arxivId() == null
+				|| !result.arxivId().matches("(?:[0-9]{4}\\.[0-9]{4,5}|[A-Za-z0-9.-]{1,40}/[0-9]{7})")
+				|| result.parserVersion() == null
+				|| !result.parserVersion().matches("[A-Za-z0-9._-]{1,50}")
+				|| !Set.of("SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED",
+						"SECURITY_REJECTED", "SOURCE_UNAVAILABLE").contains(result.status())
+				|| !result.cleanupConfirmed() || result.archiveSizeBytes() < 0
+				|| result.extractedSizeBytes() < 0 || result.filesInspected() < 0
+				|| result.filesInspected() > 5000 || result.durationMs() < 0
+				|| invalidOptionalText(result.documentClass(), 100)
+				|| invalidOptionalText(result.sourceFormat(), 50)
+				|| invalidOptionalText(result.errorSummary(), 500)) {
+			throw new IllegalArgumentException("Extraction result contract is invalid");
+		}
+		boolean successful = Set.of("SUCCEEDED", "PARTIALLY_SUCCEEDED").contains(result.status());
+		if (successful != (result.sourceFormat() != null && result.filesInspected() > 0
+				&& result.errorCode() == null)
+				|| (!successful && (result.errorCode() == null
+				|| !result.errorCode().matches("[A-Z0-9_]{1,80}")))) {
+			throw new IllegalArgumentException("Extraction result status is inconsistent");
+		}
+		List<ArxivResultMessage.SourceAuthor> authors = result.authors() == null
+				? List.of() : result.authors();
+		List<ArxivResultMessage.SourceContact> contacts = result.contacts() == null
+				? List.of() : result.contacts();
+		if (authors.size() > 500 || contacts.size() > 500
+				|| (!successful && (!authors.isEmpty() || !contacts.isEmpty()))) {
+			throw new IllegalArgumentException("Extraction result collections are invalid");
+		}
+		Set<Integer> orders = new java.util.HashSet<>();
+		for (ArxivResultMessage.SourceAuthor author : authors) {
+			if (author == null || author.order() < 1 || author.order() > 500
+					|| !orders.add(author.order()) || invalidText(author.name(), 300)
+					|| author.affiliations() == null || author.affiliations().size() > 100
+					|| author.affiliations().stream().anyMatch(value -> invalidText(value, 2000))) {
+				throw new IllegalArgumentException("Extraction author is invalid");
+			}
+		}
+		for (ArxivResultMessage.SourceContact contact : contacts) {
+			validateContact(contact, orders);
+		}
+	}
+
+	private void validateContact(ArxivResultMessage.SourceContact contact, Set<Integer> orders) {
+		if (contact == null || !validNormalizedEmail(contact.normalizedEmail(), contact.domain())
+				|| invalidText(contact.displayEmail(), 320) || !contact.syntaxValid()
+				|| (contact.authorOrder() != null && !orders.contains(contact.authorOrder()))
+				|| !Set.of("HIGH", "MEDIUM", "LOW", "UNMAPPED").contains(contact.confidence())
+				|| contact.evidence() == null || contact.evidence().isEmpty()
+				|| contact.evidence().size() > 20) {
+			throw new IllegalArgumentException("Extraction contact is invalid");
+		}
+		for (ArxivResultMessage.SourceEvidence evidence : contact.evidence()) {
+			if (evidence == null || unsafePath(evidence.sourceRelativePath())
+					|| evidence.ruleName() == null || !evidence.ruleName().matches("[A-Z0-9_]{1,120}")
+					|| evidence.lineNumber() != null && evidence.lineNumber() < 1
+					|| evidence.logicalLocation() == null
+					|| !evidence.logicalLocation().matches("[A-Z0-9_]{1,120}")
+					|| invalidText(evidence.maskedContext(), 600)
+					|| evidence.maskedContext().toLowerCase(java.util.Locale.ROOT)
+							.contains(contact.normalizedEmail().toLowerCase(java.util.Locale.ROOT))
+					|| evidence.maskedContext().toLowerCase(java.util.Locale.ROOT)
+							.contains(contact.displayEmail().toLowerCase(java.util.Locale.ROOT))) {
+				throw new IllegalArgumentException("Extraction evidence is invalid");
+			}
+		}
+	}
+
+	private boolean validNormalizedEmail(String email, String domain) {
+		if (email == null || domain == null || email.length() > 320 || domain.length() > 255
+				|| !email.equals(email.toLowerCase(java.util.Locale.ROOT))
+				|| !email.matches("[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}@[A-Za-z0-9.-]{3,255}")) {
+			return false;
+		}
+		String actualDomain = email.substring(email.lastIndexOf('@') + 1);
+		return actualDomain.equals(domain) && java.util.Arrays.stream(domain.split("\\."))
+				.allMatch(label -> !label.isEmpty() && label.length() <= 63
+						&& !label.startsWith("-") && !label.endsWith("-"));
+	}
+
+	private boolean unsafePath(String value) {
+		if (value == null || value.isBlank() || value.startsWith("/") || value.contains("\\")
+				|| containsUnsafeControl(value)) {
+			return true;
+		}
+		return java.util.Arrays.stream(value.split("/", -1))
+				.anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."));
+	}
+
+	private boolean invalidOptionalText(String value, int maximumLength) {
+		return value != null && (value.isBlank() || value.length() > maximumLength
+				|| containsUnsafeControl(value));
 	}
 
 	private void validateTaxonomyPayload(ArxivResultMessage.Payload payload) {
@@ -293,6 +427,7 @@ public class ArxivResultHandler {
 			return objectMapper.writeValueAsString(java.util.Map.of(
 					"processedCount", payload.processedCount(),
 					"successCount", payload.successCount(),
+					"skippedCount", payload.skippedCount(),
 					"failedCount", payload.failedCount(),
 					"totalCount", payload.totalCount(),
 					"progressPercent", payload.progressPercent()));

@@ -79,6 +79,7 @@ public class ArxivResultRepository {
 				  current_stage = :stage,
 				  processed_count = GREATEST(processed_count, :processed),
 				  success_count = GREATEST(success_count, :success),
+				  skipped_count = GREATEST(skipped_count, :skipped),
 				  failed_count = GREATEST(failed_count, :failed),
 				  total_count = GREATEST(total_count, :total),
 				  progress_percent = GREATEST(progress_percent, :progress),
@@ -91,6 +92,7 @@ public class ArxivResultRepository {
 				.bind("stage", safeStage(payload.stage()))
 				.bind("processed", nonNegative(payload.processedCount()))
 				.bind("success", nonNegative(payload.successCount()))
+				.bind("skipped", nonNegative(payload.skippedCount()))
 				.bind("failed", nonNegative(payload.failedCount()))
 				.bind("total", nonNegative(payload.totalCount()))
 				.bind("progress", boundedProgress(payload.progressPercent()))
@@ -107,9 +109,10 @@ public class ArxivResultRepository {
 				  current_stage = :stage,
 				  processed_count = GREATEST(processed_count, :processed),
 				  success_count = GREATEST(success_count, :success),
+				  skipped_count = GREATEST(skipped_count, :skipped),
 				  failed_count = GREATEST(failed_count, :failed),
 				  total_count = GREATEST(total_count, :total),
-				  progress_percent = CASE WHEN :status = 'SUCCEEDED' THEN 100
+				  progress_percent = CASE WHEN :status IN ('SUCCEEDED','PARTIALLY_SUCCEEDED') THEN 100
 				                          ELSE GREATEST(progress_percent, :progress) END,
 				  error_summary = nullif(:errorSummary, ''), heartbeat_at = now(), last_message_at = now(),
 				  ended_at = coalesce(ended_at, now()), updated_at = now(), version = version + 1
@@ -117,6 +120,7 @@ public class ArxivResultRepository {
 				""").bind("status", status).bind("stage", safeStage(payload.stage()))
 				.bind("processed", nonNegative(payload.processedCount()))
 				.bind("success", nonNegative(payload.successCount()))
+				.bind("skipped", nonNegative(payload.skippedCount()))
 				.bind("failed", nonNegative(payload.failedCount()))
 				.bind("total", nonNegative(payload.totalCount()))
 				.bind("progress", boundedProgress(payload.progressPercent()))
@@ -210,6 +214,7 @@ public class ArxivResultRepository {
 		return switch (type) {
 			case "ARXIV_JOB_STARTED" -> "Worker started the arXiv job";
 			case "ARXIV_JOB_BATCH" -> "Worker returned an arXiv metadata batch";
+			case "ARXIV_EXTRACTION_RESULT" -> "Worker returned a Source extraction result";
 			case "ARXIV_JOB_PROGRESS" -> "Worker reported arXiv job progress";
 			case "ARXIV_JOB_COMPLETED" -> "Worker completed the arXiv job";
 			case "ARXIV_JOB_FAILED" -> "Worker reported an arXiv job failure";
