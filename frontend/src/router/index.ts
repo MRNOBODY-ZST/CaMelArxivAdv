@@ -50,6 +50,10 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, permissions: ['paper:read'], pageTitle: '论文详情', pageSection: 'arXiv 数据' },
   },
   {
+    path: '/contacts', name: 'contacts', component: () => import('@/modules/contacts/ContactListView.vue'),
+    meta: { requiresAuth: true, permissions: ['contact:read_masked'], pageTitle: '作者与联系人', pageSection: 'arXiv 数据' },
+  },
+  {
     path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
     meta: {
       requiresAuth: true, permissions: ['user:read'], pageTitle: '用户管理', pageSection: '系统管理',

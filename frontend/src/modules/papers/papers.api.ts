@@ -8,12 +8,18 @@ export interface PaperSummary {
 }
 
 export type PaperDetail = Omit<PaperSummary, 'authors'> & {
-  authors: Array<{ order: number; name: string; affiliations: string[] }>
+  authors: Array<{ order: number; name: string; corresponding: boolean; affiliations: string[] }>
   abstractText: string; comment: string | null; licenseUrl: string | null; pdfUrl: string
   sourceFormat: string | null
   categories: Array<{ categoryId: string; categoryName: string; relationType: string }>
   versions: Array<{ version: number; submittedAt: string; sizeBytes: number | null; sourceFormat: string | null }>
   imports: Array<{ jobId: string; metadataSource: string; sourceDatestamp: string; importedAt: string }>
+  extractionRuns: Array<{
+    id: string; jobId: string; parserVersion: string; status: string; documentClass: string | null
+    sourceFormat: string | null; filesInspected: number; contactsFound: number; durationMs: number | null
+    archiveSizeBytes: number | null; extractedSizeBytes: number | null; cleanupConfirmed: boolean
+    startedAt: string; completedAt: string | null; errorCode: string | null; errorSummary: string | null
+  }>
   rawMetadata: Record<string, unknown>
 }
 
@@ -25,5 +31,11 @@ export const papersApi = {
   },
   async get(id: string): Promise<PaperDetail> {
     return (await apiClient.get<PaperDetail>(`/papers/${id}`)).data
+  },
+  async extract(id: string): Promise<{ jobId: string; status: string }> {
+    return (await apiClient.post<{ jobId: string; status: string }>(`/papers/${id}/extract`)).data
+  },
+  async batchExtract(paperIds: string[]): Promise<{ jobId: string; status: string }> {
+    return (await apiClient.post<{ jobId: string; status: string }>('/papers/batch-extract', { paperIds })).data
   },
 }

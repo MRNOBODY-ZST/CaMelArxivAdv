@@ -70,7 +70,7 @@ const navigation: readonly NavigationGroup[] = [
     { label: '论文发现', href: '/arxiv/discovery', icon: MagnifyingGlassIcon, permission: 'paper:read' },
     { label: '导入任务', href: '/jobs', icon: ArrowDownTrayIcon, permission: 'paper:read' },
     { label: '论文库', href: '/papers', icon: ArchiveBoxIcon, permission: 'paper:read' },
-    { label: '作者与联系人', href: '#contacts', icon: UsersIcon, permission: 'contact:read_masked' },
+    { label: '作者与联系人', href: '/contacts', icon: UsersIcon, permission: 'contact:read_masked' },
   ] },
   { label: '邮件运营', items: [
     { label: '邮件模板', href: '#templates', icon: DocumentTextIcon, permission: 'template:read' },

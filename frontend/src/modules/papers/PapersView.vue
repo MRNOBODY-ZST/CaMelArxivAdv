@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { ArchiveBoxIcon, MagnifyingGlassIcon } from '@heroicons/vue/24/outline'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ArchiveBoxIcon, ArrowPathIcon, MagnifyingGlassIcon } from '@heroicons/vue/24/outline'
 import DsButton from '@/components/design-skill/DsButton.vue'
 import DsCard from '@/components/design-skill/DsCard.vue'
 import DsEmptyState from '@/components/design-skill/DsEmptyState.vue'
 import DsInput from '@/components/design-skill/DsInput.vue'
 import DsPagination from '@/components/design-skill/DsPagination.vue'
+import { useAuthStore } from '@/modules/auth/auth.store'
 import { papersApi, type PaperSummary } from './papers.api'
 
+const auth = useAuthStore()
 const papers = ref<PaperSummary[]>([]); const loading = ref(true); const error = ref(''); const total = ref(0); const totalPages = ref(0)
+const selectedIds = ref<string[]>([]); const batchLoading = ref(false); const submittedJobId = ref('')
 const query = reactive({ page: 1, pageSize: 20, category: '', title: '', author: '' })
+const canExtract = computed(() => auth.hasPermission('paper:import'))
 onMounted(load)
 async function load(page = query.page): Promise<void> {
   loading.value = true; error.value = ''
@@ -18,6 +22,21 @@ async function load(page = query.page): Promise<void> {
   if (query.title) request.title = query.title
   if (query.author) request.author = query.author
   try { const data = await papersApi.list(request); papers.value = data.items; query.page = data.page; total.value = data.total; totalPages.value = data.totalPages } catch { error.value = '论文库加载失败' } finally { loading.value = false }
+}
+
+function toggle(paperId: string, selected: boolean): void {
+  selectedIds.value = selected
+    ? [...new Set([...selectedIds.value, paperId])].slice(0, 100)
+    : selectedIds.value.filter((id) => id !== paperId)
+}
+
+async function batchExtract(): Promise<void> {
+  if (!selectedIds.value.length) return
+  batchLoading.value = true; error.value = ''; submittedJobId.value = ''
+  try {
+    submittedJobId.value = (await papersApi.batchExtract(selectedIds.value)).jobId
+    selectedIds.value = []
+  } catch { error.value = '批量 Source 解析任务创建失败' } finally { batchLoading.value = false }
 }
 </script>
 
@@ -71,28 +90,61 @@ async function load(page = query.page): Promise<void> {
       v-if="papers.length"
       padding="none"
     >
-      <div class="border-b border-slate-200 px-5 py-4 text-sm text-slate-500">
-        共 {{ total.toLocaleString() }} 篇
+      <div class="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div class="text-sm text-slate-500">
+          共 {{ total.toLocaleString() }} 篇<span v-if="selectedIds.length"> · 已选 {{ selectedIds.length }} 篇</span>
+        </div>
+        <div
+          v-if="canExtract"
+          class="flex items-center gap-3"
+        >
+          <RouterLink
+            v-if="submittedJobId"
+            :to="`/jobs/${submittedJobId}`"
+            class="font-mono text-xs font-medium text-brand-600"
+          >
+            任务 {{ submittedJobId }} →
+          </RouterLink>
+          <DsButton
+            size="sm"
+            :busy="batchLoading"
+            :disabled="!selectedIds.length"
+            @click="batchExtract"
+          >
+            <ArrowPathIcon class="size-4" />批量解析
+          </DsButton>
+        </div>
       </div><ul class="divide-y divide-slate-200">
         <li
           v-for="paper in papers"
           :key="paper.id"
           class="p-5 sm:p-6"
         >
-          <RouterLink
-            :to="`/papers/${paper.id}`"
-            class="group block"
-          >
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="rounded bg-brand-50 px-2 py-1 text-xs font-semibold text-brand-700">{{ paper.primaryCategory }}</span><span class="font-mono text-xs text-slate-400">{{ paper.arxivId }} · v{{ paper.versionCount }}</span>
-            </div><h2 class="mt-3 text-base font-semibold text-slate-900 group-hover:text-brand-600">
-              {{ paper.title }}
-            </h2><p class="mt-2 text-sm text-slate-500">
-              {{ paper.authors.join(' · ') }}
-            </p><div class="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
-              <span>更新 {{ new Date(paper.updatedAt).toLocaleDateString('zh-CN') }}</span><span v-if="paper.doi">DOI {{ paper.doi }}</span><span>{{ paper.sourceStatus }}</span>
-            </div>
-          </RouterLink>
+          <div class="flex gap-4">
+            <input
+              v-if="canExtract"
+              :id="`select-paper-${paper.id}`"
+              type="checkbox"
+              :checked="selectedIds.includes(paper.id)"
+              class="mt-1 size-4 shrink-0 rounded border-slate-300 text-brand-500 focus:ring-brand-500"
+              :aria-label="`选择论文 ${paper.arxivId}`"
+              @change="toggle(paper.id, ($event.target as HTMLInputElement).checked)"
+            >
+            <RouterLink
+              :to="`/papers/${paper.id}`"
+              class="group min-w-0 flex-1"
+            >
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="rounded bg-brand-50 px-2 py-1 text-xs font-semibold text-brand-700">{{ paper.primaryCategory }}</span><span class="font-mono text-xs text-slate-400">{{ paper.arxivId }} · v{{ paper.versionCount }}</span>
+              </div><h2 class="mt-3 text-base font-semibold text-slate-900 group-hover:text-brand-600">
+                {{ paper.title }}
+              </h2><p class="mt-2 text-sm text-slate-500">
+                {{ paper.authors.join(' · ') }}
+              </p><div class="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
+                <span>更新 {{ new Date(paper.updatedAt).toLocaleDateString('zh-CN') }}</span><span v-if="paper.doi">DOI {{ paper.doi }}</span><span>{{ paper.sourceStatus }}</span>
+              </div>
+            </RouterLink>
+          </div>
         </li>
       </ul><div class="px-5 pb-5">
         <DsPagination
