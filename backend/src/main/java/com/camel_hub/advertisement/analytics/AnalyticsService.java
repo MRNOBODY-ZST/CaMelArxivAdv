@@ -18,6 +18,8 @@ import java.util.Set;
 import java.util.UUID;
 
 public class AnalyticsService {
+	private static final int AUTHOR_GRAPH_NODE_LIMIT = 120;
+	private static final int AUTHOR_GRAPH_EDGE_LIMIT = 400;
 
 	private final AnalyticsRepository repository;
 	private final Clock clock;
@@ -127,6 +129,28 @@ public class AnalyticsService {
 				window(filter), freshness(result(values, 9), generatedAt), contactMetrics(result(values, 0)),
 				result(values, 1), result(values, 2), result(values, 3), result(values, 4),
 				result(values, 5), result(values, 6), result(values, 7), result(values, 8)));
+	}
+
+	public Mono<AnalyticsDtos.AuthorsResponse> authors(AnalyticsQuery query) {
+		AnalyticsFilter filter = query.normalize(clock);
+		Instant generatedAt = clock.instant();
+		return sequential(
+				repository.authorGraphSummary(filter),
+				repository.authorNodes(filter, AUTHOR_GRAPH_NODE_LIMIT).collectList(),
+				repository.freshness(filter, false)
+		).flatMap(values -> {
+			AnalyticsRepository.AuthorGraphCounts counts = result(values, 0);
+			List<AnalyticsDtos.AuthorNode> nodes = result(values, 1);
+			return repository.authorEdges(filter, AUTHOR_GRAPH_NODE_LIMIT, AUTHOR_GRAPH_EDGE_LIMIT)
+					.collectList()
+					.map(edges -> new AnalyticsDtos.AuthorsResponse(
+							window(filter), freshness(result(values, 2), generatedAt),
+							new AnalyticsDtos.AuthorGraphSummary(
+									counts.totalAuthors(), counts.totalCollaborations(), counts.totalPapers(),
+									counts.totalAuthors() > nodes.size()
+											|| counts.totalCollaborations() > edges.size()),
+							nodes, edges));
+		});
 	}
 
 	public Mono<AnalyticsDtos.FilterOptionsResponse> filters(AnalyticsQuery query, boolean includeUsers) {

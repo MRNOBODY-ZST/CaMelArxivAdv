@@ -20,7 +20,9 @@ vi.mock('@/modules/analytics/analytics.api', () => ({
 }))
 
 vi.mock('echarts/core', () => ({ use: vi.fn(), init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn(), getDataURL: vi.fn() })) }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {} }))
+vi.mock('echarts/charts', () => ({
+  BarChart: {}, FunnelChart: {}, LineChart: {}, PieChart: {}, TreemapChart: {},
+}))
 vi.mock('echarts/components', () => ({ AriaComponent: {}, GridComponent: {}, LegendComponent: {}, TooltipComponent: {} }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 

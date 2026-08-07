@@ -58,6 +58,12 @@ public class AnalyticsController {
 		return service.contacts(query);
 	}
 
+	@GetMapping("/authors")
+	@PreAuthorize("hasAuthority('analytics:read')")
+	Mono<AnalyticsDtos.AuthorsResponse> authors(@ModelAttribute AnalyticsQuery query) {
+		return service.authors(query);
+	}
+
 	@GetMapping("/filters")
 	@PreAuthorize("hasAuthority('analytics:read')")
 	Mono<AnalyticsDtos.FilterOptionsResponse> filters(

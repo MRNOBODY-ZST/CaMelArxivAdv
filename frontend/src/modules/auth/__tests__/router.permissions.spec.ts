@@ -22,6 +22,14 @@ describe('router permissions', () => {
     vi.mocked(authApi.refresh).mockRejectedValue(new Error('no refresh cookie'))
   })
 
+  it('protects the lazily loaded author relationship analytics route', () => {
+    const authorRoute = routes.find((route) => route.path === '/analytics/authors')
+
+    expect(authorRoute).toBeDefined()
+    expect(authorRoute?.meta?.requiresAuth).toBe(true)
+    expect(authorRoute?.meta?.permissions).toEqual(['analytics:read'])
+  })
+
   it('redirects anonymous users to login and preserves the intended route', async () => {
     const router = guardedRouter()
 

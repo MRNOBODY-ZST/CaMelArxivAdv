@@ -10,13 +10,16 @@ vi.mock('echarts/core', () => ({
   use: vi.fn(),
   init: vi.fn(() => ({ setOption, resize, dispose, getDataURL })),
 }))
-vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {} }))
+vi.mock('echarts/charts', () => ({
+  BarChart: {}, FunnelChart: {}, LineChart: {}, PieChart: {}, TreemapChart: {},
+}))
 vi.mock('echarts/components', () => ({
   AriaComponent: {}, GridComponent: {}, LegendComponent: {}, TooltipComponent: {},
 }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
 import AnalyticsChart from '@/modules/analytics/AnalyticsChart.vue'
+import { funnelOption, treemapOption } from '@/modules/analytics/chartOptions'
 
 describe('AnalyticsChart', () => {
   beforeEach(() => vi.clearAllMocks())
@@ -62,5 +65,19 @@ describe('AnalyticsChart', () => {
     expect(setOption).toHaveBeenLastCalledWith(expect.objectContaining({ animation: false }), { notMerge: true })
     wrapper.unmount()
     expect(mediaQuery.removeEventListener).toHaveBeenCalled()
+  })
+
+  it('builds genuine funnel and treemap series for distinct analytics views', () => {
+    const funnel = funnelOption([
+      { key: 'imported', label: '已导入', count: 20, previousCount: 20, rateFromPrevious: 1 },
+      { key: 'parsed', label: '已解析', count: 12, previousCount: 20, rateFromPrevious: 0.6 },
+    ])
+    const treemap = treemapOption([
+      { key: 'cs.AI', label: 'Artificial Intelligence', count: 8 },
+      { key: 'cs.CL', label: 'Computation and Language', count: 5 },
+    ])
+
+    expect((funnel.series as Array<{ type: string }>)[0]?.type).toBe('funnel')
+    expect((treemap.series as Array<{ type: string }>)[0]?.type).toBe('treemap')
   })
 })

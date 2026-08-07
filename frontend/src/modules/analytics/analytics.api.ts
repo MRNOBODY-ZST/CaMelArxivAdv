@@ -1,6 +1,7 @@
 import { apiClient } from '@/api/client'
 import type {
   AnalyticsQuery,
+  AuthorsResponse,
   ContactsResponse,
   FilterOptionsResponse,
   IngestionResponse,
@@ -9,6 +10,9 @@ import type {
 } from '@/modules/analytics/analytics.types'
 
 export const analyticsApi = {
+  async authors(query: AnalyticsQuery): Promise<AuthorsResponse> {
+    return (await apiClient.get<AuthorsResponse>('/analytics/authors', { params: query })).data
+  },
   async overview(query: AnalyticsQuery): Promise<OverviewResponse> {
     return (await apiClient.get<OverviewResponse>('/analytics/overview', { params: query })).data
   },

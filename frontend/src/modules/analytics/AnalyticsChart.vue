@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart, LineChart, PieChart } from 'echarts/charts'
+import { BarChart, FunnelChart, LineChart, PieChart, TreemapChart } from 'echarts/charts'
 import {
   AriaComponent,
   GridComponent,
@@ -12,7 +12,7 @@ import { ArrowDownTrayIcon, ExclamationTriangleIcon } from '@heroicons/vue/24/ou
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 use([
-  BarChart, LineChart, PieChart, AriaComponent, GridComponent,
+  BarChart, FunnelChart, LineChart, PieChart, TreemapChart, AriaComponent, GridComponent,
   LegendComponent, TooltipComponent, CanvasRenderer,
 ])
 

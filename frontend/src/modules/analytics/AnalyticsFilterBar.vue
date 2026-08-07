@@ -3,12 +3,13 @@ import { ArrowDownTrayIcon, ArrowPathIcon, FunnelIcon } from '@heroicons/vue/24/
 
 import type { AnalyticsQuery, FilterOptionsResponse } from '@/modules/analytics/analytics.types'
 
-defineProps<{
+withDefaults(defineProps<{
   filter: AnalyticsQuery
   options: FilterOptionsResponse | null
   loading?: boolean
   exporting?: boolean
-}>()
+  exportable?: boolean
+}>(), { loading: false, exporting: false, exportable: true })
 
 const emit = defineEmits<{
   apply: []
@@ -169,6 +170,7 @@ function value(event: { target: unknown }): string | undefined {
         <ArrowPathIcon class="size-4" />重置
       </button>
       <button
+        v-if="exportable"
         type="button"
         :disabled="exporting || loading"
         class="inline-flex min-h-10 items-center gap-2 rounded-md bg-white px-3 text-sm font-medium text-slate-700 ring-1 ring-slate-300 ring-inset hover:bg-slate-50 disabled:opacity-50"

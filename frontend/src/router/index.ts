@@ -80,6 +80,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '联系人分析', pageSection: '数据分析' },
   },
   {
+    path: '/analytics/authors', name: 'author-analytics',
+    component: () => import('@/modules/analytics/AuthorsAnalyticsView.vue'),
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '作者关系', pageSection: '数据分析' },
+  },
+  {
     path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
     meta: {
       requiresAuth: true, permissions: ['user:read'], pageTitle: '用户管理', pageSection: '系统管理',

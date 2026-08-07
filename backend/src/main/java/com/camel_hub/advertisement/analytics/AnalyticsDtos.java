@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.analytics;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.UUID;
 
 public final class AnalyticsDtos {
 
@@ -101,6 +102,31 @@ public final class AnalyticsDtos {
 			List<NamedCount> extractionRules,
 			List<NamedCount> reuseBuckets,
 			List<NamedCount> coauthorPairs
+	) { }
+
+	public record AuthorGraphSummary(
+			long totalAuthors,
+			long totalCollaborations,
+			long totalPapers,
+			boolean truncated
+	) { }
+
+	public record AuthorNode(
+			UUID id,
+			String label,
+			long paperCount,
+			long collaboratorCount,
+			long contactCount
+	) { }
+
+	public record AuthorEdge(UUID source, UUID target, long sharedPaperCount) { }
+
+	public record AuthorsResponse(
+			Window window,
+			Freshness freshness,
+			AuthorGraphSummary summary,
+			List<AuthorNode> nodes,
+			List<AuthorEdge> edges
 	) { }
 
 	public record Option(String id, String label) { }

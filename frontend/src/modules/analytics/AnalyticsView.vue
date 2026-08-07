@@ -8,7 +8,16 @@ import AnalyticsChart from '@/modules/analytics/AnalyticsChart.vue'
 import AnalyticsFilterBar from '@/modules/analytics/AnalyticsFilterBar.vue'
 import AnalyticsMetricGrid from '@/modules/analytics/AnalyticsMetricGrid.vue'
 import { analyticsApi } from '@/modules/analytics/analytics.api'
-import { countBars, dailyOption, dailySeriesOption, donutOption, durationBars, funnelBars, rateBars } from '@/modules/analytics/chartOptions'
+import {
+  countBars,
+  dailyOption,
+  dailySeriesOption,
+  donutOption,
+  durationBars,
+  funnelOption,
+  rateBars,
+  treemapOption,
+} from '@/modules/analytics/chartOptions'
 import type {
   AnalyticsQuery,
   ContactsResponse,
@@ -21,7 +30,15 @@ import { useAnalyticsFilters } from '@/modules/analytics/useAnalyticsFilters'
 
 type ViewName = 'ingestion' | 'papers' | 'contacts'
 type Payload = IngestionResponse | PapersResponse | ContactsResponse
-interface ChartDefinition { key: string; title: string; description: string; option: EChartsCoreOption; size: number; height: number }
+interface ChartDefinition {
+  key: string
+  title: string
+  description: string
+  option: EChartsCoreOption
+  size: number
+  height: number
+  wide: boolean
+}
 
 const props = defineProps<{ view: ViewName }>()
 const route = useRoute()
@@ -61,8 +78,8 @@ const charts = computed<ChartDefinition[]>(() => {
       { key: 'p99', label: 'P99', count: data.duration.p99Ms },
     ]
     return [
-      chart('daily', '每日导入吞吐', '按 papers.imported_at 的 UTC 日期计数；少于 8 个点时使用柱状图。', dailyOption(data.dailyImported), data.dailyImported.length),
-      chart('funnel', 'Source 采集漏斗', '每一级使用每篇论文最新一次 extraction run，避免重跑膨胀。', funnelBars(data.funnel), data.funnel.some((item) => item.count > 0) ? data.funnel.length : 0),
+      chart('daily', '每日导入吞吐', '按 papers.imported_at 的 UTC 日期计数；少于 8 个点时使用柱状图。', dailyOption(data.dailyImported), data.dailyImported.length, 330, true),
+      chart('funnel', 'Source 采集漏斗', '漏斗宽度代表每一级的论文数量；每篇论文只使用最新一次 extraction run。', funnelOption(data.funnel), data.funnel.some((item) => item.count > 0) ? data.funnel.length : 0, 360, true),
       chart('statuses', '最新解析状态', '同一论文只计最新 extraction run。', donutOption(data.extractionStatuses), data.extractionStatuses.length),
       chart('duration', '解析耗时分位数', `样本 ${data.duration.samples} 个，单位为毫秒。`, durationBars(duration), data.duration.samples),
       chart('errors', 'Worker 错误码', '按任务错误码聚合；不展示可能含敏感内容的错误摘要。', countBars(data.workerErrors, true), data.workerErrors.length),
@@ -72,8 +89,8 @@ const charts = computed<ChartDefinition[]>(() => {
   if (props.view === 'papers') {
     const data = currentPayload.value as PapersResponse
     return [
-      chart('categories', 'Primary Category 分布', '按论文主分类统计，默认展示前 20 项。', countBars(data.categories, true), data.categories.length, 360),
-      chart('allCategories', '全部 Category 分布', '包含 Primary 与 Cross-list 关系，按不同论文数统计。', countBars(data.allCategories, true), data.allCategories.length, 360),
+      chart('categories', 'Primary Category 分布', '按论文主分类统计，默认展示前 20 项。', countBars(data.categories, true), data.categories.length, 360, true),
+      chart('allCategories', '全部 Category 构成', '矩形面积代表论文数，包含 Primary 与 Cross-list 关系。', treemapOption(data.allCategories), data.allCategories.length, 390, true),
       chart('crossListCategories', 'Cross-list Category 分布', '仅统计 Cross-list 关系。', countBars(data.crossListCategories, true), data.crossListCategories.length, 360),
       chart('groups', 'arXiv Group 分布', '由官方分类树映射；未分类论文单独列出。', donutOption(data.groups), data.groups.length),
       chart('relations', 'Primary / Cross-list 覆盖', '一篇论文可同时出现在多个关系类型中。', donutOption(data.categoryRelations), data.categoryRelations.length),
@@ -89,16 +106,24 @@ const charts = computed<ChartDefinition[]>(() => {
     chart('domains', '邮箱域名 Top 20', '仅展示域名聚合，不返回或导出完整邮箱地址。', countBars(data.domains, true), data.domains.length, 380),
     chart('confidence', '置信度分布', '同一论文与联系人的多次提取只保留最新映射。', donutOption(data.confidence), data.confidence.length),
     chart('domainClass', '常见服务商 / 其他域名', '平台规则推导，仅用于域名分类，不推断机构归属。', donutOption(data.inferredDomainClasses), data.inferredDomainClasses.length),
-    chart('discovery', '分类邮箱发现率', '分子为有联系人论文数，分母为该 Primary Category 论文数。', rateBars(data.categoryDiscovery), data.categoryDiscovery.length, 380),
+    chart('discovery', '分类邮箱发现率', '分子为有联系人论文数，分母为该 Primary Category 论文数。', rateBars(data.categoryDiscovery), data.categoryDiscovery.length, 380, true),
     chart('documents', '文档类联系人发现率', '分子为找到联系人的论文，分母为该最新文档类的解析论文。', rateBars(data.documentClasses), data.documentClasses.length),
     chart('rules', '提取规则命中', '按脱敏 extraction evidence 的 rule_name 聚合。', countBars(data.extractionRules, true), data.extractionRules.length),
     chart('reuse', '邮箱跨论文复用', '按同一加密联系人关联的不同论文数分桶。', countBars(data.reuseBuckets), data.reuseBuckets.length),
-    chart('coauthors', '高频共同作者对', '基础协作关系视图，按队列内共同论文数排序。', countBars(data.coauthorPairs, true), data.coauthorPairs.length, 380),
+    chart('coauthors', '高频共同作者对', '按共同论文数排序的关系预览；完整交互网络请使用“作者关系”页。', countBars(data.coauthorPairs, true), data.coauthorPairs.length, 380),
   ]
 })
 
-function chart(key: string, title: string, description: string, option: EChartsCoreOption, size: number, height = 300): ChartDefinition {
-  return { key, title, description, option, size, height }
+function chart(
+  key: string,
+  title: string,
+  description: string,
+  option: EChartsCoreOption,
+  size: number,
+  height = 300,
+  wide = false,
+): ChartDefinition {
+  return { key, title, description, option, size, height, wide }
 }
 
 function errorCharts(view: ViewName): ChartDefinition[] {
@@ -209,18 +234,23 @@ watch(() => [props.view, route.fullPath], load)
     />
 
     <div class="grid gap-4 lg:grid-cols-2">
-      <AnalyticsChart
+      <div
         v-for="item in charts"
         :key="item.key"
-        :title="item.title"
-        :description="item.description"
-        :option="item.option"
-        :empty="item.size === 0"
-        :loading="loading"
-        :error="error"
-        :height="item.height"
-        :filename="`camel-arxiv-${view}-${item.key}`"
-      />
+        :data-chart-key="item.key"
+        :class="item.wide ? 'lg:col-span-2' : ''"
+      >
+        <AnalyticsChart
+          :title="item.title"
+          :description="item.description"
+          :option="item.option"
+          :empty="item.size === 0"
+          :loading="loading"
+          :error="error"
+          :height="item.height"
+          :filename="`camel-arxiv-${view}-${item.key}`"
+        />
+      </div>
       <template v-if="loading">
         <AnalyticsChart
           v-for="index in 4"

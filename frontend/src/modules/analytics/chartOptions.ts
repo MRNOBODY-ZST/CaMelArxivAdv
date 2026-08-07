@@ -77,6 +77,48 @@ export function funnelBars(data: FunnelStep[]): EChartsCoreOption {
   return countBars(data.map((item) => ({ key: item.key, label: item.label, count: item.count })), true)
 }
 
+export function funnelOption(data: FunnelStep[]): EChartsCoreOption {
+  const maximum = Math.max(1, ...data.map((item) => item.count))
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: {
+      trigger: 'item',
+      formatter: (item: unknown) => {
+        const name = typeof item === 'object' && item !== null && 'name' in item ? String(item.name) : ''
+        const step = data.find((candidate) => candidate.label === name)
+        return step
+          ? `${step.label}<br/>${step.count} 篇 · 上一步转化 ${(step.rateFromPrevious * 100).toFixed(1)}%`
+          : name
+      },
+    },
+    series: [{
+      type: 'funnel', left: '7%', top: 8, bottom: 8, width: '86%',
+      min: 0, max: maximum, minSize: '18%', maxSize: '100%', sort: 'descending', gap: 4,
+      label: { show: true, position: 'inside', color: '#ffffff', formatter: '{b}  {c}', fontSize: 12 },
+      labelLine: { show: false },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 2, borderRadius: 4 },
+      emphasis: { label: { fontSize: 13, fontWeight: 'bold' } },
+      data: data.map((item) => ({ name: item.label, value: item.count })),
+    }],
+  }
+}
+
+export function treemapOption(data: NamedCount[]): EChartsCoreOption {
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'item', formatter: '{b}<br/>{c} 篇论文' },
+    series: [{
+      type: 'treemap', left: 4, right: 4, top: 4, bottom: 4,
+      roam: false, nodeClick: false, breadcrumb: { show: false },
+      label: { show: true, color: '#ffffff', fontSize: 12, overflow: 'truncate' },
+      upperLabel: { show: false },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 2, gapWidth: 2, borderRadius: 4 },
+      levels: [{ color: palette, colorMappingBy: 'index', itemStyle: { borderWidth: 2, gapWidth: 2 } }],
+      data: data.map((item) => ({ name: item.label, value: item.count, id: item.key })),
+    }],
+  }
+}
+
 export function rateBars(data: Breakdown[]): EChartsCoreOption {
   return {
     ...countBars(data.map((item) => ({ key: item.key, label: item.label, count: item.rate * 100 })), true),

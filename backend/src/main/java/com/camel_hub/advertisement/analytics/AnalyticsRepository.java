@@ -79,6 +79,25 @@ public class AnalyticsRepository {
 			    AND (:confidenceEmpty OR lmc.confidence = :confidence)
 			)
 			""";
+	private static final String AUTHOR_STATS = """
+			, author_stats AS (
+			  SELECT a.id, a.display_name,
+			         count(DISTINCT pa.paper_id) AS paper_count,
+			         count(DISTINCT coauthor.author_id) AS collaborator_count,
+			         count(DISTINCT lm.contact_id) AS contact_count
+			  FROM paper_authors pa
+			  JOIN filtered_papers fp ON fp.id = pa.paper_id
+			  JOIN authors a ON a.id = pa.author_id
+			  LEFT JOIN paper_authors coauthor
+			    ON coauthor.paper_id = pa.paper_id AND coauthor.author_id <> pa.author_id
+			  LEFT JOIN latest_mappings lm ON lm.paper_author_id = pa.id
+			  GROUP BY a.id, a.display_name
+			), ranked_authors AS (
+			  SELECT * FROM author_stats
+			  ORDER BY collaborator_count DESC, paper_count DESC, lower(display_name), id
+			  LIMIT :authorLimit
+			)
+			""";
 
 	private final DatabaseClient databaseClient;
 
@@ -436,6 +455,56 @@ public class AnalyticsRepository {
 				""");
 	}
 
+	Mono<AuthorGraphCounts> authorGraphSummary(AnalyticsFilter filter) {
+		return bind(databaseClient.sql(FILTERED_PAPERS + """
+				SELECT
+				  (SELECT count(DISTINCT pa.author_id)
+				     FROM paper_authors pa JOIN filtered_papers fp ON fp.id = pa.paper_id) AS total_authors,
+				  (SELECT count(*) FROM (
+				     SELECT pa1.author_id, pa2.author_id
+				     FROM paper_authors pa1
+				     JOIN paper_authors pa2
+				       ON pa2.paper_id = pa1.paper_id AND pa1.author_id < pa2.author_id
+				     JOIN filtered_papers fp ON fp.id = pa1.paper_id
+				     GROUP BY pa1.author_id, pa2.author_id
+				   ) collaboration_pairs) AS total_collaborations,
+				  (SELECT count(*) FROM filtered_papers) AS total_papers
+				"""), filter).map((row, metadata) -> new AuthorGraphCounts(
+				longValue(row, "total_authors"), longValue(row, "total_collaborations"),
+				longValue(row, "total_papers"))).one();
+	}
+
+	Flux<AnalyticsDtos.AuthorNode> authorNodes(AnalyticsFilter filter, int limit) {
+		return bind(databaseClient.sql(FILTERED_PAPERS + AUTHOR_STATS + """
+				SELECT id, display_name, paper_count, collaborator_count, contact_count
+				FROM ranked_authors
+				ORDER BY collaborator_count DESC, paper_count DESC, lower(display_name), id
+				"""), filter).bind("authorLimit", limit)
+				.map((row, metadata) -> new AnalyticsDtos.AuthorNode(
+						row.get("id", UUID.class), row.get("display_name", String.class),
+						longValue(row, "paper_count"), longValue(row, "collaborator_count"),
+						longValue(row, "contact_count"))).all();
+	}
+
+	Flux<AnalyticsDtos.AuthorEdge> authorEdges(AnalyticsFilter filter, int authorLimit, int edgeLimit) {
+		return bind(databaseClient.sql(FILTERED_PAPERS + AUTHOR_STATS + """
+				SELECT pa1.author_id AS source, pa2.author_id AS target,
+				       count(DISTINCT pa1.paper_id) AS shared_paper_count
+				FROM paper_authors pa1
+				JOIN paper_authors pa2
+				  ON pa2.paper_id = pa1.paper_id AND pa1.author_id < pa2.author_id
+				JOIN filtered_papers fp ON fp.id = pa1.paper_id
+				JOIN ranked_authors source_author ON source_author.id = pa1.author_id
+				JOIN ranked_authors target_author ON target_author.id = pa2.author_id
+				GROUP BY pa1.author_id, pa2.author_id
+				ORDER BY shared_paper_count DESC, source, target
+				LIMIT :edgeLimit
+				"""), filter).bind("authorLimit", authorLimit).bind("edgeLimit", edgeLimit)
+				.map((row, metadata) -> new AnalyticsDtos.AuthorEdge(
+						row.get("source", UUID.class), row.get("target", UUID.class),
+						longValue(row, "shared_paper_count"))).all();
+	}
+
 	Mono<DataFreshness> freshness(AnalyticsFilter filter, boolean includeOperational) {
 		return bind(databaseClient.sql(FILTERED_PAPERS + """
 				SELECT greatest(
@@ -591,4 +660,6 @@ public class AnalyticsRepository {
 	record DateBounds(LocalDate minimum, LocalDate maximum) { }
 
 	record DataFreshness(Instant dataThrough) { }
+
+	record AuthorGraphCounts(long totalAuthors, long totalCollaborations, long totalPapers) { }
 }

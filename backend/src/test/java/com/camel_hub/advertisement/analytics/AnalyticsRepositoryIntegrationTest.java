@@ -159,6 +159,37 @@ class AnalyticsRepositoryIntegrationTest {
 	}
 
 	@Test
+	void buildsAStableAuthorGraphFromTheFilteredPaperCohort() {
+		sql("""
+				INSERT INTO paper_authors (id, paper_id, author_id, author_order, raw_name)
+				VALUES ('51000000-0000-0000-0000-000000000004',
+				        '40000000-0000-0000-0000-000000000002',
+				        '50000000-0000-0000-0000-000000000001', 2, 'Alice');
+				""");
+
+		var graph = service.authors(query(null)).block();
+
+		assertThat(graph.summary().totalAuthors()).isEqualTo(3);
+		assertThat(graph.summary().totalCollaborations()).isEqualTo(2);
+		assertThat(graph.summary().totalPapers()).isEqualTo(2);
+		assertThat(graph.summary().truncated()).isFalse();
+		assertThat(graph.nodes())
+				.filteredOn(node -> node.id().equals(UUID.fromString("50000000-0000-0000-0000-000000000001")))
+				.singleElement()
+				.satisfies(node -> {
+					assertThat(node.label()).isEqualTo("Alice");
+					assertThat(node.paperCount()).isEqualTo(2);
+					assertThat(node.collaboratorCount()).isEqualTo(2);
+					assertThat(node.contactCount()).isEqualTo(1);
+				});
+		assertThat(graph.edges())
+				.filteredOn(edge -> edge.source().equals(UUID.fromString("50000000-0000-0000-0000-000000000001"))
+						&& edge.target().equals(UUID.fromString("50000000-0000-0000-0000-000000000002")))
+				.singleElement()
+				.satisfies(edge -> assertThat(edge.sharedPaperCount()).isEqualTo(1));
+	}
+
+	@Test
 	void separatesPrimaryAllAndCrossListCategories() {
 		sql("""
 				INSERT INTO arxiv_categories (

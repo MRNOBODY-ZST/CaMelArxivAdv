@@ -151,4 +151,53 @@ describe('AnalyticsView', () => {
     expect(wrapper.text()).toContain('论文页指标')
     expect(wrapper.text()).not.toContain('过期采集指标')
   })
+
+  it('uses distinct feature layouts and chart forms for ingestion and papers', async () => {
+    vi.mocked(analyticsApi.ingestion).mockResolvedValueOnce({
+      window: { from: '2026-08-01', to: '2026-08-06', dateBasis: 'papers.imported_at', timezone: 'UTC' },
+      freshness: { dataThrough: '2026-08-06T10:00:00Z', status: 'CURRENT', generatedAt: '2026-08-06T11:00:00Z' },
+      metrics: [],
+      funnel: [
+        { key: 'imported', label: '已导入', count: 20, previousCount: 20, rateFromPrevious: 1 },
+        { key: 'parsed', label: '已解析', count: 12, previousCount: 20, rateFromPrevious: 0.6 },
+      ],
+      duration: { samples: 0, averageMs: 0, p50Ms: 0, p90Ms: 0, p95Ms: 0, p99Ms: 0 },
+      dailyImported: [], extractionStatuses: [], workerErrors: [], jobThroughput: [],
+    })
+    vi.mocked(analyticsApi.papers).mockResolvedValueOnce({
+      window: { from: '2026-08-01', to: '2026-08-06', dateBasis: 'papers.imported_at', timezone: 'UTC' },
+      freshness: { dataThrough: '2026-08-06T10:00:00Z', status: 'CURRENT', generatedAt: '2026-08-06T11:00:00Z' },
+      metrics: [], groups: [], archives: [], categories: [],
+      allCategories: [{ key: 'cs.AI', label: 'Artificial Intelligence', count: 8 }],
+      crossListCategories: [], categoryRelations: [], publicationMonths: [], updateMonths: [],
+      authorCounts: [], versionCounts: [], sourceFormats: [],
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/analytics/ingestion', component: AnalyticsView, props: { view: 'ingestion' } },
+        { path: '/analytics/papers', component: AnalyticsView, props: { view: 'papers' } },
+      ],
+    })
+    const chartStub = {
+      props: ['title', 'option'],
+      template: '<div class="chart-stub" :data-title="title" :data-series-type="option?.series?.[0]?.type" />',
+    }
+    await router.push('/analytics/ingestion?from=2026-08-01&to=2026-08-06')
+    await router.isReady()
+    const wrapper = mount({ template: '<RouterView />' }, {
+      global: { plugins: [router], stubs: { AnalyticsChart: chartStub } },
+    })
+    await flushPromises()
+
+    const funnelCard = wrapper.get('[data-chart-key="funnel"]')
+    expect(funnelCard.classes()).toContain('lg:col-span-2')
+    expect(funnelCard.get('[data-title="Source 采集漏斗"]').attributes('data-series-type')).toBe('funnel')
+
+    await router.push('/analytics/papers?from=2026-08-01&to=2026-08-06')
+    await flushPromises()
+    const treemapCard = wrapper.get('[data-chart-key="allCategories"]')
+    expect(treemapCard.classes()).toContain('lg:col-span-2')
+    expect(treemapCard.get('[data-title="全部 Category 构成"]').attributes('data-series-type')).toBe('treemap')
+  })
 })

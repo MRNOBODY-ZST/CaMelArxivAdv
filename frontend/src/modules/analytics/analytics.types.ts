@@ -61,10 +61,39 @@ export interface ContactsResponse {
   reuseBuckets: NamedCount[]; coauthorPairs: NamedCount[]
 }
 
+export interface AuthorGraphSummary {
+  totalAuthors: number
+  totalCollaborations: number
+  totalPapers: number
+  truncated: boolean
+}
+
+export interface AuthorNode {
+  id: string
+  label: string
+  paperCount: number
+  collaboratorCount: number
+  contactCount: number
+}
+
+export interface AuthorEdge {
+  source: string
+  target: string
+  sharedPaperCount: number
+}
+
+export interface AuthorsResponse {
+  window: AnalyticsWindow
+  freshness: Freshness
+  summary: AuthorGraphSummary
+  nodes: AuthorNode[]
+  edges: AuthorEdge[]
+}
+
 export interface Option { id: string; label: string }
 export interface FilterOptionsResponse {
   minimumDate: string | null; maximumDate: string | null; categories: Option[]; jobs: Option[]
   users: Option[]; domains: Option[]; confidenceLevels: Option[]; relationTypes: Option[]
 }
 
-export type AnalyticsView = 'overview' | 'ingestion' | 'papers' | 'contacts'
+export type AnalyticsView = 'overview' | 'ingestion' | 'papers' | 'contacts' | 'authors'

@@ -29,6 +29,14 @@ describe('AppShell', () => {
     expect(wrapper.text()).not.toContain('SMTP 账户')
   })
 
+  it('exposes the dedicated author relationship analytics route', () => {
+    const wrapper = mountShell(['analytics:read'])
+    const link = wrapper.findAll('a').find((candidate) => candidate.text().includes('作者关系'))
+
+    expect(link).toBeDefined()
+    expect(link!.attributes('href')).toBe('/analytics/authors')
+  })
+
   it('derives the header title and breadcrumb from route metadata', async () => {
     const pinia = createPinia()
     setActivePinia(pinia)
