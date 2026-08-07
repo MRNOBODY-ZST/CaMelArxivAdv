@@ -124,10 +124,24 @@ public final class SourceExtractionResultRepository {
 		return Flux.fromIterable(safe(result.authors())).concatMap(author -> {
 			String display = normalizeName(author.name());
 			String normalized = display.toLowerCase(Locale.ROOT);
-			return existingPaperAuthor(result.paperId(), author.order())
-					.switchIfEmpty(findOrCreateAuthor(normalized, display))
-					.flatMap(authorId -> upsertPaperAuthor(result.paperId(), authorId, author, display));
+			return existingPaperAuthorByName(result.paperId(), normalized)
+					.flatMap(paperAuthorId -> updatePaperAuthor(paperAuthorId, author))
+					.switchIfEmpty(existingPaperAuthor(result.paperId(), author.order())
+							.switchIfEmpty(findOrCreateAuthor(normalized, display))
+							.flatMap(authorId -> upsertPaperAuthor(
+									result.paperId(), authorId, author, display)));
 		});
+	}
+
+	private Mono<UUID> existingPaperAuthorByName(UUID paperId, String normalized) {
+		return databaseClient.sql("""
+				SELECT pa.id FROM paper_authors pa
+				JOIN authors a ON a.id = pa.author_id
+				WHERE pa.paper_id = :paperId AND a.normalized_name = :normalized
+				ORDER BY pa.author_order, pa.id
+				LIMIT 1
+				""").bind("paperId", paperId).bind("normalized", normalized)
+				.map((row, metadata) -> row.get("id", UUID.class)).one();
 	}
 
 	private Mono<UUID> existingPaperAuthor(UUID paperId, int authorOrder) {
@@ -178,6 +192,28 @@ public final class SourceExtractionResultRepository {
 				.bind("authorOrder", author.order()).bind("corresponding", author.corresponding())
 				.bind("rawName", display).bind("affiliationText", String.join("; ", affiliations))
 				.bind("affiliations", json(affiliations))
+				.map((row, metadata) -> new AuthorLink(
+						author.order(), row.get("id", UUID.class))).one();
+	}
+
+	private Mono<AuthorLink> updatePaperAuthor(
+			UUID paperAuthorId,
+			ArxivResultMessage.SourceAuthor author
+	) {
+		List<String> affiliations = safe(author.affiliations()).stream()
+				.map(value -> truncate(value.strip(), 2000)).toList();
+		return databaseClient.sql("""
+				UPDATE paper_authors SET
+				  corresponding_author = corresponding_author OR :corresponding,
+				  affiliation_text = CASE WHEN :affiliationText = ''
+				                          THEN affiliation_text ELSE :affiliationText END,
+				  affiliation_data = CASE WHEN CAST(:affiliations AS jsonb) = '[]'::jsonb
+				                          THEN affiliation_data ELSE CAST(:affiliations AS jsonb) END
+				WHERE id = :paperAuthorId
+				RETURNING id
+				""").bind("corresponding", author.corresponding())
+				.bind("affiliationText", String.join("; ", affiliations))
+				.bind("affiliations", json(affiliations)).bind("paperAuthorId", paperAuthorId)
 				.map((row, metadata) -> new AuthorLink(
 						author.order(), row.get("id", UUID.class))).one();
 	}

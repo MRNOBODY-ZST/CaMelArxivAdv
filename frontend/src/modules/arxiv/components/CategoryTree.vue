@@ -40,7 +40,7 @@ function toggle(current: string[], category: string, checked: boolean): void {
             class="flex min-h-9 cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-white"
           >
             <input
-              class="mt-0.5 size-4 rounded border-slate-300 text-brand-500"
+              class="mt-0.5 size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500"
               type="checkbox"
               :checked="modelValue.includes(category.categoryId)"
               @change="toggle(modelValue, category.categoryId, ($event.target as HTMLInputElement).checked)"

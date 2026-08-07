@@ -30,6 +30,9 @@ const criteria = reactive<SearchCriteriaRequest>({
   sortBy: 'RELEVANCE', sortOrder: 'DESCENDING', page: 1, pageSize: 20,
 })
 const canImport = computed(() => auth.hasPermission('paper:import'))
+const currentPaperIds = computed(() => result.value?.papers.map((paper) => paper.arxivId) ?? [])
+const allCurrentSelected = computed(() => currentPaperIds.value.length > 0
+  && currentPaperIds.value.every((id) => selected.value.includes(id)))
 
 onMounted(async () => {
   try { taxonomy.value = await arxivApi.taxonomy() }
@@ -56,6 +59,15 @@ async function importSelected(): Promise<void> {
   })
 }
 
+async function importCurrentPage(): Promise<void> {
+  const paperIds = [...currentPaperIds.value]
+  if (paperIds.length === 0) return
+  await action(async () => {
+    const response = await arxivApi.importSelected(paperIds)
+    notice.value = response.created ? `本页导入任务 ${response.jobId.slice(0, 8)} 已创建` : '相同导入任务已存在'
+  })
+}
+
 async function importAll(): Promise<void> {
   const ceiling = Number(importCeiling.value)
   if (!Number.isInteger(ceiling) || ceiling < 1) { error.value = '导入上限必须是正整数'; return }
@@ -72,6 +84,13 @@ async function action(callback: () => Promise<void>): Promise<void> {
 
 function togglePaper(id: string, checked: boolean): void {
   selected.value = checked ? [...new Set([...selected.value, id])] : selected.value.filter((item) => item !== id)
+}
+
+function toggleCurrentPage(checked: boolean): void {
+  const current = new Set(currentPaperIds.value)
+  selected.value = checked
+    ? [...new Set([...selected.value, ...current])]
+    : selected.value.filter((id) => !current.has(id))
 }
 
 function message(reason: unknown): string {
@@ -210,12 +229,46 @@ function message(reason: unknown): string {
               <ArrowDownTrayIcon class="size-4" />按条件导入
             </DsButton>
           </div>
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-2">
+              <DsButton
+                variant="secondary"
+                size="sm"
+                :disabled="currentPaperIds.length === 0"
+                @click="toggleCurrentPage(true)"
+              >
+                全选本页
+              </DsButton>
+              <DsButton
+                variant="ghost"
+                size="sm"
+                :disabled="!currentPaperIds.some((id) => selected.includes(id))"
+                @click="toggleCurrentPage(false)"
+              >
+                清空选择
+              </DsButton>
+            </div>
+            <DsButton
+              size="sm"
+              :busy="acting"
+              :disabled="!canImport || currentPaperIds.length === 0"
+              @click="importCurrentPage"
+            >
+              <ArrowDownTrayIcon class="size-4" />一键导入本页 {{ currentPaperIds.length }} 篇
+            </DsButton>
+          </div>
           <div class="overflow-x-auto rounded-md border border-slate-200">
             <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
               <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th class="w-12 px-4 py-3">
-                    <span class="sr-only">选择</span>
+                    <input
+                      type="checkbox"
+                      class="size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500"
+                      aria-label="选择本页全部论文"
+                      :checked="allCurrentSelected"
+                      @change="toggleCurrentPage(($event.target as HTMLInputElement).checked)"
+                    >
                   </th><th class="px-4 py-3">
                     论文
                   </th><th class="px-4 py-3">
@@ -233,7 +286,7 @@ function message(reason: unknown): string {
                   <td class="px-4 py-4">
                     <input
                       type="checkbox"
-                      class="size-4 rounded border-slate-300"
+                      class="size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500"
                       :aria-label="`选择 ${paper.title}`"
                       :checked="selected.includes(paper.arxivId)"
                       @change="togglePaper(paper.arxivId, ($event.target as HTMLInputElement).checked)"

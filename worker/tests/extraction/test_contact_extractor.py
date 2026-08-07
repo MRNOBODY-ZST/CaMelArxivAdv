@@ -146,3 +146,36 @@ def test_unmapped_front_matter_email_is_low_and_never_guessed(tmp_path: Path) ->
     assert result.contacts[0].author_order is None
     assert result.contacts[0].confidence is Confidence.LOW
     assert all(item.normalized_email != "alice.one@uni.edu" for item in result.contacts)
+
+
+def test_canonicalizes_repeated_authors_across_tex_files_and_remaps_contacts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.tex").write_text(
+        r"""\documentclass{article}
+\author{Alice Example \and Bob Researcher}
+\email{alice@uni.edu}
+\email{bob@lab.org}
+\input{authors}
+\begin{document}\maketitle
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "authors.tex").write_text(
+        r"""\author{  ALICE   EXAMPLE  \and Bob Researcher}
+\affil{Reliability Lab}
+""",
+        encoding="utf-8",
+    )
+
+    result = extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20)
+    )
+
+    assert [(item.order, item.name) for item in result.authors] == [
+        (1, "Alice Example"),
+        (2, "Bob Researcher"),
+    ]
+    assert result.authors[0].affiliations == ("Reliability Lab",)
+    assert result.authors[1].affiliations == ("Reliability Lab",)
+    assert [item.author_order for item in result.contacts] == [1, 2]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.extraction.models import (
     Confidence,
@@ -167,6 +167,16 @@ def extract_contacts(corpus: TexCorpus) -> ExtractionDocument:
                     corresponding=corresponding,
                 )
             )
+    authors, canonical_orders = _canonicalize_authors(authors)
+    candidates = [
+        replace(
+            candidate,
+            author_order=canonical_orders.get(candidate.author_order),
+        )
+        if candidate.author_order is not None
+        else candidate
+        for candidate in candidates
+    ]
     unique = _deduplicate(candidates)
     contacts: list[ExtractedContact] = []
     for index, candidate in enumerate(unique):
@@ -348,6 +358,47 @@ def _mapping(
     ):
         return index + 1, Confidence.MEDIUM, "POSITIONAL_AUTHOR_EMAIL"
     return None, Confidence.LOW, "PAPER_LEVEL_FRONT_MATTER_EMAIL"
+
+
+def _canonicalize_authors(
+    authors: list[ExtractedAuthor],
+) -> tuple[list[ExtractedAuthor], dict[int, int]]:
+    canonical: list[ExtractedAuthor] = []
+    index_by_name: dict[str, int] = {}
+    canonical_orders: dict[int, int] = {}
+    for author in authors:
+        name_key = _canonical_text(author.name)
+        canonical_index = index_by_name.get(name_key)
+        if canonical_index is None:
+            canonical_index = len(canonical)
+            index_by_name[name_key] = canonical_index
+            canonical.append(author.model_copy(update={"order": canonical_index + 1}))
+        else:
+            current = canonical[canonical_index]
+            affiliations = _merge_text_values(current.affiliations, author.affiliations)
+            canonical[canonical_index] = current.model_copy(
+                update={
+                    "affiliations": affiliations,
+                    "corresponding": current.corresponding or author.corresponding,
+                }
+            )
+        canonical_orders[author.order] = canonical_index + 1
+    return canonical, canonical_orders
+
+
+def _canonical_text(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip().casefold()
+
+
+def _merge_text_values(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in (*left, *right):
+        key = _canonical_text(value)
+        if key not in seen:
+            seen.add(key)
+            merged.append(value)
+    return tuple(merged)
 
 
 def _deduplicate(candidates: list[_Candidate]) -> tuple[_Candidate, ...]:

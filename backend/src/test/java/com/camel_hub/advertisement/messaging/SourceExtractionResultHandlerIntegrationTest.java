@@ -145,6 +145,31 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void reconcilesSourceAuthorByNameBeforeFallingBackToMetadataOrder() {
+		String sourceAuthors = """
+				"authors":[
+				 {"order":1,"name":"Different Source Person","affiliations":[],
+				  "corresponding":false},
+				 {"order":2,"name":"Alice Metadata","affiliations":["Example Lab"],
+				  "corresponding":true}],
+				"contacts":""";
+		String message = resultMessage(UUID.randomUUID(), "al***@university.edu")
+				.replaceFirst("(?s)\"authors\":\\[.*?],\\s*\"contacts\":", sourceAuthors)
+				.replace("\"authorOrder\":1", "\"authorOrder\":2");
+
+		handler.handle(message).block();
+
+		assertThat(count("paper_authors")).isEqualTo(1);
+		assertThat(text("""
+				SELECT pa.author_id::text FROM paper_author_contacts pac
+				JOIN paper_authors pa ON pa.id = pac.paper_author_id
+				LIMIT 1
+				""")).isEqualTo(AUTHOR.toString());
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("SUCCEEDED");
+	}
+
+	@Test
 	void scopesLatestContactMappingToTheFilteredPaper() {
 		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
 		UUID otherPaper = UUID.randomUUID();

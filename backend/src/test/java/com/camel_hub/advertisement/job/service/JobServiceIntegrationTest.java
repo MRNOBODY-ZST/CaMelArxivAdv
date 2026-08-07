@@ -19,6 +19,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -121,6 +122,32 @@ class JobServiceIntegrationTest {
 				""").bind("jobId", retry.id())
 				.map((row, metadata) -> row.get(0, String.class)).one().block())
 				.isEqualTo(retry.id().toString());
+	}
+
+	@Test
+	void liveWorkerHeartbeatOverridesAnOlderJobResultHeartbeat() {
+		UUID jobId = insertJob(JobStatus.RUNNING, false);
+		Instant jobHeartbeat = Instant.now().minusSeconds(7_200);
+		Instant workerHeartbeat = Instant.now();
+		databaseClient.sql("UPDATE jobs SET heartbeat_at = :heartbeat WHERE id = :jobId")
+				.bind("heartbeat", jobHeartbeat).bind("jobId", jobId)
+				.fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO worker_heartbeats (
+				    worker_id, worker_type, version, status, current_job_id, last_seen_at
+				) VALUES ('worker-heartbeat-test', 'ARXIV', 'test', 'BUSY', :jobId, :lastSeenAt)
+				ON CONFLICT (worker_id) DO UPDATE SET
+				  current_job_id = EXCLUDED.current_job_id,
+				  status = EXCLUDED.status,
+				  last_seen_at = EXCLUDED.last_seen_at
+				""").bind("jobId", jobId).bind("lastSeenAt", workerHeartbeat)
+				.fetch().rowsUpdated().block();
+
+		JobService.JobView view = service.get(jobId).block();
+
+		assertThat(view.workerStale()).isFalse();
+		assertThat(view.heartbeatAt()).isAfter(jobHeartbeat);
+		assertThat(view.heartbeatAt()).isEqualTo(workerHeartbeat);
 	}
 
 	private UUID insertJob(JobStatus status, boolean terminal) {

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { arxivApi } from '@/modules/arxiv/arxiv.api'
 import type { NormalizedSearchCriteria } from '@/modules/arxiv/arxiv.types'
 import ArxivDiscoveryView from '@/modules/arxiv/ArxivDiscoveryView.vue'
+import CategoryTree from '@/modules/arxiv/components/CategoryTree.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import ImportJobsView from '@/modules/jobs/ImportJobsView.vue'
 import { jobsApi } from '@/modules/jobs/jobs.api'
@@ -51,6 +52,59 @@ describe('Phase 3 arXiv workspace', () => {
     }))
     expect(wrapper.text()).toContain('Reliable Agents')
     expect(wrapper.text()).toContain('实时查询')
+  })
+
+  it('selects and imports every paper on the current preview page', async () => {
+    vi.mocked(arxivApi.preview).mockResolvedValue({
+      queryHash: 'page-hash', criteria: criteria(), officialTotal: 24, totalIsEstimate: false,
+      page: 1, pageSize: 20, cacheStatus: 'MISS', filters: [],
+      papers: [previewPaper('2608.00001', 'Reliable Agents'), previewPaper('2608.00002', 'Safe Agents')],
+    })
+    vi.mocked(arxivApi.importSelected).mockResolvedValue({
+      jobId: 'job-current-page', status: 'PENDING', created: true, idempotencyKey: 'page-import',
+    })
+    const wrapper = mountWithSession(ArxivDiscoveryView)
+    await flushPromises()
+    await wrapper.get('#title-keywords').setValue('agents')
+    await button(wrapper, '预览结果').trigger('click')
+    await flushPromises()
+
+    await button(wrapper, '全选本页').trigger('click')
+    expect(wrapper.findAll('tbody input[type="checkbox"]')).toHaveLength(2)
+    expect(wrapper.findAll('tbody input[type="checkbox"]').every((item) => (
+      item.element as HTMLInputElement
+    ).checked)).toBe(true)
+    expect(wrapper.text()).toContain('导入已选 2 篇')
+
+    await button(wrapper, '清空选择').trigger('click')
+    await button(wrapper, '一键导入本页 2 篇').trigger('click')
+    await flushPromises()
+
+    expect(arxivApi.importSelected).toHaveBeenCalledWith(['2608.00001', '2608.00002'])
+  })
+
+  it('keeps wrapped category checkboxes at a fixed size', async () => {
+    const wrapper = mount(CategoryTree, {
+      props: {
+        modelValue: [],
+        groups: [{
+          groupId: 'cs', groupName: 'Computer Science', archives: [{
+            archiveId: 'cs', archiveName: 'Computer Science', categories: [{
+              categoryId: 'cs.CE',
+              categoryName: 'Computational Engineering, Finance, and Science',
+              description: null, alias: false, aliasTarget: null,
+            }],
+          }],
+        }],
+      },
+    })
+
+    await wrapper.get('button').trigger('click')
+    const checkbox = wrapper.get('input[type="checkbox"]')
+
+    expect(checkbox.classes()).toEqual(expect.arrayContaining([
+      'size-4', 'min-h-4', 'min-w-4', 'shrink-0',
+    ]))
   })
 
   it('renders job progress and paper library server results', async () => {
@@ -112,5 +166,15 @@ function criteria(): NormalizedSearchCriteria {
     updatedFrom: null, updatedTo: null, hasDoi: null, hasJournalReference: null,
     sourceAvailable: null, sortBy: 'RELEVANCE' as const,
     sortOrder: 'DESCENDING' as const, page: 1, pageSize: 20,
+  }
+}
+
+function previewPaper(arxivId: string, title: string) {
+  return {
+    arxivId, title, abstractText: 'Summary',
+    authors: [{ name: 'Ada Lovelace', affiliations: [] }], primaryCategory: 'cs.AI',
+    categoryIds: ['cs.AI'], publishedAt: '2026-08-01T00:00:00Z',
+    updatedAt: '2026-08-04T00:00:00Z', doi: null, journalReference: null,
+    pdfUrl: `https://arxiv.org/pdf/${arxivId}v1`, versionCount: 1,
   }
 }

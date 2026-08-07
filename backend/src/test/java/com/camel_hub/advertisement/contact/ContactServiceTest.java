@@ -24,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -105,6 +106,34 @@ class ContactServiceTest {
 		assertThat(detail.email()).isEqualTo("al***@university.edu");
 	}
 
+	@Test
+	void unreadableLegacyCiphertextStillSupportsMaskedViewsButNotFullDisclosure() {
+		ContactCrypto.EncryptedValue legacy = legacyCrypto().encrypt("alice@university.edu");
+		row = new ContactRepository.ContactRow(
+				row.id(), legacy.ciphertext(), legacy.nonce(), row.domain(), row.exampleAddress(),
+				row.suppressionStatus(), row.lastExtractedAt(), row.mappingId(), row.version(),
+				row.confidence(), row.corresponding(), row.verificationStatus(), row.humanVerified(),
+				row.paperId(), row.arxivId(), row.paperTitle(), row.authorName(), row.categoryId(),
+				row.ruleName());
+		when(repository.list(any(), any(Integer.class), any(Integer.class))).thenReturn(Flux.just(row));
+		when(repository.count(any())).thenReturn(Mono.just(1L));
+		when(repository.find(contactId)).thenReturn(Mono.just(row));
+		when(repository.evidence(mappingId)).thenReturn(Flux.empty());
+
+		PageResponse<ContactService.ContactSummary> page = service.list(
+				1, 20, new ContactService.ContactFilter(null, null, null, null, null), fullUser()).block();
+		ContactService.ContactDetail masked = service.get(
+				contactId, false, maskedUser(), context()).block();
+
+		assertThat(page.items()).singleElement().extracting(ContactService.ContactSummary::email)
+				.isEqualTo("***@university.edu");
+		assertThat(masked.email()).isEqualTo("***@university.edu");
+		assertThatThrownBy(() -> service.get(contactId, true, fullUser(), context()).block())
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("authentication failed");
+		verify(audit, never()).record(any());
+	}
+
 	private AuthenticatedUser maskedUser() {
 		return new AuthenticatedUser(
 				UUID.randomUUID(), "analyst", "Analyst", Set.of("DATA_ANALYST"),
@@ -126,6 +155,12 @@ class ContactServiceTest {
 		return new ContactCrypto(new ContactDataProtectionProperties(
 				key("0123456789abcdef0123456789abcdef"),
 				key("abcdef0123456789abcdef0123456789")));
+	}
+
+	private ContactCrypto legacyCrypto() {
+		return new ContactCrypto(new ContactDataProtectionProperties(
+				key("fedcba9876543210fedcba9876543210"),
+				key("9876543210fedcba9876543210fedcba")));
 	}
 
 	private String key(String value) {

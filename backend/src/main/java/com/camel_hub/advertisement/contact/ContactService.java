@@ -143,12 +143,32 @@ public class ContactService {
 	}
 
 	private String disclose(ContactRepository.ContactRow row, Set<String> permissions) {
+		if (!permissions.contains(Permission.CONTACT_READ_FULL)) {
+			try {
+				return decryptAndDisclose(row, permissions);
+			}
+			catch (IllegalArgumentException | IllegalStateException exception) {
+				return conservativeMask(row.domain());
+			}
+		}
+		return decryptAndDisclose(row, permissions);
+	}
+
+	private String decryptAndDisclose(ContactRepository.ContactRow row, Set<String> permissions) {
 		if (row.displayNonce() == null || row.displayCiphertext() == null) {
 			throw new IllegalStateException("Contact display value is not decryptable");
 		}
 		String value = crypto.decrypt(new ContactCrypto.EncryptedValue(
 				row.displayCiphertext(), row.displayNonce()));
 		return disclosurePolicy.disclose(value, permissions);
+	}
+
+	private String conservativeMask(String domain) {
+		if (domain == null || domain.isBlank() || domain.length() > 255
+				|| !domain.matches("[A-Za-z0-9.-]+")) {
+			return "***";
+		}
+		return "***@" + domain.toLowerCase(Locale.ROOT);
 	}
 
 	private ContactFilter normalize(ContactFilter input) {

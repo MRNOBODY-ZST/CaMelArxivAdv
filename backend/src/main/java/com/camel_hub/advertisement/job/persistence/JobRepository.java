@@ -180,7 +180,7 @@ public class JobRepository {
 				       j.version, j.idempotency_key, j.total_count, j.processed_count,
 				       j.success_count, j.skipped_count, j.failed_count, j.current_stage,
 				       j.progress_percent, j.started_at, j.ended_at,
-				       coalesce(j.heartbeat_at, wh.last_seen_at) AS heartbeat_at,
+				       greatest(j.heartbeat_at, wh.last_seen_at) AS heartbeat_at,
 				       j.created_at, j.updated_at, j.error_summary
 				FROM jobs j
 				LEFT JOIN LATERAL (
