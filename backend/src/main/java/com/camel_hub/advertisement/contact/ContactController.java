@@ -74,6 +74,18 @@ public class ContactController {
 				id, request.command(), user(principal), RequestContextSupport.context(exchange));
 	}
 
+	@PatchMapping("/batch-verification")
+	@PreAuthorize("hasAuthority('contact:verify')")
+	Mono<ContactService.BatchVerificationResult> batchVerify(
+			@Valid @RequestBody ContactDtos.BatchVerificationRequest request,
+			Principal principal,
+			ServerWebExchange exchange
+	) {
+		return service.batchVerify(
+				request.commands(), request.status(), user(principal),
+				RequestContextSupport.context(exchange));
+	}
+
 	private AuthenticatedUser user(Principal principal) {
 		Object candidate = principal instanceof Authentication authentication
 				? authentication.getPrincipal() : principal;

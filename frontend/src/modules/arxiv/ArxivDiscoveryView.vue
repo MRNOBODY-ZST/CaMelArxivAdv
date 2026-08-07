@@ -6,6 +6,7 @@ import DsButton from '@/components/design-skill/DsButton.vue'
 import DsCard from '@/components/design-skill/DsCard.vue'
 import DsEmptyState from '@/components/design-skill/DsEmptyState.vue'
 import DsInput from '@/components/design-skill/DsInput.vue'
+import DsPagination from '@/components/design-skill/DsPagination.vue'
 import DsSkeleton from '@/components/design-skill/DsSkeleton.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { ApiErrorResponse } from '@/modules/auth/auth.types'
@@ -33,6 +34,9 @@ const canImport = computed(() => auth.hasPermission('paper:import'))
 const currentPaperIds = computed(() => result.value?.papers.map((paper) => paper.arxivId) ?? [])
 const allCurrentSelected = computed(() => currentPaperIds.value.length > 0
   && currentPaperIds.value.every((id) => selected.value.includes(id)))
+const previewTotalPages = computed(() => result.value
+  ? Math.max(1, Math.ceil(result.value.officialTotal / result.value.pageSize))
+  : 0)
 
 onMounted(async () => {
   try { taxonomy.value = await arxivApi.taxonomy() }
@@ -40,9 +44,22 @@ onMounted(async () => {
   finally { loading.value = false }
 })
 
-async function preview(): Promise<void> {
-  searching.value = true; error.value = ''; notice.value = ''; selected.value = []
-  try { result.value = await arxivApi.preview({ ...criteria, categoryIds: [...criteria.categoryIds] }) }
+async function previewFirstPage(): Promise<void> {
+  selected.value = []
+  await previewPage(1)
+}
+
+async function previewPage(page: number): Promise<void> {
+  searching.value = true; error.value = ''; notice.value = ''
+  try {
+    const response = await arxivApi.preview({
+      ...criteria,
+      categoryIds: [...criteria.categoryIds],
+      page,
+    })
+    result.value = response
+    criteria.page = response.page
+  }
   catch (reason) { error.value = message(reason) }
   finally { searching.value = false }
 }
@@ -179,7 +196,7 @@ function message(reason: unknown): string {
           class="w-full"
           :busy="searching"
           :disabled="criteria.categoryIds.length === 0 && !criteria.titleKeywords && !criteria.authorKeywords"
-          @click="preview"
+          @click="previewFirstPage"
         >
           <MagnifyingGlassIcon class="size-4" />预览结果
         </DsButton>
@@ -311,6 +328,12 @@ function message(reason: unknown): string {
               </tbody>
             </table>
           </div>
+          <DsPagination
+            v-if="previewTotalPages > 1"
+            :page="result.page"
+            :total-pages="previewTotalPages"
+            @change="previewPage"
+          />
           <div class="flex justify-end">
             <DsButton
               :disabled="!canImport || selected.length === 0"

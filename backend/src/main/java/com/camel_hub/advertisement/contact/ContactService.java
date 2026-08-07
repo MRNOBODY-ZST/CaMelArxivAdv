@@ -11,9 +11,12 @@ import com.camel_hub.advertisement.identity.security.Permission;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.transaction.reactive.TransactionalOperator;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -31,19 +34,22 @@ public class ContactService {
 	private final EmailDisclosurePolicy disclosurePolicy;
 	private final AuditService auditService;
 	private final SensitiveValueHasher hasher;
+	private final TransactionalOperator transactions;
 
 	public ContactService(
 			ContactRepository repository,
 			ContactCrypto crypto,
 			EmailDisclosurePolicy disclosurePolicy,
 			AuditService auditService,
-			SensitiveValueHasher hasher
+			SensitiveValueHasher hasher,
+			TransactionalOperator transactions
 	) {
 		this.repository = repository;
 		this.crypto = crypto;
 		this.disclosurePolicy = disclosurePolicy;
 		this.auditService = auditService;
 		this.hasher = hasher;
+		this.transactions = transactions;
 	}
 
 	public Mono<PageResponse<ContactSummary>> list(
@@ -110,6 +116,39 @@ public class ContactService {
 				.flatMap(before -> audit(user, contactId, "CONTACT_VERIFICATION_UPDATED",
 						Map.of("before", before.verificationStatus(), "after", command.status()), context))
 				.then(get(contactId, false, user, context));
+	}
+
+	public Mono<BatchVerificationResult> batchVerify(
+			List<BatchVerificationItem> items,
+			String status,
+			AuthenticatedUser user,
+			AuthenticationRequestContext context
+	) {
+		require(user, Permission.CONTACT_VERIFY);
+		if (items == null || items.isEmpty() || items.size() > 100) {
+			return Mono.error(new ContactValidationException(
+					"Contact verification batch size must be between 1 and 100"));
+		}
+		if (!Set.of("CONFIRMED", "REJECTED").contains(status)) {
+			return Mono.error(new ContactValidationException("Contact verification status is invalid"));
+		}
+		Set<UUID> contactIds = new HashSet<>();
+		Set<UUID> mappingIds = new HashSet<>();
+		for (BatchVerificationItem item : items) {
+			if (item == null || item.contactId() == null || item.mappingId() == null
+					|| item.expectedVersion() < 0
+					|| !contactIds.add(item.contactId()) || !mappingIds.add(item.mappingId())) {
+				return Mono.error(new ContactValidationException(
+						"Contact verification batch items must be valid and unique"));
+			}
+		}
+		Mono<BatchVerificationResult> work = Flux.fromIterable(items)
+				.concatMap(item -> verify(
+						item.contactId(),
+						new VerificationCommand(item.mappingId(), item.expectedVersion(), status),
+						user, context))
+				.then(Mono.just(new BatchVerificationResult(items.size(), status)));
+		return transactions.transactional(work);
 	}
 
 	private ContactSummary summary(ContactRepository.ContactRow row) {
@@ -261,4 +300,8 @@ public class ContactService {
 	) { }
 
 	public record VerificationCommand(UUID mappingId, long expectedVersion, String status) { }
+
+	public record BatchVerificationItem(UUID contactId, UUID mappingId, long expectedVersion) { }
+
+	public record BatchVerificationResult(int updatedCount, String status) { }
 }

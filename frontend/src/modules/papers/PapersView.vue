@@ -14,6 +14,10 @@ const papers = ref<PaperSummary[]>([]); const loading = ref(true); const error =
 const selectedIds = ref<string[]>([]); const batchLoading = ref(false); const submittedJobId = ref('')
 const query = reactive({ page: 1, pageSize: 20, category: '', title: '', author: '' })
 const canExtract = computed(() => auth.hasPermission('paper:import'))
+const currentPaperIds = computed(() => papers.value.map((paper) => paper.id))
+const allCurrentSelected = computed(() => currentPaperIds.value.length > 0
+  && currentPaperIds.value.every((id) => selectedIds.value.includes(id)))
+const someCurrentSelected = computed(() => currentPaperIds.value.some((id) => selectedIds.value.includes(id)))
 onMounted(load)
 async function load(page = query.page): Promise<void> {
   loading.value = true; error.value = ''
@@ -28,6 +32,19 @@ function toggle(paperId: string, selected: boolean): void {
   selectedIds.value = selected
     ? [...new Set([...selectedIds.value, paperId])].slice(0, 100)
     : selectedIds.value.filter((id) => id !== paperId)
+}
+
+function toggleCurrentPage(selected: boolean): void {
+  const current = new Set(currentPaperIds.value)
+  if (!selected) {
+    selectedIds.value = selectedIds.value.filter((id) => !current.has(id))
+    return
+  }
+  const available = Math.max(0, 100 - selectedIds.value.length)
+  const additions = currentPaperIds.value
+    .filter((id) => !selectedIds.value.includes(id))
+    .slice(0, available)
+  selectedIds.value = [...selectedIds.value, ...additions]
 }
 
 async function batchExtract(): Promise<void> {
@@ -91,12 +108,20 @@ async function batchExtract(): Promise<void> {
       padding="none"
     >
       <div class="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <div class="text-sm text-slate-500">
-          共 {{ total.toLocaleString() }} 篇<span v-if="selectedIds.length"> · 已选 {{ selectedIds.length }} 篇</span>
+        <div class="flex items-center gap-3 text-sm text-slate-500">
+          <input
+            v-if="canExtract"
+            type="checkbox"
+            class="size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500 focus:ring-brand-500"
+            aria-label="选择本页全部论文"
+            :checked="allCurrentSelected"
+            @change="toggleCurrentPage(($event.target as HTMLInputElement).checked)"
+          >
+          <span>共 {{ total.toLocaleString() }} 篇<span v-if="selectedIds.length"> · 已选 {{ selectedIds.length }} / 100 篇</span></span>
         </div>
         <div
           v-if="canExtract"
-          class="flex items-center gap-3"
+          class="flex flex-wrap items-center gap-2"
         >
           <RouterLink
             v-if="submittedJobId"
@@ -105,6 +130,22 @@ async function batchExtract(): Promise<void> {
           >
             任务 {{ submittedJobId }} →
           </RouterLink>
+          <DsButton
+            variant="secondary"
+            size="sm"
+            :disabled="allCurrentSelected || selectedIds.length >= 100"
+            @click="toggleCurrentPage(true)"
+          >
+            全选本页
+          </DsButton>
+          <DsButton
+            variant="ghost"
+            size="sm"
+            :disabled="!someCurrentSelected"
+            @click="toggleCurrentPage(false)"
+          >
+            清空本页
+          </DsButton>
           <DsButton
             size="sm"
             :busy="batchLoading"
@@ -126,7 +167,7 @@ async function batchExtract(): Promise<void> {
               :id="`select-paper-${paper.id}`"
               type="checkbox"
               :checked="selectedIds.includes(paper.id)"
-              class="mt-1 size-4 shrink-0 rounded border-slate-300 text-brand-500 focus:ring-brand-500"
+              class="mt-1 size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500 focus:ring-brand-500"
               :aria-label="`选择论文 ${paper.arxivId}`"
               @change="toggle(paper.id, ($event.target as HTMLInputElement).checked)"
             >

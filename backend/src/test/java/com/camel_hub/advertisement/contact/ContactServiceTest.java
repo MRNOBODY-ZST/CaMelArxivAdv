@@ -11,14 +11,17 @@ import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -26,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ContactServiceTest {
@@ -37,6 +41,7 @@ class ContactServiceTest {
 	private ContactCrypto crypto;
 	private ContactService service;
 	private ContactRepository.ContactRow row;
+	private TransactionalOperator transactions;
 
 	@BeforeEach
 	void setUp() {
@@ -46,6 +51,9 @@ class ContactServiceTest {
 		SensitiveValueHasher hasher = mock(SensitiveValueHasher.class);
 		when(hasher.hash(any())).thenReturn(new byte[] {1});
 		crypto = crypto();
+		transactions = mock(TransactionalOperator.class);
+		when(transactions.transactional(any(Mono.class)))
+				.thenAnswer(invocation -> invocation.getArgument(0));
 		ContactCrypto.EncryptedValue display = crypto.encrypt("alice@university.edu");
 		row = new ContactRepository.ContactRow(
 				contactId, display.ciphertext(), display.nonce(), "university.edu", false,
@@ -54,7 +62,7 @@ class ContactServiceTest {
 				UUID.randomUUID(), "2608.00001", "Source Paper", "Alice Example", "cs.AI",
 				"DIRECT_AUTHOR_EMAIL");
 		service = new ContactService(
-				repository, crypto, new EmailDisclosurePolicy(), audit, hasher);
+				repository, crypto, new EmailDisclosurePolicy(), audit, hasher, transactions);
 	}
 
 	@Test
@@ -104,6 +112,64 @@ class ContactServiceTest {
 
 		assertThat(detail.verificationStatus()).isEqualTo("CONFIRMED");
 		assertThat(detail.email()).isEqualTo("al***@university.edu");
+	}
+
+	@Test
+	void batchVerificationUpdatesEveryItemInsideOneTransaction() {
+		UUID secondContactId = UUID.randomUUID();
+		UUID secondMappingId = UUID.randomUUID();
+		ContactRepository.ContactRow second = contactRow(
+				secondContactId, secondMappingId, 0, "UNVERIFIED", false);
+		ContactRepository.ContactRow firstUpdated = contactRow(
+				contactId, mappingId, 1, "CONFIRMED", true);
+		ContactRepository.ContactRow secondUpdated = contactRow(
+				secondContactId, secondMappingId, 1, "CONFIRMED", true);
+		when(repository.find(contactId)).thenReturn(Mono.just(row), Mono.just(firstUpdated));
+		when(repository.find(secondContactId)).thenReturn(Mono.just(second), Mono.just(secondUpdated));
+		when(repository.evidence(mappingId)).thenReturn(Flux.empty());
+		when(repository.evidence(secondMappingId)).thenReturn(Flux.empty());
+		when(repository.updateVerification(contactId, mappingId, 0, "CONFIRMED", fullUser().id()))
+				.thenReturn(Mono.just(true));
+		when(repository.updateVerification(secondContactId, secondMappingId, 0, "CONFIRMED", fullUser().id()))
+				.thenReturn(Mono.just(true));
+
+		ContactService.BatchVerificationResult result = service.batchVerify(List.of(
+				new ContactService.BatchVerificationItem(contactId, mappingId, 0),
+				new ContactService.BatchVerificationItem(secondContactId, secondMappingId, 0)),
+				"CONFIRMED", fullUser(), context()).block();
+
+		assertThat(result).isEqualTo(new ContactService.BatchVerificationResult(2, "CONFIRMED"));
+		verify(repository).updateVerification(contactId, mappingId, 0, "CONFIRMED", fullUser().id());
+		verify(repository).updateVerification(
+				secondContactId, secondMappingId, 0, "CONFIRMED", fullUser().id());
+		verify(transactions).transactional(any(Mono.class));
+	}
+
+	@Test
+	void batchVerificationRejectsDuplicateContactsBeforeDatabaseAccess() {
+		assertThatThrownBy(() -> service.batchVerify(List.of(
+				new ContactService.BatchVerificationItem(contactId, mappingId, 0),
+				new ContactService.BatchVerificationItem(contactId, UUID.randomUUID(), 0)),
+				"REJECTED", fullUser(), context()).block())
+				.isInstanceOf(ContactValidationException.class)
+				.hasMessageContaining("unique");
+
+		verifyNoInteractions(repository);
+	}
+
+	@Test
+	void batchVerificationRejectsMoreThanOneHundredItems() {
+		List<ContactService.BatchVerificationItem> items = IntStream.rangeClosed(1, 101)
+				.mapToObj(index -> new ContactService.BatchVerificationItem(
+						UUID.randomUUID(), UUID.randomUUID(), index))
+				.toList();
+
+		assertThatThrownBy(() -> service.batchVerify(
+				items, "CONFIRMED", fullUser(), context()).block())
+				.isInstanceOf(ContactValidationException.class)
+				.hasMessageContaining("between 1 and 100");
+
+		verifyNoInteractions(repository);
 	}
 
 	@Test
@@ -165,5 +231,20 @@ class ContactServiceTest {
 
 	private String key(String value) {
 		return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+	}
+
+	private ContactRepository.ContactRow contactRow(
+			UUID id,
+			UUID selectedMappingId,
+			long version,
+			String verificationStatus,
+			boolean humanVerified
+	) {
+		return new ContactRepository.ContactRow(
+				id, row.displayCiphertext(), row.displayNonce(), row.domain(), row.exampleAddress(),
+				row.suppressionStatus(), row.lastExtractedAt(), selectedMappingId, version,
+				row.confidence(), row.corresponding(), verificationStatus, humanVerified,
+				row.paperId(), row.arxivId(), row.paperTitle(), row.authorName(), row.categoryId(),
+				row.ruleName());
 	}
 }

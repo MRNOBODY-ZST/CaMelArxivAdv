@@ -83,6 +83,38 @@ describe('Phase 3 arXiv workspace', () => {
     expect(arxivApi.importSelected).toHaveBeenCalledWith(['2608.00001', '2608.00002'])
   })
 
+  it('navigates official preview pages without losing prior selections', async () => {
+    vi.mocked(arxivApi.preview).mockImplementation(async (request) => ({
+      queryHash: `page-${request.page}`,
+      criteria: { ...criteria(), page: request.page },
+      officialTotal: 30,
+      totalIsEstimate: false,
+      page: request.page,
+      pageSize: 20,
+      cacheStatus: 'MISS',
+      filters: [],
+      papers: request.page === 1
+        ? [previewPaper('2608.00001', 'First Page Paper')]
+        : [previewPaper('2608.00021', 'Second Page Paper')],
+    }))
+    const wrapper = mountWithSession(ArxivDiscoveryView)
+    await flushPromises()
+    await wrapper.get('#title-keywords').setValue('agents')
+    await button(wrapper, '预览结果').trigger('click')
+    await flushPromises()
+    await wrapper.get('input[aria-label="选择 First Page Paper"]').setValue(true)
+
+    await button(wrapper, '下一页').trigger('click')
+    await flushPromises()
+
+    expect(arxivApi.preview).toHaveBeenLastCalledWith(expect.objectContaining({
+      titleKeywords: 'agents', page: 2, pageSize: 20,
+    }))
+    expect(wrapper.text()).toContain('Second Page Paper')
+    expect(wrapper.text()).toContain('导入已选 1 篇')
+    expect(wrapper.text()).toContain('第 2 / 2 页')
+  })
+
   it('keeps wrapped category checkboxes at a fixed size', async () => {
     const wrapper = mount(CategoryTree, {
       props: {

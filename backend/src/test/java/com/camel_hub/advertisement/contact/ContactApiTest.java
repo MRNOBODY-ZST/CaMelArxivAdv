@@ -59,6 +59,55 @@ class ContactApiTest {
 	}
 
 	@Test
+	void exposesValidatedBatchVerification() {
+		UUID contactOne = UUID.randomUUID();
+		UUID contactTwo = UUID.randomUUID();
+		when(service.batchVerify(any(), eq("CONFIRMED"), any(), any()))
+				.thenReturn(Mono.just(new ContactService.BatchVerificationResult(2, "CONFIRMED")));
+
+		client.patch().uri("/api/v1/contacts/batch-verification")
+				.bodyValue(java.util.Map.of(
+						"status", "CONFIRMED",
+						"items", List.of(
+								java.util.Map.of("contactId", contactOne, "mappingId", UUID.randomUUID(),
+										"expectedVersion", 0),
+								java.util.Map.of("contactId", contactTwo, "mappingId", UUID.randomUUID(),
+										"expectedVersion", 3))))
+				.exchange().expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$.updatedCount").isEqualTo(2)
+				.jsonPath("$.status").isEqualTo("CONFIRMED");
+	}
+
+	@Test
+	void rejectsEmptyBatchVerification() {
+		client.patch().uri("/api/v1/contacts/batch-verification")
+				.bodyValue(java.util.Map.of("status", "REJECTED", "items", List.of()))
+				.exchange().expectStatus().isBadRequest();
+	}
+
+	@Test
+	void mapsBatchVerificationServiceValidationToBadRequest() {
+		when(service.batchVerify(any(), eq("CONFIRMED"), any(), any()))
+				.thenReturn(Mono.error(new ContactValidationException(
+						"Contact verification batch items must be valid and unique")));
+
+		client.patch().uri("/api/v1/contacts/batch-verification")
+				.bodyValue(java.util.Map.of(
+						"status", "CONFIRMED",
+						"items", List.of(java.util.Map.of(
+								"contactId", UUID.randomUUID(),
+								"mappingId", UUID.randomUUID(),
+								"expectedVersion", 0))))
+				.exchange()
+				.expectStatus().isBadRequest()
+				.expectBody()
+				.jsonPath("$.type").isEqualTo("invalid_contact_verification")
+				.jsonPath("$.detail").isEqualTo(
+						"Contact verification batch items must be valid and unique");
+	}
+
+	@Test
 	void appliesFineGrainedContactPermissions() {
 		Arrays.stream(ContactController.class.getDeclaredMethods())
 				.filter(method -> method.getAnnotation(
@@ -67,7 +116,7 @@ class ContactApiTest {
 						|| method.getAnnotation(org.springframework.web.bind.annotation.PatchMapping.class) != null)
 				.forEach(method -> {
 			PreAuthorize permission = method.getAnnotation(PreAuthorize.class);
-			if (method.getName().equals("verify")) {
+			if (Set.of("verify", "batchVerify").contains(method.getName())) {
 				assertThat(permission.value()).isEqualTo("hasAuthority('contact:verify')");
 			}
 			else {

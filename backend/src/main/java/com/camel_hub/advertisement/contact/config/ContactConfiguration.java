@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 @Profile("api")
@@ -40,8 +41,10 @@ public class ContactConfiguration {
 			ContactCrypto crypto,
 			EmailDisclosurePolicy disclosurePolicy,
 			AuditService auditService,
-			SensitiveValueHasher hasher
+			SensitiveValueHasher hasher,
+			TransactionalOperator transactions
 	) {
-		return new ContactService(repository, crypto, disclosurePolicy, auditService, hasher);
+		return new ContactService(
+				repository, crypto, disclosurePolicy, auditService, hasher, transactions);
 	}
 }

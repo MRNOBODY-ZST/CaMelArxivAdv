@@ -17,6 +17,7 @@ import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import com.camel_hub.advertisement.contact.ContactConflictException;
 import com.camel_hub.advertisement.contact.ContactNotFoundException;
+import com.camel_hub.advertisement.contact.ContactValidationException;
 import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
 import com.camel_hub.advertisement.email.smtp.SmtpNotFoundException;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
@@ -262,6 +263,14 @@ public class GlobalExceptionHandler {
 	) {
 		return response(exchange, HttpStatus.CONFLICT, "contact_conflict",
 				"Contact conflict", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(ContactValidationException.class)
+	ResponseEntity<ApiError> handleContactValidation(
+			ContactValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_contact_verification",
+				"Contact verification rejected", exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(JobNotFoundException.class)

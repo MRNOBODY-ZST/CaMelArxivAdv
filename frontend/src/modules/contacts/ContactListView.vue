@@ -15,8 +15,10 @@ import { contactsApi, type ContactDetail, type ContactSummary } from './contacts
 
 const auth = useAuthStore()
 const contacts = ref<ContactSummary[]>([])
+const selectedIds = ref<string[]>([])
 const selected = ref<ContactDetail>()
 const loading = ref(true); const detailLoading = ref(false); const error = ref(''); const total = ref(0); const totalPages = ref(0)
+const batchLoading = ref(false); const notice = ref('')
 const query = reactive({ page: 1, pageSize: 20, domain: '', confidence: '', verificationStatus: '' })
 const confidenceOptions = [
   { label: '全部置信度', value: '' }, { label: '高', value: 'HIGH' },
@@ -28,11 +30,16 @@ const verificationOptions = [
 ]
 const canReadFull = computed(() => auth.hasPermission('contact:read_full'))
 const canVerify = computed(() => auth.hasPermission('contact:verify'))
+const currentContactIds = computed(() => contacts.value.map((contact) => contact.id))
+const allCurrentSelected = computed(() => currentContactIds.value.length > 0
+  && currentContactIds.value.every((id) => selectedIds.value.includes(id)))
+const someCurrentSelected = computed(() => currentContactIds.value.some((id) => selectedIds.value.includes(id)))
+const selectedContacts = computed(() => contacts.value.filter((contact) => selectedIds.value.includes(contact.id)))
 
 onMounted(load)
 
 async function load(page = query.page): Promise<void> {
-  loading.value = true; error.value = ''
+  loading.value = true; error.value = ''; selectedIds.value = []
   const request: Parameters<typeof contactsApi.list>[0] = { page, pageSize: query.pageSize }
   if (query.domain) request.domain = query.domain
   if (query.confidence) request.confidence = query.confidence
@@ -41,6 +48,39 @@ async function load(page = query.page): Promise<void> {
     const data = await contactsApi.list(request)
     contacts.value = data.items; query.page = data.page; total.value = data.total; totalPages.value = data.totalPages
   } catch { error.value = '联系人加载失败' } finally { loading.value = false }
+}
+
+function toggle(contactId: string, checked: boolean): void {
+  selectedIds.value = checked
+    ? [...new Set([...selectedIds.value, contactId])]
+    : selectedIds.value.filter((id) => id !== contactId)
+}
+
+function toggleCurrentPage(checked: boolean): void {
+  const current = new Set(currentContactIds.value)
+  selectedIds.value = checked
+    ? [...new Set([...selectedIds.value, ...current])]
+    : selectedIds.value.filter((id) => !current.has(id))
+}
+
+async function verifyBatch(status: 'CONFIRMED' | 'REJECTED'): Promise<void> {
+  if (!selectedContacts.value.length) return
+  batchLoading.value = true; error.value = ''; notice.value = ''
+  const items = selectedContacts.value.map((contact) => ({
+    contactId: contact.id,
+    mappingId: contact.mappingId,
+    expectedVersion: contact.version,
+  }))
+  try {
+    const response = await contactsApi.batchVerify(items, status)
+    await load(query.page)
+    notice.value = `已批量标记 ${response.updatedCount} 个联系人为${status === 'CONFIRMED' ? '有效' : '无效'}`
+  } catch {
+    await load(query.page)
+    error.value = '批量验证失败，已刷新联系人版本，请重新选择后重试'
+  } finally {
+    batchLoading.value = false
+  }
 }
 
 async function inspect(contact: ContactSummary, full: boolean): Promise<void> {
@@ -120,18 +160,76 @@ function confidenceTone(value: string): 'positive' | 'warning' | 'danger' | 'neu
     >
       {{ error }}
     </p>
+    <p
+      v-if="notice"
+      role="status"
+      class="rounded-md bg-emerald-50 p-3 text-sm text-emerald-700"
+    >
+      {{ notice }}
+    </p>
 
     <DsCard
       v-if="contacts.length"
       padding="none"
     >
-      <div class="flex items-center justify-between border-b border-slate-200 px-5 py-4 text-sm text-slate-500">
-        <span>共 {{ total.toLocaleString() }} 个唯一联系人</span>
+      <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 text-sm text-slate-500">
+        <span>共 {{ total.toLocaleString() }} 个唯一联系人<span v-if="selectedIds.length"> · 已选 {{ selectedIds.length }} 个</span></span>
         <span class="inline-flex items-center gap-1.5"><ShieldCheckIcon class="size-4 text-emerald-600" />AES-GCM 加密存储</span>
+      </div>
+      <div
+        v-if="canVerify"
+        class="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50/70 px-5 py-3"
+      >
+        <DsButton
+          variant="secondary"
+          size="sm"
+          :disabled="allCurrentSelected"
+          @click="toggleCurrentPage(true)"
+        >
+          全选本页
+        </DsButton>
+        <DsButton
+          variant="ghost"
+          size="sm"
+          :disabled="!someCurrentSelected"
+          @click="toggleCurrentPage(false)"
+        >
+          清空本页
+        </DsButton>
+        <span class="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />
+        <DsButton
+          size="sm"
+          :busy="batchLoading"
+          :disabled="selectedContacts.length === 0"
+          @click="verifyBatch('CONFIRMED')"
+        >
+          批量标记有效
+        </DsButton>
+        <DsButton
+          variant="danger"
+          size="sm"
+          :busy="batchLoading"
+          :disabled="selectedContacts.length === 0"
+          @click="verifyBatch('REJECTED')"
+        >
+          批量标记无效
+        </DsButton>
       </div>
       <DsTable label="联系人列表">
         <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
           <tr>
+            <th
+              v-if="canVerify"
+              class="w-12 px-5 py-3"
+            >
+              <input
+                type="checkbox"
+                class="size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500"
+                aria-label="选择本页全部联系人"
+                :checked="allCurrentSelected"
+                @change="toggleCurrentPage(($event.target as HTMLInputElement).checked)"
+              >
+            </th>
             <th class="px-5 py-3">
               邮箱 / 作者
             </th><th class="px-5 py-3">
@@ -151,6 +249,18 @@ function confidenceTone(value: string): 'positive' | 'warning' | 'danger' | 'neu
             :key="contact.id"
             class="align-top"
           >
+            <td
+              v-if="canVerify"
+              class="px-5 py-4"
+            >
+              <input
+                type="checkbox"
+                class="size-4 min-h-4 min-w-4 shrink-0 rounded border-slate-300 text-brand-500"
+                :aria-label="`选择联系人 ${contact.email}`"
+                :checked="selectedIds.includes(contact.id)"
+                @change="toggle(contact.id, ($event.target as HTMLInputElement).checked)"
+              >
+            </td>
             <td class="px-5 py-4">
               <p class="font-mono text-sm font-medium text-slate-900">
                 {{ contact.email }}

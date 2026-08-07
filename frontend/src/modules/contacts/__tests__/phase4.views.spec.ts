@@ -11,7 +11,7 @@ import PapersView from '@/modules/papers/PapersView.vue'
 import { papersApi } from '@/modules/papers/papers.api'
 
 vi.mock('@/modules/contacts/contacts.api', () => ({
-  contactsApi: { list: vi.fn(), get: vi.fn(), verify: vi.fn() },
+  contactsApi: { list: vi.fn(), get: vi.fn(), verify: vi.fn(), batchVerify: vi.fn() },
 }))
 vi.mock('@/modules/papers/papers.api', () => ({
 	  papersApi: { list: vi.fn(), get: vi.fn(), extract: vi.fn(), batchExtract: vi.fn() },
@@ -32,6 +32,7 @@ describe('Phase 4 source extraction workspace', () => {
     vi.mocked(contactsApi.verify).mockResolvedValue({
       ...contact(), verificationStatus: 'CONFIRMED', humanVerified: true, version: 1, evidence: [],
     })
+    vi.mocked(contactsApi.batchVerify).mockResolvedValue({ updatedCount: 2, status: 'CONFIRMED' })
     vi.mocked(papersApi.extract).mockResolvedValue({ jobId: 'job-source', status: 'PENDING' })
 		vi.mocked(papersApi.batchExtract).mockResolvedValue({ jobId: 'job-batch', status: 'PENDING' })
 		vi.mocked(papersApi.list).mockResolvedValue({
@@ -64,6 +65,36 @@ describe('Phase 4 source extraction workspace', () => {
     })
   })
 
+  it('submits confirmed and rejected contact batches then refreshes visible versions', async () => {
+    vi.mocked(contactsApi.list).mockResolvedValue({
+      items: [contact(), contact('contact-2', 'mapping-2', 3)],
+      page: 1, pageSize: 20, total: 2, totalPages: 1,
+    })
+    const wrapper = await mountView(ContactListView, '/contacts')
+
+    await click(wrapper, '全选本页')
+    await click(wrapper, '批量标记有效')
+    await flushPromises()
+
+    expect(contactsApi.batchVerify).toHaveBeenLastCalledWith([
+      { contactId: 'contact-1', mappingId: 'mapping-1', expectedVersion: 0 },
+      { contactId: 'contact-2', mappingId: 'mapping-2', expectedVersion: 3 },
+    ], 'CONFIRMED')
+    expect(wrapper.text()).toContain('已批量标记 2 个联系人为有效')
+    expect(wrapper.text()).not.toContain('已选 2 个')
+
+    await click(wrapper, '全选本页')
+    await click(wrapper, '批量标记无效')
+    await flushPromises()
+
+    expect(contactsApi.batchVerify).toHaveBeenLastCalledWith([
+      { contactId: 'contact-1', mappingId: 'mapping-1', expectedVersion: 0 },
+      { contactId: 'contact-2', mappingId: 'mapping-2', expectedVersion: 3 },
+    ], 'REJECTED')
+    expect(wrapper.text()).toContain('已批量标记 2 个联系人为无效')
+    expect(contactsApi.list).toHaveBeenCalledTimes(3)
+  })
+
   it('shows all paper detail tabs and starts an asynchronous source job', async () => {
     const wrapper = await mountView(PaperDetailView, '/papers/paper-1')
     expect(wrapper.text()).toContain('开始 Source 解析')
@@ -88,6 +119,31 @@ describe('Phase 4 source extraction workspace', () => {
 	    expect(papersApi.batchExtract).toHaveBeenCalledWith(['paper-1'])
 	    expect(wrapper.text()).toContain('job-batch')
 	  })
+
+  it('selects and clears every visible paper before one batch extraction job', async () => {
+    vi.mocked(papersApi.list).mockResolvedValue({
+      items: [paperSummary('paper-1', '2608.00001'), paperSummary('paper-2', '2608.00002')],
+      page: 1, pageSize: 20, total: 2, totalPages: 1,
+    })
+    const wrapper = await mountView(PapersView, '/papers')
+
+    await click(wrapper, '全选本页')
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(3)
+    expect(wrapper.findAll('input[type="checkbox"]').every((item) => (
+      item.element as HTMLInputElement
+    ).checked)).toBe(true)
+
+    await click(wrapper, '清空本页')
+    expect(wrapper.findAll('input[type="checkbox"]').every((item) => !(
+      item.element as HTMLInputElement
+    ).checked)).toBe(true)
+
+    await click(wrapper, '全选本页')
+    await click(wrapper, '批量解析')
+    await flushPromises()
+
+    expect(papersApi.batchExtract).toHaveBeenCalledWith(['paper-1', 'paper-2'])
+  })
 })
 
 async function mountView(component: Parameters<typeof mount>[0], path: string): Promise<VueWrapper> {
@@ -131,10 +187,10 @@ async function click(wrapper: VueWrapper, label: string): Promise<void> {
   await button.trigger('click')
 }
 
-function contact() {
+function contact(id = 'contact-1', mappingId = 'mapping-1', version = 0) {
   return {
-    id: 'contact-1', email: 'al***@university.edu', domain: 'university.edu',
-    exampleAddress: false, suppressionStatus: 'ACTIVE', mappingId: 'mapping-1', version: 0,
+    id, email: 'al***@university.edu', domain: 'university.edu',
+    exampleAddress: false, suppressionStatus: 'ACTIVE', mappingId, version,
     confidence: 'HIGH', corresponding: true, verificationStatus: 'UNVERIFIED',
     humanVerified: false, paperId: 'paper-1', arxivId: '2608.00001', paperTitle: 'Source Paper',
     authorName: 'Alice Example', categoryId: 'cs.AI', ruleName: 'DIRECT_AUTHOR_EMAIL',
@@ -160,5 +216,14 @@ function paper() {
       startedAt: '2026-08-06T01:00:00Z', completedAt: '2026-08-06T01:00:01Z',
       errorCode: null, errorSummary: null,
     }],
+  }
+}
+
+function paperSummary(id: string, arxivId: string) {
+  return {
+    id, arxivId, title: `Source Paper ${arxivId}`, primaryCategory: 'cs.AI',
+    authors: ['Alice Example'], submittedAt: '2026-08-01T00:00:00Z',
+    updatedAt: '2026-08-06T00:00:00Z', doi: null, journalReference: null,
+    sourceStatus: 'UNKNOWN', versionCount: 1,
   }
 }

@@ -25,6 +25,14 @@ export interface VerificationCommand {
   mappingId: string; expectedVersion: number; status: 'CONFIRMED' | 'REJECTED'
 }
 
+export interface BatchVerificationItem {
+  contactId: string; mappingId: string; expectedVersion: number
+}
+
+export interface BatchVerificationResponse {
+  updatedCount: number; status: 'CONFIRMED' | 'REJECTED'
+}
+
 export const contactsApi = {
   async list(query: ContactQuery): Promise<PageResponse<ContactSummary>> {
     return (await apiClient.get<PageResponse<ContactSummary>>('/contacts', { params: query })).data
@@ -34,5 +42,13 @@ export const contactsApi = {
   },
   async verify(id: string, command: VerificationCommand): Promise<ContactDetail> {
     return (await apiClient.patch<ContactDetail>(`/contacts/${id}/verification`, command)).data
+  },
+  async batchVerify(
+    items: BatchVerificationItem[],
+    status: 'CONFIRMED' | 'REJECTED',
+  ): Promise<BatchVerificationResponse> {
+    return (await apiClient.patch<BatchVerificationResponse>('/contacts/batch-verification', {
+      items, status,
+    })).data
   },
 }
