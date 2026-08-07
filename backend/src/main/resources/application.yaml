@@ -89,3 +89,20 @@ app:
     data-protection:
       encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}
       email-hmac-key-base64: ${APP_EMAIL_HMAC_KEY_BASE64:}
+  template:
+    max-content-bytes: ${TEMPLATE_MAX_CONTENT_BYTES:102400}
+    assets:
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ACCESS_KEY:camelminio}
+      secret-key: ${MINIO_SECRET_KEY:change-this-for-local-development}
+      bucket: ${TEMPLATE_ASSET_BUCKET:template-assets}
+      signing-key-base64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:}
+      public-base-url: ${PUBLIC_BASE_URL:http://localhost:8080}
+      max-bytes: ${TEMPLATE_ASSET_MAX_BYTES:5242880}
+  smtp:
+    live-allowed: ${ALLOW_LIVE_SMTP:false}
+    local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}
+    connect-timeout: ${SMTP_CONNECT_TIMEOUT:PT5S}
+    read-timeout: ${SMTP_READ_TIMEOUT:PT10S}
+    write-timeout: ${SMTP_WRITE_TIMEOUT:PT10S}
+    encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}

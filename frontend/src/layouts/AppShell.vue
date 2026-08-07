@@ -33,7 +33,7 @@ import {
   UsersIcon,
   XMarkIcon,
 } from '@heroicons/vue/24/outline'
-import { computed, defineComponent, h, type Component } from 'vue'
+import { computed, defineComponent, h, type Component, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { useFocusReturningDisclosure } from '@/composables/useFocusReturningDisclosure'
@@ -73,7 +73,7 @@ const navigation: readonly NavigationGroup[] = [
     { label: '作者与联系人', href: '/contacts', icon: UsersIcon, permission: 'contact:read_masked' },
   ] },
   { label: '邮件运营', items: [
-    { label: '邮件模板', href: '#templates', icon: DocumentTextIcon, permission: 'template:read' },
+    { label: '邮件模板', href: '/email/templates', icon: DocumentTextIcon, permission: 'template:read' },
     { label: '收件人分组', href: '#segments', icon: FolderIcon, permission: 'campaign:read' },
     { label: '邮件活动', href: '#campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
     { label: '发送记录', href: '#deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
@@ -86,7 +86,7 @@ const navigation: readonly NavigationGroup[] = [
     { label: '链接分析', href: '#link-analytics', icon: LinkIcon, permission: 'analytics:read' },
   ] },
   { label: '系统管理', items: [
-    { label: 'SMTP 账户', href: '#smtp', icon: ServerStackIcon, permission: 'smtp:read' },
+    { label: 'SMTP 账户', href: '/admin/smtp-accounts', icon: ServerStackIcon, permission: 'smtp:read' },
     { label: '用户管理', href: '/admin/users', icon: UserGroupIcon, permission: 'user:read' },
     { label: '角色与权限', href: '/admin/roles', icon: ShieldCheckIcon, permission: 'role:read' },
     { label: '审计日志', href: '/admin/audit', icon: ClipboardDocumentListIcon, permission: 'audit:read' },
@@ -103,6 +103,10 @@ const visibleNavigation = computed(() => navigation
 
 const pageTitle = computed(() => route.meta.pageTitle ?? '数据总览')
 const pageSection = computed(() => route.meta.pageSection ?? '概览')
+
+watch(() => route.fullPath, () => {
+  if (sidebarOpen.value) void closeSidebar()
+})
 
 async function logout(): Promise<void> {
   await auth.logout()

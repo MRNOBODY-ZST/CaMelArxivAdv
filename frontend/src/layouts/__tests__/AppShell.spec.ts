@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { describe, expect, it } from 'vitest'
+import { nextTick } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import AppShell from '@/layouts/AppShell.vue'
@@ -62,6 +63,40 @@ describe('AppShell', () => {
 
     expect(wrapper.get('[data-testid="page-title"]').text()).toBe('用户管理')
     expect(wrapper.get('[data-testid="page-breadcrumb"]').text()).toBe('系统管理 / 用户管理')
+  })
+
+  it('does not steal desktop focus when the closed mobile drawer route changes', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().acceptSession({
+      accessToken: 'memory-token', tokenType: 'Bearer', expiresInSeconds: 600,
+      user: {
+        id: '5d3a9802-375f-42ee-9739-d419299bc4a8', username: 'admin', displayName: 'Administrator',
+        roles: ['SUPER_ADMIN'], permissions: [], mustChangePassword: false,
+      },
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/next', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(AppShell, {
+      attachTo: document.body,
+      slots: { default: '<button id="desktop-focus-target">Keep focus</button>' },
+      global: { plugins: [pinia, router] },
+    })
+    const target = wrapper.get('#desktop-focus-target').element as HTMLButtonElement
+    target.focus()
+
+    await router.push('/next')
+    await nextTick()
+
+    expect(document.activeElement).toBe(target)
+    wrapper.unmount()
   })
 })
 

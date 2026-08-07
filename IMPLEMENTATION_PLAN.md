@@ -41,7 +41,8 @@
 - Phase 3（arXiv 发现与导入）：**已完成，2026-08-06 验收**。
 - Phase 4（Source 解析）：**已完成，2026-08-06 验收**。
 - Phase 5（数据统计）：**已完成，2026-08-06 验收**。
-- Phase 6–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
+- Phase 6（模板与 SMTP）：**已完成，2026-08-07 验收**。
+- Phase 7–9：待按任务清单逐阶段实现，不以数据库占位表代替业务验收。
 
 Phase 1 实际证据：后端 `clean check bootJar` 成功；Testcontainers 从空 PostgreSQL 执行 4 个 Flyway 迁移并建立 50 张表；Python 8 tests、Ruff、MyPy strict 成功；前端 7 tests、ESLint、`vue-tsc`、Vite build 成功；Compose/镜像契约成功；九服务均健康，外部健康 API、Mailpit 和 MinIO Console 可达。浏览器验证桌面 1280×720、移动 390×844 均无横向溢出和 console warning/error，移动抽屉焦点恢复正常。
 
@@ -52,6 +53,8 @@ Phase 3 实际证据：Flyway V6 从空库建立 53 张表和 1 个物化视图�
 Phase 4 实际证据：Flyway V7 后保持 53 张表和 1 个物化视图并增加 Source 幂等/尺寸/清理证明、独立显示 nonce 与映射乐观版本；后端 153 tests/`clean check`/`bootJar`、Python 68 tests/Ruff/MyPy strict（41 files）、前端 30 tests/ESLint/`vue-tsc`/Vite build 全部通过，Compose 九服务与三个非 root 镜像契约通过。真实官方 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 解析论文 `2212.02256`：`TAR_GZIP` 归档 488,729 bytes、展开 913,762 bytes、检查 1 个 TeX 文件，按顺序保留 2 位作者并得到 2 个 `HIGH`/`UNVERIFIED` 明确联系人；数据库验证规范化/显示 nonce 全部不同、HMAC 唯一、两类密文均不含 `@`，Worker 临时根为空且 RestartCount=0。受权 HTTP 验证列表始终脱敏、单条完整披露和披露审计成功、论文提取记录清理确认可见；`mail-worker` 业务 API 为 404。桌面 1280×720 与移动 390×844 的联系人/论文详情均 `scrollWidth=clientWidth`，七个指定标签页可用，控制台零 warning/error；验收 QA 账号及失败试跑的单条 DLQ 消息均已删除，四个 arXiv 队列最终为空。
 
 Phase 5 实际证据：Flyway V8 增加 9 条分析查询索引，V9 在不改写 V8 checksum 的前提下追加顺序修正；独立代码评审后的后端 170 tests/`clean check`/`bootJar`、Worker 68 tests/Ruff/MyPy strict、前端 37 tests/ESLint/`vue-tsc`/Vite build 均通过。真实 PostgreSQL 的 2026-08-01 至 2026-08-06 UTC 队列独立 SQL 得到 `canonical_authors=2, unique_contacts=2, mappings=2`，与 contact API 完全一致；查询计划命中导入日期、错误日期和最新联系人 covering index。受权数据集 CSV 返回 UTF-8/nosniff 附件并把 `dataset=domains` 写入 `ANALYTICS_EXPORT_CREATED`；无 `user:read` 的分析员得到空用户目录，非法数据集为 400，未认证请求为 401。桌面 1440×900 与移动 390×844 验证采集、论文、联系人图表、筛选 URL 同步、加载/空状态和数据新鲜度；移动端 `scrollWidth=clientWidth=375`，联系人页可见文本无完整邮箱，控制台零 warning/error。修复后补充 RouterView 跨页/并发回归、逐图错误、动态 reduced-motion、日期补零、规范作者去重、文档类分子/分母、Primary/全部/Cross-list、空数据新鲜度、顺序查询和 V9 停写维护窗口。Compose 九服务均 healthy、四个应用容器非 root 且 RestartCount=0、四个 arXiv 队列为空；临时 QA 账号和审计记录已删除。
+
+Phase 6 实际证据：Flyway V10 增加模板/SMTP 乐观锁、活动模板名称唯一约束和私有 `template_assets`，V11 追加持久化纯文本自动生成模式；两轮独立复核修正后，后端全量 201 tests 零失败，前端 45 项 Vitest、ESLint、严格类型检查和生产构建通过，Worker 68 tests/Ruff/MyPy strict 通过。真实 API 验证匿名 401、Viewer 403、OpenAPI 58 条路径、危险 HTML/未知变量拒绝、渲染后 Header 边界、不可变版本/复制/恢复、图片 magic/HMAC 签名/归档与引用保护、SMTP 密文随机 nonce/轮换/留空保留/响应不披露、真实 SMTP 禁用时公网主机拒绝。本机 Mailpit 连接及模板测试发送返回 `CONNECTION_SUCCEEDED`/`SMTP_ACCEPTED`；最终 MIME 的 Subject、From、Reply-To、绝对签名图片、HTML 和纯文本均正确，HTML 无脚本/事件/iframe，自动文本保留论文与退订 URL。Microsoft Edge 桌面 1280×720 和移动 390×844 的 Playwright 场景 3/3 通过，覆盖真实 PNG 上传/加载、预览、自动保存、版本、图片深拷贝、归档源模板后副本继续加载、测试发送、地址脱敏、密码哨兵、移动抽屉和无横向溢出；Nginx capability location 关闭 access log，应用/边缘日志无密码、收件人或签名，审计不含敏感值。验收模板、对象、SMTP、Mailpit 邮件、用户和审计记录均已删除，`ALLOW_LIVE_SMTP=false` 保持不变。
 
 ## 阶段验收规则
 

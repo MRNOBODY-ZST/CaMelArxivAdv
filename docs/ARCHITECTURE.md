@@ -41,7 +41,7 @@ flowchart LR
 - arXiv Catalog：分类快照、查询、论文、作者和版本。
 - Extraction：Source 处理、提取运行、联系人映射、证据和置信度。
 - Jobs：任务、任务项、事件、错误、worker 心跳和消息幂等。
-- Messaging：模板、SMTP 账户、Segment、Campaign、Recipient、Delivery。
+- Messaging：已实现安全模板、私有图片和 SMTP 管理/本机测试；Segment、Campaign、Recipient、Delivery 在后续活动阶段启用。
 - Analytics：对有界论文队列执行只读聚合、数据集导出和新鲜度说明；Tracking 在后续阶段提供签名 Token、事件与活动聚合。
 
 模块间通过应用服务和版本化消息交互，不允许跨模块绕过状态机直接修改核心状态。
@@ -73,6 +73,12 @@ Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者
 四类分析响应从同一个 `papers.imported_at` UTC 半开区间队列派生。最新 Source run 按论文去重，最新联系人映射先按论文/联系人去重再应用域名与置信度；作者按 canonical `authors.id` 跨论文去重。日期与任务状态序列补零，发现率类维度保留分子和分母。空队列返回 `freshness.status=NO_DATA` 和空 `dataThrough`，不会把筛选开始日伪装成数据时间。
 
 每个页面的 SQL 依次订阅，限制单请求同时占用的 R2DBC 连接。`analytics:read` 允许聚合和不含完整邮箱的 CSV；用户目录筛选选项还需 `user:read`。CSV `dataset` 使用固定 allowlist，`all` 精确覆盖当前响应的窗口、新鲜度和所有图表数据，并在审计中记录数据集。V8 保持不可变；V9 以追加迁移修正两个索引顺序并设置 5 秒锁等待上限，生产升级必须使用运维文档中的停写维护窗口。
+
+## Phase 6 模板与 SMTP 数据路径
+
+模板写入先解析允许变量、检查 HTML 属性上下文，再通过 jsoup allowlist 净化；数据库只保存净化后的 HTML。每次更新在同一事务推进模板头与乐观锁，并追加不可变版本；复制建立独立模板，恢复也只创建新头。开启自动纯文本时，版本同时持久化该模式，生成器把净化 HTML 转为文本并保留安全链接目标。预览和测试发送都使用同一服务端渲染器，文本变量转义，URL 变量只接受无 user-info 的绝对 HTTP(S)。
+
+图片上传先在 API 边界限制 5 MiB 并验证 PNG/JPEG/GIF/WebP magic，再以随机键写入私有 MinIO bucket，元数据记录 SHA-256。管理读取要求 `template:read`；富文本沙箱和测试 MIME 使用由独立 HMAC 密钥绑定模板/资产 UUID 的应用签名 URL，邮件渲染只把有效签名路径转换到 `PUBLIC_BASE_URL`，Nginx 对该 capability URL 禁止 access log。复制含图模板会读取并核对源对象长度/SHA-256，以副本 UUID 和随机对象键创建独立资产并重写签名 URL；事务失败时补偿清理新对象。归档模板的图片不再提供，任何不可变版本仍引用时也禁止删除。SMTP 密码以 AES-256-GCM 和随机 nonce 入库，API 仅投影 `passwordConfigured`。每次测试建立有界 Jakarta Mail Session；`ALLOW_LIVE_SMTP=false` 时目的地主机策略在连接前强制只允许 Mailpit/本机白名单。模板测试发送生成 UTF-8 multipart/alternative，返回 `SMTP_ACCEPTED` 仅表示 SMTP 接受，不创建 Campaign 或批量收件人路径。
 
 ## 安全设计
 

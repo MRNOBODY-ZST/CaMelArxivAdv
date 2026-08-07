@@ -1,6 +1,6 @@
 # 数据模型与 ERD
 
-Flyway 从空库按九个不可变迁移建立 53 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+Flyway 从空库按十一个不可变迁移建立 54 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
 
 ## 领域关系概览
 
@@ -30,6 +30,7 @@ erDiagram
     JOBS ||--o{ JOBS : retry_lineage
 
     EMAIL_TEMPLATES ||--o{ EMAIL_TEMPLATE_VERSIONS : versions
+    EMAIL_TEMPLATES ||--o{ TEMPLATE_ASSETS : owns
     SEGMENTS ||--o{ SEGMENT_RULES : contains
     CAMPAIGNS ||--o{ CAMPAIGN_RECIPIENTS : snapshots
     CAMPAIGNS ||--o{ CAMPAIGN_LINKS : rewrites
@@ -51,6 +52,8 @@ erDiagram
 | `V7__source_extraction_hardening.sql` | Source 运行幂等/尺寸/清理证明、联系人显示 nonce、映射乐观版本 | message 与 Job/Paper 唯一；清理时间一致性；联系人域/最新映射查询；映射版本非负 |
 | `V8__analytics_query_paths.sql` | Phase 5 有界事实聚合查询路径 | 导入日期、分类关系、最新 run/mapping、耗时、规则、Job Actor/日期和错误日期索引 |
 | `V9__correct_analytics_index_order.sql` | Phase 5 追加式索引修正 | 保持 V8 checksum；调整 Job/错误日期前导列；5 秒锁等待失败保护 |
+| `V10__template_smtp_administration.sql` | Phase 6 模板/SMTP 管理与私有图片 | 模板/SMTP 乐观锁；未删除模板名称唯一；图片对象键/大小/类型约束和读取索引 |
+| `V11__persist_template_text_generation_mode.sql` | Phase 6 文本替代一致性 | 每个不可变模板版本持久化 `auto_generate_text`，保证重开、复制和恢复不丢失模式 |
 
 ## 数据语义
 
@@ -65,6 +68,8 @@ erDiagram
 - 分析不新增个人数据副本：最新映射在查询时按 `paper_id,contact_id` 选择，作者通过 `paper_authors.author_id` 去重，完整邮箱不解密。V4 聚合表保留给后续 Campaign/Tracking 刷新任务。
 - Source terminal 只有在 Job 的所有 `job_items` 已原子持久化结果且计数一致时才允许成功；失败消息不会留下半套联系人、提取运行或 `processed_messages`。
 - `campaign_recipients` 是活动获批时的不可变收件人快照，不从实时 Contact 关系直接发送。
+- `email_template_versions` 保存净化 HTML、纯文本、验证摘要和自动文本模式；更新与恢复只追加版本。`template_assets` 只保存随机 MinIO 对象键、magic 校验后的媒体类型、尺寸和 SHA-256，实际对象保持私有。
+- `smtp_accounts` 的密码只保存 AES-GCM 密文和随机 nonce；乐观锁保护留空保留/显式轮换，API 不投影秘密列。
 - `suppression_entries` 和 `unsubscribe_records` 在任何发送尝试前检查。
 - `tracking_events` 保存受保留策略控制的原始事件；仪表盘使用聚合表。
 

@@ -143,6 +143,37 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 机器提取的联系人默认 `UNVERIFIED`。API 不支持批量完整邮箱披露；列表、Job 事件和错误体不会返回完整地址。
 
+### 邮件模板、私有图片与 SMTP
+
+模板读取需要 `template:read`，修改需要 `template:manage`；SMTP 读取/修改分别需要 `smtp:read`/`smtp:manage`。模板测试发送同时要求 `template:manage` 与 `smtp:manage`。
+
+| 方法与路径 | 说明 |
+|---|---|
+| `GET /api/v1/templates` | 分页列出未归档模板及当前不可变版本 |
+| `GET /api/v1/templates/{id}` | 读取当前模板、验证结果、自动文本模式和乐观锁版本 |
+| `POST /api/v1/templates` | 净化并创建模板及版本 1 |
+| `PUT /api/v1/templates/{id}` | 使用 `expectedLockVersion` 创建新的头版本；不覆盖历史 |
+| `POST /api/v1/templates/preview` | 用显式样例值执行服务端净化、上下文校验和确定性预览 |
+| `GET /api/v1/templates/{id}/versions` | 按新到旧读取不可变版本 |
+| `POST /api/v1/templates/{id}/versions/{version}/restore` | 将历史内容恢复为新的最新版本 |
+| `POST /api/v1/templates/{id}/copy` | 复制为独立草稿 |
+| `DELETE /api/v1/templates/{id}?expectedLockVersion=...` | 未被活动引用时软归档 |
+| `POST /api/v1/templates/{id}/test-send` | 通过指定 SMTP 账户向一个显式测试地址发送 multipart/alternative；只返回 `SMTP_ACCEPTED` |
+| `GET/POST /api/v1/templates/{templateId}/assets` | 列出或上传私有 PNG/JPEG/GIF/WebP；最大 5 MiB，并校验 magic signature |
+| `GET /api/v1/templates/{templateId}/assets/{assetId}/content` | 经模板读取权限授权后返回私有对象内容 |
+| `GET /api/v1/template-assets/{templateId}/{assetId}/content?signature=...` | 校验绑定模板/资产 UUID 的 HMAC 后返回图片；供编辑器沙箱和内部测试 MIME 使用 |
+| `DELETE /api/v1/templates/{templateId}/assets/{assetId}` | 仅当所有不可变版本均未引用时删除对象和元数据 |
+| `GET/POST /api/v1/smtp-accounts` | 分页读取或创建账户；响应只有 `passwordConfigured`，不返回密码/密文/nonce |
+| `GET/PUT/DELETE /api/v1/smtp-accounts/{id}` | 读取、乐观更新或删除未被活动引用的账户；更新密码为 `null` 表示保留 |
+| `POST /api/v1/smtp-accounts/{id}/test-connection` | 验证握手并返回 `CONNECTION_SUCCEEDED` 或稳定错误类别 |
+| `POST /api/v1/smtp-accounts/{id}/test-email` | 发送一封内部诊断邮件并返回 `SMTP_ACCEPTED` |
+
+模板仅允许 `author_name`、`first_name`、`paper_title`、`arxiv_id`、`primary_category`、`paper_url`、`organization` 和 `unsubscribe_url`。文本变量按文本转义；HTML 属性只允许完整的 URL 变量，且渲染值必须是无 user-info 的绝对 HTTP(S) URL。脚本、事件处理器、iframe、`javascript:`、危险 data URL、未知/畸形变量会被移除或拒绝。开启 `autoGenerateText` 时，状态随模板版本持久化，纯文本会从净化 HTML 重建并保留安全链接目标。
+
+资产签名 URL 只授权读取一张仍属于未归档模板的图片，不授予模板 API 权限。签名使用独立运行时密钥且不会包含 MinIO 对象键，边缘代理不会把带签名的查询串写入 access log；测试邮件渲染时会把有效的相对签名路径转换为 `PUBLIC_BASE_URL` 下的绝对 URL。复制模板会深拷贝被引用的图片并为副本重签，源模板归档后副本不受影响。模板主题和发件人名称会在变量替换后再次校验最终长度与控制字符，避免样例值绕过 Header 边界。
+
+`ALLOW_LIVE_SMTP=false` 时服务端只允许配置的 Mailpit/本机白名单目标，即使数据库账户标记为启用也不能访问公网 SMTP。`PLAIN_LOCAL_ONLY` 只用于该白名单；真实目标必须使用要求证书/主机名校验的 TLS 模式。
+
 ### 数据统计
 
 所有分析端点需要 `analytics:read`，共享 `from`、`to`、`categoryId`、`relation`、`jobId`、`userId`、`domain` 和 `confidence` 查询参数。`from`/`to` 是包含首尾两天的 UTC `papers.imported_at` 日期队列，默认 30 天、最大 10 年。筛选接口中的用户目录仅对同时拥有 `user:read` 的调用者返回；其他分析用户收到空 `users` 数组。

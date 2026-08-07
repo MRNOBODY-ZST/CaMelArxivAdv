@@ -1,6 +1,6 @@
 # Phase 6 Templates and SMTP Implementation Plan
 
-**Status:** In progress.
+**Status:** Completed and accepted on 2026-08-07.
 
 **Goal:** Deliver a production-shaped, permission-protected email-template workflow and SMTP-account administration slice, ending with a correctly rendered, auditable test email in Mailpit while keeping real SMTP disabled by default. Campaign recipient selection and bulk delivery remain Phase 7.
 
@@ -27,7 +27,7 @@
 
 ## Task 2: Complete schema and configuration
 
-- Add Flyway V9 for template optimistic versions/soft-delete uniqueness, SMTP optimistic version and test metadata, and bounded template-asset metadata/indexes without modifying V3.
+- Add forward-only Flyway migrations for template optimistic versions/soft-delete uniqueness, SMTP optimistic version and test metadata, bounded template-asset metadata/indexes, and persisted text-generation mode without modifying V3 or V8/V9.
 - Add typed template/SMTP/asset configuration with startup validation for public URL, object limits, Mailpit host allowlist, live-SMTP switch, timeouts, and independent secret-encryption context.
 - Wire a private MinIO bucket and non-public signed/authorized asset access; accept only bounded PNG/JPEG/GIF/WebP after signature/content validation and randomized object keys.
 
@@ -67,3 +67,7 @@
 - Update API, operations, security/privacy, architecture/ERD, README, implementation plan, tasks, and DesignSkill mapping with observed evidence.
 
 **Final checkpoint:** Phase 6 is complete only when a real Mailpit message matches the deterministic preview in subject, sender, Reply-To, rendered variables, sanitized HTML, and text body; secrets remain encrypted and undisclosed; real SMTP remains disabled; and every quality gate passes.
+
+## Acceptance record
+
+Accepted after two independent review rounds with V10/V11, 201 backend tests, 45 frontend tests, 68 worker tests, all static/build gates, real MinIO and Mailpit API checks, and three self-provisioning Microsoft Edge Playwright scenarios. The review fixes added maintained rich-image nodes, HMAC-signed/absolute asset URLs, immutable-reference and archive guards, rendered-header bounds, masked SMTP cards, route-safe focus, copy-route rebinding, signed-URL access-log suppression, and transactional image deep-copy/re-signing. The Edge scenario archived the source template and still loaded the copied image. The final multipart message preserved rendered paper/unsubscribe URLs and the absolute signed image URL while containing no executable HTML. Anonymous/Viewer boundaries were 401/403, SMTP plaintext was absent from storage/logs/audits, public SMTP was blocked, and all QA artifacts were removed after verification.

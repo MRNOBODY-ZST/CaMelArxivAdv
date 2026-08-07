@@ -54,6 +54,10 @@ class FlywayMigrationTest {
 				"paper_imports",
 				"contacts",
 				"jobs",
+				"smtp_accounts",
+				"email_templates",
+				"email_template_versions",
+				"template_assets",
 				"campaigns",
 				"tracking_events",
 				"audit_logs");
@@ -62,6 +66,8 @@ class FlywayMigrationTest {
 				"uk_campaign_recipient",
 				"uk_jobs_idempotency_key",
 				"uk_contacts_email_hmac",
+				"uk_email_template_version",
+				"uk_template_assets_object_key",
 				"uk_tracking_token");
 		assertThat(flyway.migrate().migrationsExecuted).isZero();
 		assertThat(canInsertGlobalAggregateRows()).isTrue();
@@ -110,7 +116,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(3);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);

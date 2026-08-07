@@ -11,6 +11,7 @@ export JWT_SIGNING_KEY_BASE64=${JWT_SIGNING_KEY_BASE64:-MDEyMzQ1Njc4OWFiY2RlZjAx
 export AUTH_FINGERPRINT_HMAC_KEY_BASE64=${AUTH_FINGERPRINT_HMAC_KEY_BASE64:-YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=}
 export APP_ENCRYPTION_KEY_BASE64=${APP_ENCRYPTION_KEY_BASE64:-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU=}
 export APP_EMAIL_HMAC_KEY_BASE64=${APP_EMAIL_HMAC_KEY_BASE64:-emFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg=}
+export TEMPLATE_ASSET_SIGNING_KEY_BASE64=${TEMPLATE_ASSET_SIGNING_KEY_BASE64:-c2lnbmVkYXNzZXRzMDEyMzQ1Njc4OWFiY2RlZjAxMjM=}
 
 if [[ ! -f "$compose_file" ]]; then
   echo "Missing root docker-compose.yml" >&2
@@ -45,6 +46,16 @@ if [[ $(jq -r '.services["backend-api"].environment.ALLOW_LIVE_SMTP' <<<"$compos
   exit 1
 fi
 
+if [[ $(jq -r '.services["backend-api"].environment.TEMPLATE_ASSET_BUCKET' <<<"$compose_json") != "template-assets" ]]; then
+  echo "backend-api must use the dedicated private template asset bucket" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.SMTP_LOCAL_ALLOWED_HOSTS' <<<"$compose_json") != *"mailpit"* ]]; then
+  echo "backend-api local SMTP allowlist must include Mailpit" >&2
+  exit 1
+fi
+
 for backend_service in backend-api mail-worker; do
   if [[ $(jq -r --arg service "$backend_service" '.services[$service].environment.AUTH_COOKIE_SECURE' <<<"$compose_json") != "true" ]]; then
     echo "$backend_service must require secure authentication cookies in the production baseline" >&2
@@ -60,6 +71,10 @@ for backend_service in backend-api mail-worker; do
   fi
   if [[ -z $(jq -r --arg service "$backend_service" '.services[$service].environment.APP_EMAIL_HMAC_KEY_BASE64' <<<"$compose_json") ]]; then
     echo "$backend_service must receive contact HMAC key material" >&2
+    exit 1
+  fi
+  if [[ -z $(jq -r --arg service "$backend_service" '.services[$service].environment.TEMPLATE_ASSET_SIGNING_KEY_BASE64' <<<"$compose_json") ]]; then
+    echo "$backend_service must receive template asset signing key material" >&2
     exit 1
   fi
 done
@@ -141,8 +156,22 @@ if ! grep -Fq 'APP_EMAIL_HMAC_KEY_BASE64: ${APP_EMAIL_HMAC_KEY_BASE64:?' "$compo
   exit 1
 fi
 
+if ! grep -Fq 'TEMPLATE_ASSET_SIGNING_KEY_BASE64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:?' "$compose_file"; then
+  echo "Production Compose must require template asset signing key material" >&2
+  exit 1
+fi
+
 if grep -Fq '$proxy_add_x_forwarded_for' "$project_root/infra/nginx/default.conf"; then
   echo "Edge Nginx must not trust a client-supplied X-Forwarded-For chain" >&2
+  exit 1
+fi
+
+signed_asset_location=$(
+  sed -n '/location \^~ \/api\/v1\/template-assets\//,/^    }/p' \
+    "$project_root/infra/nginx/default.conf"
+)
+if [[ -z "$signed_asset_location" ]] || ! grep -Fq 'access_log off;' <<<"$signed_asset_location"; then
+  echo "Edge Nginx must suppress access logs for signed template asset capability URLs" >&2
   exit 1
 fi
 

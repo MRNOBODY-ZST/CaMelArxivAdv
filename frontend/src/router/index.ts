@@ -53,6 +53,18 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, permissions: ['contact:read_masked'], pageTitle: '作者与联系人', pageSection: 'arXiv 数据' },
   },
   {
+    path: '/email/templates', name: 'email-templates', component: () => import('@/modules/email/EmailTemplatesView.vue'),
+    meta: { requiresAuth: true, permissions: ['template:read'], pageTitle: '邮件模板', pageSection: '邮件运营' },
+  },
+  {
+    path: '/email/templates/new', name: 'email-template-new', component: () => import('@/modules/email/EmailTemplateEditorView.vue'),
+    meta: { requiresAuth: true, permissions: ['template:manage'], pageTitle: '新建模板', pageSection: '邮件运营' },
+  },
+  {
+    path: '/email/templates/:id', name: 'email-template-editor', component: () => import('@/modules/email/EmailTemplateEditorView.vue'),
+    meta: { requiresAuth: true, permissions: ['template:read'], pageTitle: '模板编辑器', pageSection: '邮件运营' },
+  },
+  {
     path: '/analytics/ingestion', name: 'ingestion-analytics',
     component: () => import('@/modules/analytics/AnalyticsView.vue'), props: { view: 'ingestion' },
     meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '采集分析', pageSection: '数据分析' },
@@ -84,6 +96,10 @@ export const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true, permissions: ['audit:read'], pageTitle: '审计日志', pageSection: '系统管理',
     },
+  },
+  {
+    path: '/admin/smtp-accounts', name: 'admin-smtp-accounts', component: () => import('@/modules/email/SmtpAccountsView.vue'),
+    meta: { requiresAuth: true, permissions: ['smtp:read'], pageTitle: 'SMTP 账户', pageSection: '系统管理' },
   },
   {
     path: '/forbidden', name: 'forbidden', component: () => import('@/views/ForbiddenView.vue'),

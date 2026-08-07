@@ -1,12 +1,12 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–5：生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取，以及基于真实 PostgreSQL 的采集/论文/联系人分析均已形成可运行垂直切片。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库当前已完成 Phase 1–6：生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取、真实 PostgreSQL 分析，以及安全模板/私有图片/本机 SMTP 验证均已形成可运行垂直切片。
 
-> 模板/SMTP、邮件活动和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 6–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
+> 活动发送和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 7–9 继续开发。真实 SMTP 保持关闭；尚无业务数据时只显示空状态，不生成演示指标。
 
 ## 快速启动
 
-要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为四个当前必填密钥分别生成独立的 32 字节 Base64 值：
+要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为五个当前必填密钥分别生成独立的 32 字节 Base64 值：
 
 ```bash
 cp .env.example .env
@@ -14,6 +14,7 @@ openssl rand -base64 32  # 填入 JWT_SIGNING_KEY_BASE64
 openssl rand -base64 32  # 另生成一次，填入 AUTH_FINGERPRINT_HMAC_KEY_BASE64
 openssl rand -base64 32  # 另生成一次，填入 APP_ENCRYPTION_KEY_BASE64
 openssl rand -base64 32  # 另生成一次，填入 APP_EMAIL_HMAC_KEY_BASE64
+openssl rand -base64 32  # 另生成一次，填入 TEMPLATE_ASSET_SIGNING_KEY_BASE64
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 ```
@@ -33,6 +34,8 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - 采集分析：[http://localhost:8080/analytics/ingestion](http://localhost:8080/analytics/ingestion)
 - 论文分析：[http://localhost:8080/analytics/papers](http://localhost:8080/analytics/papers)
 - 联系人分析：[http://localhost:8080/analytics/contacts](http://localhost:8080/analytics/contacts)
+- 邮件模板：[http://localhost:8080/email/templates](http://localhost:8080/email/templates)
+- SMTP 账户：[http://localhost:8080/admin/smtp-accounts](http://localhost:8080/admin/smtp-accounts)
 
 首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
 
@@ -71,11 +74,13 @@ cd ../frontend && npm test -- --run
 npm run lint
 npm run typecheck
 npm run build
+# 需要具备 template/smtp 管理权限的本地账号；测试自行创建并归档夹具
+E2E_USER=... E2E_PASSWORD=... npm run test:e2e
 cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–5 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 ## 文档
 

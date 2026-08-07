@@ -6,7 +6,7 @@
 cp .env.example .env
 ```
 
-生产部署必须替换数据库、RabbitMQ、MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`AUTH_FINGERPRINT_HMAC_KEY_BASE64` 分别生成独立 32 字节随机值；后续启用追踪时再独立生成 `TRACKING_SIGNING_KEY_BASE64`。`docker-compose.yml` 对当前四把密钥使用必填插值，缺少任一值时配置渲染会直接失败。不要提交 `.env`，也不要复用随机输出。
+生产部署必须替换数据库、RabbitMQ、MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`TEMPLATE_ASSET_SIGNING_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`AUTH_FINGERPRINT_HMAC_KEY_BASE64` 分别生成独立 32 字节随机值；后续启用追踪时再独立生成 `TRACKING_SIGNING_KEY_BASE64`。`docker-compose.yml` 对当前五把密钥使用必填插值，缺少任一值时配置渲染会直接失败。不要提交 `.env`，也不要复用随机输出。
 
 首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。真实 SMTP 仍保持 `ALLOW_LIVE_SMTP=false`，后续启用也只能由部署平台注入 Secret，不能写入 Compose 或镜像。
 

@@ -17,6 +17,13 @@ import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import com.camel_hub.advertisement.contact.ContactConflictException;
 import com.camel_hub.advertisement.contact.ContactNotFoundException;
+import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
+import com.camel_hub.advertisement.email.smtp.SmtpNotFoundException;
+import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
+import com.camel_hub.advertisement.email.smtp.SmtpValidationException;
+import com.camel_hub.advertisement.email.template.TemplateConflictException;
+import com.camel_hub.advertisement.email.template.TemplateNotFoundException;
+import com.camel_hub.advertisement.email.template.TemplateValidationException;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import org.slf4j.Logger;
@@ -313,6 +320,62 @@ public class GlobalExceptionHandler {
 	) {
 		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_analytics_filter",
 				"Analytics filter rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(TemplateValidationException.class)
+	ResponseEntity<ApiError> handleTemplateValidation(
+			TemplateValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_email_template",
+				"Email template rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(TemplateNotFoundException.class)
+	ResponseEntity<ApiError> handleTemplateNotFound(
+			TemplateNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "email_template_not_found",
+				"Email template not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(TemplateConflictException.class)
+	ResponseEntity<ApiError> handleTemplateConflict(
+			TemplateConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "email_template_conflict",
+				"Email template conflict", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SmtpValidationException.class)
+	ResponseEntity<ApiError> handleSmtpValidation(
+			SmtpValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_smtp_account",
+				"SMTP account rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SmtpNotFoundException.class)
+	ResponseEntity<ApiError> handleSmtpNotFound(
+			SmtpNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "smtp_account_not_found",
+				"SMTP account not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SmtpConflictException.class)
+	ResponseEntity<ApiError> handleSmtpConflict(
+			SmtpConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "smtp_account_conflict",
+				"SMTP account conflict", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SmtpTransportException.class)
+	ResponseEntity<ApiError> handleSmtpTransport(
+			SmtpTransportException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_GATEWAY, "smtp_test_failed",
+				"SMTP operation failed", "SMTP failure category: " + exception.category().name(), Map.of());
 	}
 
 	@ExceptionHandler(ArxivDependencyException.class)

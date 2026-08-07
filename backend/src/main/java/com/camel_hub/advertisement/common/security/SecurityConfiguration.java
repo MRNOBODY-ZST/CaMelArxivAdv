@@ -80,6 +80,7 @@ public class SecurityConfiguration {
 								"/api/docs/**",
 								"/webjars/swagger-ui/**")
 						.permitAll()
+						.pathMatchers(HttpMethod.GET, "/api/v1/template-assets/*/*/content").permitAll()
 						.pathMatchers(HttpMethod.GET, "/api/v1/users").hasAuthority("user:read")
 						.pathMatchers(HttpMethod.POST, "/api/v1/users").hasAuthority("user:create")
 						.pathMatchers(HttpMethod.PUT, "/api/v1/users/*").hasAuthority("user:update")

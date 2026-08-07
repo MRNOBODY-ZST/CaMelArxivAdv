@@ -28,7 +28,7 @@ docker compose logs --since=15m postgres rabbitmq redis
 
 | 现象 | 检查 | 处理 |
 |---|---|---|
-| 前端 502 | `backend-api` health/logs | 先处理 Flyway/依赖连接，不循环重启数据库 |
+| 前端 502/业务 API 意外 404 | `backend-api` health/logs 和 Nginx upstream | 先处理 Flyway/依赖连接；若只重建过后端容器，待其 healthy 后重建 `frontend`，使 Nginx 重新解析 Compose 服务地址 |
 | Worker 重启 | `docker inspect ... RestartCount` 与 worker logs | 检查入口、消息版本、RabbitMQ 凭据 |
 | 任务长时间 RUNNING | `jobs.heartbeat_at`、worker heartbeat、队列积压 | 标记失联任务并按幂等键安全重试 |
 | arXiv 预览 503 | Redis、`backend-api` 日志、官方状态 | Redis 故障时保持 fail-closed；不要临时绕过全局限速 |
@@ -124,7 +124,23 @@ docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source
 
 ## 邮件安全操作
 
-开发/CI 只使用 Mailpit。后续启用真实 SMTP 前必须确认活动已审批、Recipient 快照已冻结、抑制/退订已应用、频率上限有效、域名认证完成。紧急停止应暂停 Campaign 消费者并保留队列，不删除 Recipient/Attempt 审计记录。
+开发/CI 只使用 Mailpit。以开发覆盖启动后，在 `/admin/smtp-accounts` 创建 `mailpit:1025`、`PLAIN_LOCAL_ONLY` 账户；`ALLOW_LIVE_SMTP=false` 时任何公网 SMTP 主机都应返回 400。连接测试成功只表示握手成功，测试邮件的 `SMTP_ACCEPTED` 只表示 Mailpit/SMTP 接受，不是最终投递。
+
+本机验收顺序：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+curl -fsS http://localhost:8080/api/v1/system/health
+curl -fsS http://localhost:8025/api/v1/messages | jq '.total'
+cd frontend
+E2E_USER=local-super-admin E2E_PASSWORD='runtime-secret' npm run test:e2e
+```
+
+Edge E2E 要求账号同时拥有模板和 SMTP 管理权限；它会通过 API 自行建立带自动纯文本的净化模板与本机 SMTP 账户，完成桌面/移动交互后归档模板并删除 SMTP 账户。Mailpit 是本地捕获器，按测试环境保留策略清理消息；不要在共享或生产环境运行该套件。
+
+私有图片仅存于默认 `template-assets` MinIO bucket（可由 `TEMPLATE_ASSET_BUCKET` 覆盖）。管理读取要求模板权限；编辑器和测试邮件只使用由 `TEMPLATE_ASSET_SIGNING_KEY_BASE64` 生成的应用签名 URL。Nginx 的 `/api/v1/template-assets/` location 必须保持 `access_log off`，Compose 契约会检查这一点。该密钥轮换会令既有模板中的图片 URL 失效，必须采用版本化双读/重签迁移，不能直接替换。复制含图模板会创建独立对象和签名，预期可在源模板归档后继续读取；模板归档后其自身签名读取返回 404，任何历史版本仍引用图片时删除返回 409。不要只删除数据库行或 MinIO 对象。排障不得输出 SMTP 密码、密文/nonce、完整收件地址、资产签名或 SMTP transcript；审计只允许记录 `passwordConfigured=[REDACTED]`、TLS 模式和稳定结果类别。
+
+后续启用真实 SMTP 前必须确认活动已审批、Recipient 快照已冻结、抑制/退订已应用、频率上限有效、域名认证完成。紧急停止应暂停 Campaign 消费者并保留队列，不删除 Recipient/Attempt 审计记录。
 
 ## V9 分析索引修正维护窗口
 
@@ -145,3 +161,5 @@ Phase 3 于 2026-08-06 实测：Flyway V6 后为 53 张表、1 个物化视图�
 Phase 4 于 2026-08-06 实测：Flyway V7；后端 153 tests、Worker 68 tests、前端 30 tests 及各自完整质量门通过，Compose 九服务和三个镜像契约通过。真实 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 对 `2212.02256` 完成 TAR_GZIP 下载、解包、作者/联系人提取和原子回写，归档/展开尺寸为 488,729/913,762 bytes，临时目录清理确认。数据库密文不含 `@`、nonce 独立、HMAC 唯一；受权联系人列表脱敏、完整披露审计与 `mail-worker` 业务 API 404 均通过。桌面 1280×720 和移动 390×844 无页面级横向溢出，控制台零 warning/error；Worker RestartCount=0，验收后四个 arXiv 队列均为空。
 
 Phase 5 于 2026-08-06 实测并经独立复核修正：Flyway V8 九条分析索引及追加式 V9 顺序修正生效；真实队列独立 SQL 与 API 的 canonical author、唯一联系人和映射数一致，导入日期、错误日期和最新映射查询计划均命中专用索引。受权 `dataset=domains` CSV 的 nosniff/文件名/审计正确；非法数据集 400、未认证 401、无 `user:read` 时用户选项为空。后端 170、Worker 68、前端 37 项测试和全部静态/构建门通过。桌面 1440×900 和移动 390×844 的三个分析页无横向溢出且控制台零 warning/error，联系人页不显示完整邮箱；九服务 healthy、应用容器 RestartCount=0、队列为空。详细口径与对账 SQL 见 [ANALYTICS.md](ANALYTICS.md)。
+
+Phase 6 于 2026-08-07 实测并经两轮独立复核修正：Flyway V10/V11；后端 201 tests、前端 45 tests、Worker 68 tests 以及 ESLint/严格类型/生产构建/Ruff/MyPy 门全部通过。API 权限为匿名 401、Viewer 403，OpenAPI 为 58 paths；MinIO 私有图片、危险内容净化、版本/恢复/复制、渲染后 Header 边界、AES-GCM SMTP 密钥轮换与保留、公网主机禁用均经真实 API 验证。匿名签名图片读取实测 `200 image/png`，历史版本引用删除为 409；Mailpit MIME 使用绝对签名图片 URL，同时包含净化 HTML 与保留论文/退订 URL 的纯文本。Microsoft Edge 桌面/移动 3/3 场景通过，覆盖真实 PNG 上传/加载、图片深拷贝、归档源模板后副本继续加载、地址脱敏、移动抽屉、无横向溢出和零控制台错误；签名 capability 未进入 Nginx/应用日志。验收对象、模板、SMTP、邮件、审计和账号均已清理。
