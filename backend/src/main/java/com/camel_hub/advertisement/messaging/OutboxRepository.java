@@ -22,7 +22,7 @@ public class OutboxRepository {
 				WITH candidates AS (
 				    SELECT id FROM outbox_messages
 				    WHERE published_at IS NULL AND available_at <= now()
-				      AND exchange_name IN ('arxiv.jobs', 'arxiv.results')
+				      AND exchange_name IN ('arxiv.jobs', 'arxiv.results', 'mail.jobs', 'mail.results')
 				    ORDER BY available_at, id
 				    FOR UPDATE SKIP LOCKED
 				    LIMIT :limit

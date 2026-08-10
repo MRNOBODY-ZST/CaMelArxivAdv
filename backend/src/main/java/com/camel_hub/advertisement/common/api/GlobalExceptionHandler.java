@@ -20,6 +20,9 @@ import com.camel_hub.advertisement.contact.ContactNotFoundException;
 import com.camel_hub.advertisement.contact.ContactValidationException;
 import com.camel_hub.advertisement.campaign.SegmentNotFoundException;
 import com.camel_hub.advertisement.campaign.SegmentValidationException;
+import com.camel_hub.advertisement.campaign.CampaignNotFoundException;
+import com.camel_hub.advertisement.campaign.CampaignValidationException;
+import com.camel_hub.advertisement.campaign.PersonalizationUnavailableException;
 import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
 import com.camel_hub.advertisement.email.smtp.SmtpNotFoundException;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
@@ -273,6 +276,30 @@ public class GlobalExceptionHandler {
 	) {
 		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_segment",
 				"Segment rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(CampaignNotFoundException.class)
+	ResponseEntity<ApiError> handleCampaignNotFound(
+			CampaignNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "campaign_not_found",
+				"Campaign not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(CampaignValidationException.class)
+	ResponseEntity<ApiError> handleCampaignValidation(
+			CampaignValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_campaign",
+				"Campaign rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(PersonalizationUnavailableException.class)
+	ResponseEntity<ApiError> handlePersonalizationUnavailable(
+			PersonalizationUnavailableException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.SERVICE_UNAVAILABLE, "personalization_unavailable",
+				"Personalization unavailable", exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(ContactConflictException.class)

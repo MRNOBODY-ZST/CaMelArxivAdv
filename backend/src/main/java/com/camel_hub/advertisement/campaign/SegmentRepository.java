@@ -85,12 +85,31 @@ public final class SegmentRepository {
 				Boolean.TRUE.equals(row.get("corresponding_author", Boolean.class)))).all();
 	}
 
+	public Flux<CampaignCandidate> campaignCandidates(SegmentModels.SegmentCriteria criteria, int limit) {
+		return bindCriteria(databaseClient.sql(eligibleCte() + """
+				 SELECT contact_id, paper_id, author_id, email_ciphertext, email_nonce, email_hmac,
+				        email_domain, author_name, paper_title, abstract_text, arxiv_id, primary_category,
+				        organization, confidence
+				 FROM eligible ORDER BY paper_title, contact_id LIMIT :limit
+				"""), criteria).bind("limit", limit).map((row, metadata) -> new CampaignCandidate(
+				row.get("contact_id", UUID.class), row.get("paper_id", UUID.class),
+				row.get("author_id", UUID.class), row.get("email_ciphertext", byte[].class),
+				row.get("email_nonce", byte[].class), row.get("email_hmac", byte[].class),
+				row.get("email_domain", String.class), row.get("author_name", String.class),
+				row.get("paper_title", String.class), row.get("abstract_text", String.class),
+				row.get("arxiv_id", String.class), row.get("primary_category", String.class),
+				row.get("organization", String.class), row.get("confidence", String.class))).all();
+	}
+
 	private String eligibleCte() {
 		return """
 				WITH eligible AS (
 				  SELECT DISTINCT ON (c.id)
-				         c.id AS contact_id, c.email_domain, pa.raw_name AS author_name,
-				         p.title AS paper_title, p.arxiv_id, category.category_id AS primary_category,
+				         c.id AS contact_id, pac.paper_id, pa.author_id,
+				         c.email_ciphertext, c.email_nonce, c.email_hmac, c.email_domain,
+				         pa.raw_name AS author_name, pa.affiliation_text AS organization,
+				         p.title AS paper_title, p.abstract_text, p.arxiv_id,
+				         category.category_id AS primary_category,
 				         pac.confidence, pac.verification_status, pac.corresponding_author
 				  FROM contacts c
 				  JOIN paper_author_contacts pac ON pac.contact_id = c.id
@@ -171,5 +190,12 @@ public final class SegmentRepository {
 	public record EligibleContact(
 			UUID contactId, String emailDomain, String authorName, String paperTitle, String arxivId,
 			String primaryCategory, String confidence, String verificationStatus, boolean corresponding
+	) { }
+
+	public record CampaignCandidate(
+			UUID contactId, UUID paperId, UUID authorId, byte[] emailCiphertext, byte[] emailNonce,
+			byte[] emailHmac, String emailDomain, String authorName, String paperTitle,
+			String abstractText, String arxivId, String primaryCategory, String organization,
+			String confidence
 	) { }
 }
