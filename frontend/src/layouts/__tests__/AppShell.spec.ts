@@ -43,7 +43,7 @@ describe('AppShell', () => {
       'analytics:read', 'audit:read', 'campaign:read', 'contact:read_masked', 'paper:read',
       'role:read', 'smtp:read', 'system:manage', 'template:read', 'user:read',
     ])
-    const destinations = new Set(wrapper.findAll('nav a').map((link) => link.attributes('href')))
+    const destinations = new Set(wrapper.findAll('nav a').map((link) => link.attributes('href')).filter((href): href is string => Boolean(href)))
     const registeredPaths = new Set(applicationRoutes.map((route) => route.path))
 
     expect([...destinations]).not.toHaveLength(0)
