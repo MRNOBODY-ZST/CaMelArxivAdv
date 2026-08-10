@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.campaign;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.camel_hub.advertisement.system.RuntimeStatusProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -11,7 +12,7 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 @Profile("api")
-@EnableConfigurationProperties(PersonalizationProperties.class)
+@EnableConfigurationProperties({PersonalizationProperties.class, RuntimeStatusProperties.class})
 public class CampaignConfiguration {
 
 	@Bean
@@ -39,5 +40,17 @@ public class CampaignConfiguration {
 			ObjectMapper objectMapper, TransactionalOperator transactions
 	) {
 		return new CampaignService(repository, segments, properties, objectMapper, transactions);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	CampaignReportingRepository campaignReportingRepository(DatabaseClient databaseClient) {
+		return new CampaignReportingRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	CampaignReportingService campaignReportingService(CampaignReportingRepository repository) {
+		return new CampaignReportingService(repository);
 	}
 }
