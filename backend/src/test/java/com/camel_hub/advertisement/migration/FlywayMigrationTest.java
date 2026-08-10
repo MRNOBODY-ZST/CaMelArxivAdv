@@ -98,6 +98,23 @@ class FlywayMigrationTest {
 	}
 
 	@Test
+	void addsCampaignPersonalizationStateWithConstrainedPollingIndexes() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+
+		assertThat(columnNames("campaigns")).contains(
+				"generation_status", "generation_provider", "generation_model", "generation_job_id",
+				"generation_requested_at", "generation_completed_at", "generation_error_summary");
+		assertThat(columnNames("campaign_recipients")).contains(
+				"personalization_status", "personalization_rationale", "personalization_error_code",
+				"personalization_error_message", "personalization_attempts", "personalized_at");
+		assertThat(constraintNames()).contains(
+				"ck_campaign_generation_status", "ck_campaign_recipient_personalization_status",
+				"ck_campaign_recipient_personalization_attempts");
+		assertThat(indexNames()).contains(
+				"ix_campaigns_generation_status", "ix_campaign_recipients_personalization_status");
+	}
+
+	@Test
 	void upgradesAnExistingV8SchemaWithoutChangingPublishedChecksums() throws SQLException {
 		String schema = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
 		Flyway throughV8 = Flyway.configure()
@@ -116,7 +133,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(3);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(4);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);
@@ -144,6 +161,22 @@ class FlywayMigrationTest {
 				FROM pg_constraint
 				JOIN pg_namespace ON pg_namespace.oid = pg_constraint.connamespace
 				WHERE pg_namespace.nspname = 'public'
+				""");
+	}
+
+	private Set<String> columnNames(String table) throws SQLException {
+		return queryNames("""
+				SELECT column_name
+				FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = '%s'
+				""".formatted(table));
+	}
+
+	private Set<String> indexNames() throws SQLException {
+		return queryNames("""
+				SELECT indexname
+				FROM pg_indexes
+				WHERE schemaname = 'public'
 				""");
 	}
 
