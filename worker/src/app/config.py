@@ -4,7 +4,7 @@ import os
 import socket
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,3 +54,33 @@ class Settings(BaseSettings):
     max_include_depth: int = Field(default=16, ge=1, le=100)
     max_parse_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     temp_root: Path | None = None
+
+
+class PersonalizationSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="PERSONALIZATION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = False
+    provider: str = Field(default="openai", min_length=1, max_length=80)
+    model: str = Field(default="gpt-5.6-luna", min_length=1, max_length=120)
+    api_key: SecretStr | None = None
+    api_base_url: str = "https://api.openai.com/v1"
+    request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
+    rabbitmq_url: SecretStr = SecretStr("amqp://guest:guest@localhost:5672/")
+    ray_address: str = Field(default="auto", min_length=1, max_length=255)
+    maximum_command_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
+    maximum_concurrency: int = Field(default=16, ge=1, le=256)
+    log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def enabled_requires_key(self) -> PersonalizationSettings:
+        if self.enabled and self.api_key is None:
+            raise ValueError("Enabled personalization requires PERSONALIZATION_API_KEY")
+        if self.provider != "openai":
+            raise ValueError("Only the openai personalization provider is supported")
+        return self
