@@ -18,6 +18,8 @@ import com.camel_hub.advertisement.common.security.ClientAddressResolver;
 import com.camel_hub.advertisement.contact.ContactConflictException;
 import com.camel_hub.advertisement.contact.ContactNotFoundException;
 import com.camel_hub.advertisement.contact.ContactValidationException;
+import com.camel_hub.advertisement.campaign.SegmentNotFoundException;
+import com.camel_hub.advertisement.campaign.SegmentValidationException;
 import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
 import com.camel_hub.advertisement.email.smtp.SmtpNotFoundException;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
@@ -257,6 +259,22 @@ public class GlobalExceptionHandler {
 				"Contact not found", exception.getMessage(), Map.of());
 	}
 
+	@ExceptionHandler(SegmentNotFoundException.class)
+	ResponseEntity<ApiError> handleSegmentNotFound(
+			SegmentNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "segment_not_found",
+				"Segment not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(SegmentValidationException.class)
+	ResponseEntity<ApiError> handleSegmentValidation(
+			SegmentValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_segment",
+				"Segment rejected", exception.getMessage(), Map.of());
+	}
+
 	@ExceptionHandler(ContactConflictException.class)
 	ResponseEntity<ApiError> handleContactConflict(
 			ContactConflictException exception, ServerWebExchange exchange
@@ -399,6 +417,8 @@ public class GlobalExceptionHandler {
 
 	@ExceptionHandler(Exception.class)
 	ResponseEntity<ApiError> handleUnexpected(Exception exception, ServerWebExchange exchange) {
+		LOGGER.error("Unhandled API exception traceId={} path={}", TraceIdWebFilter.traceId(exchange),
+				exchange.getRequest().getPath().value(), exception);
 		return response(exchange, HttpStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error",
 				"The request could not be completed", Map.of());
 	}
