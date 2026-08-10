@@ -76,6 +76,12 @@ class PersonalizationSettings(BaseSettings):
     maximum_command_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     maximum_concurrency: int = Field(default=16, ge=1, le=256)
     log_level: str = "INFO"
+    jobs_exchange: str = "mail.jobs"
+    results_exchange: str = "mail.results"
+    retry_exchange: str = "mail.retry"
+    dead_exchange: str = "mail.dead"
+    jobs_queue: str = "mail.personalization.worker"
+    retry_queue: str = "mail.personalization.retry.30s"
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:

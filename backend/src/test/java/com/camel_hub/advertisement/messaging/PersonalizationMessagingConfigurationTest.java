@@ -14,7 +14,8 @@ class PersonalizationMessagingConfigurationTest {
 
 		assertThat(topology.getDeclarablesByType(Queue.class))
 				.extracting(Queue::getName)
-				.contains("mail.personalization.worker", "mail.personalization.results.backend", "mail.dead.archive");
+				.contains("mail.personalization.worker", "mail.personalization.results.backend",
+						"mail.personalization.retry.30s", "mail.dead.archive");
 		assertThat(topology.getDeclarablesByType(Binding.class))
 				.anySatisfy(binding -> {
 					assertThat(binding.getDestination()).isEqualTo("mail.personalization.worker");

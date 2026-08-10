@@ -18,22 +18,27 @@ public class PersonalizationMessagingConfiguration {
 
 	public static final String JOBS_EXCHANGE = "mail.jobs";
 	public static final String RESULTS_EXCHANGE = "mail.results";
+	public static final String RETRY_EXCHANGE = "mail.retry";
 	public static final String DEAD_EXCHANGE = "mail.dead";
 
 	@Bean
 	Declarables personalizationTopology() {
 		TopicExchange jobs = new TopicExchange(JOBS_EXCHANGE, true, false);
 		TopicExchange results = new TopicExchange(RESULTS_EXCHANGE, true, false);
+		TopicExchange retry = new TopicExchange(RETRY_EXCHANGE, true, false);
 		TopicExchange dead = new TopicExchange(DEAD_EXCHANGE, true, false);
 		Queue worker = QueueBuilder.durable("mail.personalization.worker")
 				.deadLetterExchange(DEAD_EXCHANGE).build();
 		Queue backend = QueueBuilder.durable("mail.personalization.results.backend")
 				.deadLetterExchange(DEAD_EXCHANGE).build();
+		Queue retryQueue = QueueBuilder.durable("mail.personalization.retry.30s")
+				.ttl(30_000).deadLetterExchange(JOBS_EXCHANGE).build();
 		Queue archive = QueueBuilder.durable("mail.dead.archive").build();
 		return new Declarables(
-				jobs, results, dead, worker, backend, archive,
+				jobs, results, retry, dead, worker, backend, retryQueue, archive,
 				BindingBuilder.bind(worker).to(jobs).with("mail.personalization.generate"),
 				BindingBuilder.bind(backend).to(results).with("mail.personalization.result"),
+				BindingBuilder.bind(retryQueue).to(retry).with("mail.#"),
 				BindingBuilder.bind(archive).to(dead).with("#"));
 	}
 

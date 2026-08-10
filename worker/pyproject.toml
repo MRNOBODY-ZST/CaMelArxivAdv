@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 arxiv-worker = "app.main:cli"
+personalization-worker = "app.personalization.main:cli"
 
 [dependency-groups]
 dev = [
