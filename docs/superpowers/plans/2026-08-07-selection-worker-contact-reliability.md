@@ -202,4 +202,4 @@ At `http://127.0.0.1:8080`, confirm wrapped category checkboxes have equal rende
 
 - [ ] **Step 6: Review and commit**
 
-Review the diff for secrets and unrelated edits, re-run focused regression checks, then commit the completed fix on `codex/arxiv-platform`.
+Review the diff for secrets and unrelated edits, re-run focused regression checks, then commit the completed fix on `feature/arxiv-platform`.

@@ -4,7 +4,7 @@
 
 ## 仓库审计
 
-- 基线分支：`main`，实施分支：`codex/arxiv-platform`。
+- 基线分支：`main`，实施分支：`feature/arxiv-platform`。
 - 用户已有内容：未跟踪的 `backend/` Spring Initializr 骨架，必须保留并在原位扩展。
 - 后端基线：Java 25、Spring Boot 4.1.0、Gradle 9.5.1、WebFlux/R2DBC/Security/Redis/Modulith；没有业务代码、认证、迁移或异常处理。
 - 基础设施基线：`backend/compose.yaml` 只有 MongoDB、MySQL 和 Redis，含不安全的开发明文值；没有 PostgreSQL、RabbitMQ、MinIO 或 Mailpit。
