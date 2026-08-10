@@ -85,7 +85,9 @@ class PersonalizationSettings(BaseSettings):
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:
-        if self.enabled and self.api_key is None:
+        if self.enabled and (
+            self.api_key is None or not self.api_key.get_secret_value().strip()
+        ):
             raise ValueError("Enabled personalization requires PERSONALIZATION_API_KEY")
         if self.provider != "openai":
             raise ValueError("Only the openai personalization provider is supported")

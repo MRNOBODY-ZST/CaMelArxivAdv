@@ -10,6 +10,8 @@ cp .env.example .env
 
 首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。真实 SMTP 仍保持 `ALLOW_LIVE_SMTP=false`，后续启用也只能由部署平台注入 Secret，不能写入 Compose 或镜像。
 
+个性化草稿默认使用 `PERSONALIZATION_ENABLED=false`。要启用时，必须由运行平台 Secret 注入 `OPENAI_API_KEY`，再设置 `PERSONALIZATION_ENABLED=true`；Key 为空时 Worker 会拒绝启动启用态。可配置 `PERSONALIZATION_MODEL`、并发和超时，但不要把 Key 写入 `.env.example`、Compose、镜像或前端。Ray head、Ray worker 和 personalization worker 只加入内部网络，10001/6379 不得发布到宿主机或公网。
+
 Phase 3 还要求设置受监控的 `ARXIV_CONTACT_EMAIL`。官方端点固定为 `https://export.arxiv.org/api/query` 与 `https://oaipmh.arxiv.org/oai`，允许主机固定为 `export.arxiv.org,oaipmh.arxiv.org,arxiv.org`；不要用环境变量指向任意第三方镜像。`ARXIV_MIN_REQUEST_INTERVAL` 只能保持 `PT3S` 或更慢，多个 API/Worker 副本必须共享同一 Redis 实例。
 
 Source 端点固定为 `https://export.arxiv.org/e-print`。`.env.example` 提供归档 50 MiB、展开 250 MiB、单文件 20 MiB、5,000 文件及压缩比 100 的默认上限；只可在容量评审后收紧或有限提高，不能为了处理未知归档而取消限制。Compose 将 Worker 的 `/var/tmp/arxiv-source` 挂为 512 MiB tmpfs，生产编排平台必须提供等价的临时卷、容量上限和任务结束清理语义。
@@ -56,11 +58,12 @@ Compose 的 `deploy.resources` 是容量指导；非 Swarm 运行时应在编排
 2. 构建并扫描不可变版本镜像，设置 `APP_VERSION`。
 3. 先启动 PostgreSQL/Redis/RabbitMQ/MinIO，等待健康。
 4. 单实例启动 API 执行 Flyway；迁移成功后扩容 API/worker。
-5. 启动前端，验证 `/healthz`、API readiness 和关键只读请求。
-6. 验证离线分类 API、Worker heartbeat、`arxiv.jobs.worker`/`arxiv.results.backend` bindings 和 Outbox 发布。
-7. 用少量明确 arXiv ID 做导入冒烟，确认 Job 终态、事件回放和论文库。
-8. 对一篇小型公开 Source 做提取冒烟，确认归档限制、加密联系人、脱敏 UI、提取运行和临时目录为空后再开放批量提取。
-9. 观察错误率、数据库连接、Redis 租约、队列/DLQ 和 tmpfs 使用量后再开放流量。
+5. 启动 Ray head/worker 和个性化消费者；检查内部 Ray Client、`mail.personalization.worker` 与 `mail.personalization.results.backend`。
+6. 启动前端，验证 `/healthz`、API readiness 和关键只读请求。
+7. 验证离线分类 API、Worker heartbeat、`arxiv.jobs.worker`/`arxiv.results.backend` bindings 和 Outbox 发布。
+8. 用少量明确 arXiv ID 做导入冒烟，确认 Job 终态、事件回放和论文库。
+9. 对一篇小型公开 Source 做提取冒烟，确认归档限制、加密联系人、脱敏 UI、提取运行和临时目录为空后再开放批量提取。
+10. 观察错误率、数据库连接、Redis 租约、队列/DLQ 和 tmpfs 使用量后再开放流量。
 
 ## 回滚
 

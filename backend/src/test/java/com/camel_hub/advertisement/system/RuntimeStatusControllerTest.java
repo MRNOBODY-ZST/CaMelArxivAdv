@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.common.api.GlobalExceptionHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import reactor.core.publisher.Mono;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,5 +32,11 @@ class RuntimeStatusControllerTest {
 				.filter(method -> method.getName().equals("status")).findFirst().orElseThrow()
 				.getAnnotation(PreAuthorize.class);
 		assertThat(permission.value()).isEqualTo("hasAuthority('system:manage')");
+	}
+
+	@Test
+	void returnsAReactiveTypeForMethodSecurity() throws NoSuchMethodException {
+		assertThat(RuntimeStatusController.class.getDeclaredMethod("status").getReturnType())
+				.isEqualTo(Mono.class);
 	}
 }

@@ -27,7 +27,7 @@ development_compose_json=$(
     config --format json
 )
 actual_services=$(jq -r '.services | keys[]' <<<"$compose_json")
-required_services=(postgres redis rabbitmq minio backend-api mail-worker arxiv-worker frontend mailpit)
+required_services=(postgres redis rabbitmq minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend mailpit)
 
 for service in "${required_services[@]}"; do
   if ! grep -qx "$service" <<<"$actual_services"; then
@@ -109,6 +109,28 @@ if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_TEMP_ROOT' <<<
   exit 1
 fi
 
+if [[ $(jq -r '(.services["personalization-worker"].entrypoint // []) | join(" ")' <<<"$compose_json") != "python -m app.personalization.main" ]]; then
+  echo "personalization-worker must use the isolated personalization entrypoint" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["personalization-worker"].environment.PERSONALIZATION_RAY_ADDRESS' <<<"$compose_json") != "ray://ray-head:10001" ]]; then
+  echo "personalization-worker must connect to the internal Ray Client endpoint" >&2
+  exit 1
+fi
+
+for ray_service in ray-head ray-worker; do
+  if [[ $(jq -r --arg service "$ray_service" '(.services[$service].entrypoint // []) | join(" ")' <<<"$compose_json") != "python -m ray.scripts.scripts" ]]; then
+    echo "$ray_service must use the relocatable Ray module entrypoint" >&2
+    exit 1
+  fi
+done
+
+if [[ $(jq -r '.services["backend-api"].environment.RAY_CONFIGURED' <<<"$compose_json") != "true" ]]; then
+  echo "backend-api must report the configured Ray runtime" >&2
+  exit 1
+fi
+
 if ! jq -e '.services["arxiv-worker"].tmpfs | index("/var/tmp/arxiv-source:size=536870912,mode=1777")' <<<"$compose_json" >/dev/null; then
   echo "arxiv-worker must mount the bounded Source temporary root as tmpfs" >&2
   exit 1
@@ -175,7 +197,7 @@ if [[ -z "$signed_asset_location" ]] || ! grep -Fq 'access_log off;' <<<"$signed
   exit 1
 fi
 
-for internal_service in postgres redis rabbitmq minio backend-api mail-worker arxiv-worker mailpit; do
+for internal_service in postgres redis rabbitmq minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker mailpit; do
   if [[ $(jq -r --arg service "$internal_service" '.services[$service] | has("ports")' <<<"$compose_json") == "true" ]]; then
     echo "$internal_service must not publish production ports" >&2
     exit 1
@@ -187,7 +209,7 @@ if [[ $(jq -r '.services.frontend.ports[0].target' <<<"$compose_json") != "8080"
   exit 1
 fi
 
-for app_service in backend-api mail-worker arxiv-worker frontend; do
+for app_service in backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend; do
   if [[ $(jq -r --arg service "$app_service" '.services[$service] | has("healthcheck")' <<<"$compose_json") != "true" ]]; then
     echo "$app_service must declare a healthcheck" >&2
     exit 1

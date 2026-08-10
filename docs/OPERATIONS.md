@@ -9,9 +9,10 @@ curl -fsS http://localhost:8080/api/v1/system/health
 docker compose exec -T postgres pg_isready -U camel -d camel_arxiv
 docker compose exec -T redis redis-cli ping
 docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+docker compose exec -T ray-head python -c "import socket; socket.create_connection(('127.0.0.1', 10001), 3).close()"
 ```
 
-正常基线为九个服务 running/healthy，worker `RestartCount=0`。健康接口只返回状态，不暴露连接信息。
+正常基线为十二个服务 running/healthy，worker `RestartCount=0`。健康接口只返回状态，不暴露连接信息。
 
 ## 日志与排障
 
@@ -19,6 +20,7 @@ docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 docker compose logs --since=15m backend-api
 docker compose logs --since=15m mail-worker
 docker compose logs --since=15m arxiv-worker
+docker compose logs --since=15m personalization-worker ray-head ray-worker
 docker compose logs --since=15m postgres rabbitmq redis
 ```
 
@@ -40,6 +42,9 @@ docker compose logs --since=15m postgres rabbitmq redis
 | Source Job 无法进入终态 | `job_items`、结果队列/DLQ、`processed_messages` | 先处理未持久化的 item result；禁止直接把 Job 改为成功 |
 | Worker tmpfs 增长 | 当前 Job、heartbeat、容器 RestartCount | 暂停新任务，保留日志后安全重建 Worker；确认临时根为空再恢复 |
 | 邮件没有进入 Mailpit | `ALLOW_LIVE_SMTP`、mail-worker、Mailpit accepted 数 | 不改为真实 SMTP 作为排障手段 |
+| 个性化生成按钮禁用 | `/api/v1/system/runtime` 的非敏感开关、`PERSONALIZATION_ENABLED` | 注入有效 API Key 后再启用；不要在浏览器、日志或数据库中粘贴 Key |
+| 生成长期 QUEUED/RUNNING | personalization worker、Ray 节点、`mail.personalization.*` 队列 | 先确认 Worker/Ray 健康和积压；保留原幂等键，禁止直接改活动为完成 |
+| 单个作者生成失败 | 收件人安全错误码、提供方状态、Ray 有界重试日志 | 永久失败逐条保留；不记录模型请求全文或联系人邮箱，不重跑整个已完成批次 |
 | 数据库迁移失败 | `flyway_schema_history` 与 API logs | 停止扩容，修正新迁移；不要编辑已发布迁移 |
 
 ## 认证运维
@@ -123,6 +128,17 @@ docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source
 - 联系人列表按论文筛选时选择该论文范围内最新映射；全局列表选择联系人全局最新映射。人工验证使用 `mappingId` 与 `expectedVersion`，409 表示应刷新而不是覆盖。
 
 ## 邮件安全操作
+
+个性化生成链路的快速检查：
+
+```bash
+docker compose ps ray-head ray-worker personalization-worker
+docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged \
+  | grep 'mail.personalization'
+curl -fsS http://localhost:8080/api/v1/system/runtime
+```
+
+未设置 `OPENAI_API_KEY` 时应保持 `PERSONALIZATION_ENABLED=false`，运行状态返回 `generationReady=false`，活动生成请求返回 503 且不创建收件人。启用后先用一个不超过数人的受控分组验收结构化草稿、退订变量、脚本净化、失败分类和幂等，再提高批量上限。生成结束不会自动进入 SMTP 投递。
 
 开发/CI 只使用 Mailpit。以开发覆盖启动后，在 `/admin/smtp-accounts` 创建 `mailpit:1025`、`PLAIN_LOCAL_ONLY` 账户；`ALLOW_LIVE_SMTP=false` 时任何公网 SMTP 主机都应返回 400。连接测试成功只表示握手成功，测试邮件的 `SMTP_ACCEPTED` 只表示 Mailpit/SMTP 接受，不是最终投递。
 

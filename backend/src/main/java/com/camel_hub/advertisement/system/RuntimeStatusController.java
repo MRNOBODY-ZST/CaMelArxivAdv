@@ -6,6 +6,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
 
 @RestController
 @Profile("api")
@@ -24,11 +25,11 @@ public class RuntimeStatusController {
 
 	@GetMapping
 	@PreAuthorize("hasAuthority('system:manage')")
-	RuntimeStatus status() {
-		return new RuntimeStatus(
+	Mono<RuntimeStatus> status() {
+		return Mono.just(new RuntimeStatus(
 				personalization.enabled(), personalization.provider(), personalization.model(),
 				runtime.rayConfigured(), runtime.rabbitConfigured(), runtime.liveSmtpAllowed(),
-				personalization.enabled() && runtime.rayConfigured() && runtime.rabbitConfigured());
+				personalization.enabled() && runtime.rayConfigured() && runtime.rabbitConfigured()));
 	}
 
 	public record RuntimeStatus(

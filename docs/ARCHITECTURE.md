@@ -13,6 +13,10 @@ flowchart LR
     A --> Q["RabbitMQ"]
     A --> O["MinIO"]
     Q --> W["Python arXiv Worker"]
+    Q --> G["个性化生成 Worker"]
+    G --> RC["Ray Core 集群"]
+    RC --> AI["OpenAI Responses API"]
+    G -->|"结构化草稿结果"| Q
     Q --> M["Spring Mail Worker"]
     W -->|"版本化结果/心跳"| Q
     W --> L["arXiv Legacy API"]
@@ -29,6 +33,8 @@ flowchart LR
 | `backend-api` | WebFlux API、授权、任务编排、Flyway | PostgreSQL | 仅内部 8080 |
 | `mail-worker` | 邮件快照消费、频控、SMTP 发送与回写；`mail-worker` profile 不注册任何业务 API Controller | PostgreSQL/RabbitMQ | 仅内部 Actuator 健康端口 |
 | `arxiv-worker` | Legacy/OAI 元数据、分类同步，以及 Source 安全下载/解包/TeX 提取 | Redis 租约/RabbitMQ；Source 仅在 tmpfs 短暂存在 | 不暴露端口 |
+| `personalization-worker` | 校验生成命令、提交 Ray task、聚合逐人结构化结果 | RabbitMQ；无业务持久状态 | 不暴露端口 |
+| `ray-head` / `ray-worker` | 在有界并发和重试下分发逐作者生成任务 | 无；对象仅短时驻留内存 | Client/GCS 仅内部网络 |
 | `postgres` | 业务事实、审计、任务、分析聚合 | named volume | 内部 |
 | `redis` | 限速、短期锁、缓存、SSE 协调 | named volume | 内部 |
 | `rabbitmq` | 版本化异步消息、重试、死信 | named volume | 内部 |
@@ -79,6 +85,12 @@ Worker 先持久发布 started/progress/batch/terminal 结果，Spring 消费者
 模板写入先解析允许变量、检查 HTML 属性上下文，再通过 jsoup allowlist 净化；数据库只保存净化后的 HTML。每次更新在同一事务推进模板头与乐观锁，并追加不可变版本；复制建立独立模板，恢复也只创建新头。开启自动纯文本时，版本同时持久化该模式，生成器把净化 HTML 转为文本并保留安全链接目标。预览和测试发送都使用同一服务端渲染器，文本变量转义，URL 变量只接受无 user-info 的绝对 HTTP(S)。
 
 图片上传先在 API 边界限制 5 MiB 并验证 PNG/JPEG/GIF/WebP magic，再以随机键写入私有 MinIO bucket，元数据记录 SHA-256。管理读取要求 `template:read`；富文本沙箱和测试 MIME 使用由独立 HMAC 密钥绑定模板/资产 UUID 的应用签名 URL，邮件渲染只把有效签名路径转换到 `PUBLIC_BASE_URL`，Nginx 对该 capability URL 禁止 access log。复制含图模板会读取并核对源对象长度/SHA-256，以副本 UUID 和随机对象键创建独立资产并重写签名 URL；事务失败时补偿清理新对象。归档模板的图片不再提供，任何不可变版本仍引用时也禁止删除。SMTP 密码以 AES-256-GCM 和随机 nonce 入库，API 仅投影 `passwordConfigured`。每次测试建立有界 Jakarta Mail Session；`ALLOW_LIVE_SMTP=false` 时目的地主机策略在连接前强制只允许 Mailpit/本机白名单。模板测试发送生成 UTF-8 multipart/alternative，返回 `SMTP_ACCEPTED` 仅表示 SMTP 接受，不创建 Campaign 或批量收件人路径。
+
+## 个性化草稿生成数据路径
+
+API 将活动、已发布模板、受控 Segment 和启用的 SMTP 账户固化为草稿活动。启动生成时只把作者名、论文标题/摘要、arXiv ID/分类/公开 URL、机构、活动目的和模板风格放入版本化 `mail.jobs` 命令；完整邮箱、密文/nonce/HMAC、SMTP 凭据均不进入消息或模型请求。
+
+独立 Python 消费者通过内部 Ray Client 连接把每位作者分发为 Ray Core task。任务使用 OpenAI Responses API、`store=false` 与严格 JSON Schema，并要求 HTML/纯文本都保留退订变量。瞬时网络、限流和服务端错误由 Ray 做两次有界重试；认证、策略拒绝和无效结构作为永久失败逐条返回，不使整批任务丢失。Spring 结果消费者再次验证契约，通过同一模板净化器处理 HTML，拒绝脚本、Header 注入或缺少退订变量的输出，然后幂等落库。生成与 SMTP 投递是独立状态机，生成完成不会自动发送。
 
 ## 安全设计
 

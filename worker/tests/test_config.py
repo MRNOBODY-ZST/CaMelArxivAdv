@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import PersonalizationSettings, Settings
 
 
 def test_defaults_enforce_safe_arxiv_rate_and_hosts() -> None:
@@ -24,3 +24,8 @@ def test_rejects_an_arxiv_interval_below_three_seconds() -> None:
 
 def test_live_smtp_is_not_part_of_worker_configuration() -> None:
     assert "smtp" not in " ".join(Settings.model_fields).lower()
+
+
+def test_enabled_personalization_rejects_a_blank_api_key() -> None:
+    with pytest.raises(ValidationError):
+        PersonalizationSettings(enabled=True, api_key="")

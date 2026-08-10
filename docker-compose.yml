@@ -51,6 +51,22 @@ x-backend-environment: &backend-environment
   INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
   INITIAL_ADMIN_DISPLAY_NAME: ${INITIAL_ADMIN_DISPLAY_NAME:-Administrator}
   INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+  PERSONALIZATION_ENABLED: ${PERSONALIZATION_ENABLED:-false}
+  PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-openai}
+  PERSONALIZATION_MODEL: ${PERSONALIZATION_MODEL:-gpt-5.6-luna}
+  PERSONALIZATION_MAX_RECIPIENTS: ${PERSONALIZATION_MAX_RECIPIENTS:-100}
+  RAY_CONFIGURED: "true"
+  RABBITMQ_CONFIGURED: "true"
+
+x-personalization-environment: &personalization-environment
+  PERSONALIZATION_ENABLED: ${PERSONALIZATION_ENABLED:-false}
+  PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-openai}
+  PERSONALIZATION_MODEL: ${PERSONALIZATION_MODEL:-gpt-5.6-luna}
+  PERSONALIZATION_API_KEY: ${OPENAI_API_KEY:-}
+  PERSONALIZATION_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+  PERSONALIZATION_REQUEST_TIMEOUT_SECONDS: ${PERSONALIZATION_REQUEST_TIMEOUT_SECONDS:-60}
+  PERSONALIZATION_MAXIMUM_CONCURRENCY: ${PERSONALIZATION_MAXIMUM_CONCURRENCY:-16}
+  PERSONALIZATION_LOG_LEVEL: ${PERSONALIZATION_LOG_LEVEL:-INFO}
 
 x-application-security: &application-security
   init: true
@@ -227,6 +243,95 @@ services:
     deploy:
       resources:
         limits: { cpus: "1.00", memory: 768M }
+        reservations: { memory: 128M }
+
+  ray-head:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      RAY_USAGE_STATS_ENABLED: "0"
+    entrypoint: ["python", "-m", "ray.scripts.scripts"]
+    command:
+      - start
+      - --head
+      - --port=6379
+      - --ray-client-server-port=10001
+      - --num-cpus=0
+      - --include-dashboard=false
+      - --object-store-memory=134217728
+      - --block
+    shm_size: 512mb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 6379), 3).close(); socket.create_connection(('127.0.0.1', 10001), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks: [app]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 1280M }
+        reservations: { memory: 512M }
+
+  ray-worker:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      <<: *personalization-environment
+      RAY_USAGE_STATS_ENABLED: "0"
+    entrypoint: ["python", "-m", "ray.scripts.scripts"]
+    command:
+      - start
+      - --address=ray-head:6379
+      - --num-cpus=${RAY_WORKER_CPUS:-2}
+      - --object-store-memory=134217728
+      - --block
+    shm_size: 512mb
+    depends_on:
+      ray-head: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('ray-head', 6379), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks: [app]
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 2G }
+        reservations: { memory: 768M }
+
+  personalization-worker:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      <<: *personalization-environment
+      PERSONALIZATION_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
+      PERSONALIZATION_RAY_ADDRESS: ray://ray-head:10001
+    entrypoint: ["python", "-m", "app.personalization.main"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      ray-head: { condition: service_healthy }
+      ray-worker: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('rabbitmq', 5672), 3).close(); socket.create_connection(('ray-head', 10001), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [app, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
         reservations: { memory: 128M }
 
   frontend:
