@@ -7,6 +7,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import AppShell from '@/layouts/AppShell.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { Permission } from '@/modules/auth/auth.types'
+import { routes as applicationRoutes } from '@/router'
 
 describe('AppShell', () => {
   it('retains the licensed sidebar-with-header DesignSkill structure', () => {
@@ -35,6 +36,22 @@ describe('AppShell', () => {
 
     expect(link).toBeDefined()
     expect(link!.attributes('href')).toBe('/analytics/authors')
+  })
+
+  it('uses only absolute registered routes for every sidebar destination', () => {
+    const wrapper = mountShell([
+      'analytics:read', 'audit:read', 'campaign:read', 'contact:read_masked', 'paper:read',
+      'role:read', 'smtp:read', 'system:manage', 'template:read', 'user:read',
+    ])
+    const destinations = new Set(wrapper.findAll('nav a').map((link) => link.attributes('href')))
+    const registeredPaths = new Set(applicationRoutes.map((route) => route.path))
+
+    expect([...destinations]).not.toHaveLength(0)
+    for (const destination of destinations) {
+      expect(destination).toMatch(/^\/(?!\/)/)
+      expect(destination).not.toContain('#')
+      expect(registeredPaths.has(destination)).toBe(true)
+    }
   })
 
   it('derives the header title and breadcrumb from route metadata', async () => {

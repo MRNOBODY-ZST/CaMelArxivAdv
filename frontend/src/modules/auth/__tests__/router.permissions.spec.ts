@@ -30,6 +30,22 @@ describe('router permissions', () => {
     expect(authorRoute?.meta?.permissions).toEqual(['analytics:read'])
   })
 
+  it.each([
+    ['/email/segments', 'campaign:read'],
+    ['/email/campaigns', 'campaign:read'],
+    ['/email/campaigns/:id', 'campaign:read'],
+    ['/email/deliveries', 'campaign:read'],
+    ['/analytics/campaigns', 'analytics:read'],
+    ['/analytics/links', 'analytics:read'],
+    ['/admin/settings', 'system:manage'],
+  ])('protects the registered application route %s', (path, permission) => {
+    const route = routes.find((candidate) => candidate.path === path)
+
+    expect(route).toBeDefined()
+    expect(route?.meta?.requiresAuth).toBe(true)
+    expect(route?.meta?.permissions).toEqual([permission])
+  })
+
   it('redirects anonymous users to login and preserves the intended route', async () => {
     const router = guardedRouter()
 

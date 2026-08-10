@@ -75,24 +75,24 @@ const navigation: readonly NavigationGroup[] = [
   ] },
   { label: '邮件运营', items: [
     { label: '邮件模板', href: '/email/templates', icon: DocumentTextIcon, permission: 'template:read' },
-    { label: '收件人分组', href: '#segments', icon: FolderIcon, permission: 'campaign:read' },
-    { label: '邮件活动', href: '#campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
-    { label: '发送记录', href: '#deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
+    { label: '收件人分组', href: '/email/segments', icon: FolderIcon, permission: 'campaign:read' },
+    { label: '邮件活动', href: '/email/campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
+    { label: '发送记录', href: '/email/deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
   ] },
   { label: '数据分析', items: [
     { label: '采集分析', href: '/analytics/ingestion', icon: ChartBarIcon, permission: 'analytics:read' },
     { label: '论文分析', href: '/analytics/papers', icon: DocumentChartBarIcon, permission: 'analytics:read' },
     { label: '联系人分析', href: '/analytics/contacts', icon: ChartPieIcon, permission: 'analytics:read' },
     { label: '作者关系', href: '/analytics/authors', icon: ShareIcon, permission: 'analytics:read' },
-    { label: '活动分析', href: '#campaign-analytics', icon: DocumentChartBarIcon, permission: 'analytics:read' },
-    { label: '链接分析', href: '#link-analytics', icon: LinkIcon, permission: 'analytics:read' },
+    { label: '活动分析', href: '/analytics/campaigns', icon: DocumentChartBarIcon, permission: 'analytics:read' },
+    { label: '链接分析', href: '/analytics/links', icon: LinkIcon, permission: 'analytics:read' },
   ] },
   { label: '系统管理', items: [
     { label: 'SMTP 账户', href: '/admin/smtp-accounts', icon: ServerStackIcon, permission: 'smtp:read' },
     { label: '用户管理', href: '/admin/users', icon: UserGroupIcon, permission: 'user:read' },
     { label: '角色与权限', href: '/admin/roles', icon: ShieldCheckIcon, permission: 'role:read' },
     { label: '审计日志', href: '/admin/audit', icon: ClipboardDocumentListIcon, permission: 'audit:read' },
-    { label: '系统设置', href: '#settings', icon: Cog6ToothIcon, permission: 'system:manage' },
+    { label: '系统设置', href: '/admin/settings', icon: Cog6ToothIcon, permission: 'system:manage' },
   ] },
 ]
 

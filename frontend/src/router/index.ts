@@ -65,6 +65,22 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, permissions: ['template:read'], pageTitle: '模板编辑器', pageSection: '邮件运营' },
   },
   {
+    path: '/email/segments', name: 'email-segments', component: () => import('@/modules/campaigns/SegmentsView.vue'),
+    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '收件人分组', pageSection: '邮件运营' },
+  },
+  {
+    path: '/email/campaigns', name: 'email-campaigns', component: () => import('@/modules/campaigns/CampaignsView.vue'),
+    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '邮件活动', pageSection: '邮件运营' },
+  },
+  {
+    path: '/email/campaigns/:id', name: 'email-campaign-detail', component: () => import('@/modules/campaigns/CampaignDetailView.vue'),
+    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '活动编辑器', pageSection: '邮件运营' },
+  },
+  {
+    path: '/email/deliveries', name: 'email-deliveries', component: () => import('@/modules/campaigns/DeliveriesView.vue'),
+    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '发送记录', pageSection: '邮件运营' },
+  },
+  {
     path: '/analytics/ingestion', name: 'ingestion-analytics',
     component: () => import('@/modules/analytics/AnalyticsView.vue'), props: { view: 'ingestion' },
     meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '采集分析', pageSection: '数据分析' },
@@ -83,6 +99,16 @@ export const routes: RouteRecordRaw[] = [
     path: '/analytics/authors', name: 'author-analytics',
     component: () => import('@/modules/analytics/AuthorsAnalyticsView.vue'),
     meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '作者关系', pageSection: '数据分析' },
+  },
+  {
+    path: '/analytics/campaigns', name: 'campaign-analytics',
+    component: () => import('@/modules/campaigns/CampaignAnalyticsView.vue'),
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '活动分析', pageSection: '数据分析' },
+  },
+  {
+    path: '/analytics/links', name: 'link-analytics',
+    component: () => import('@/modules/campaigns/LinkAnalyticsView.vue'),
+    meta: { requiresAuth: true, permissions: ['analytics:read'], pageTitle: '链接分析', pageSection: '数据分析' },
   },
   {
     path: '/admin/users', name: 'admin-users', component: () => import('@/modules/admin/UsersView.vue'),
@@ -105,6 +131,10 @@ export const routes: RouteRecordRaw[] = [
   {
     path: '/admin/smtp-accounts', name: 'admin-smtp-accounts', component: () => import('@/modules/email/SmtpAccountsView.vue'),
     meta: { requiresAuth: true, permissions: ['smtp:read'], pageTitle: 'SMTP 账户', pageSection: '系统管理' },
+  },
+  {
+    path: '/admin/settings', name: 'admin-settings', component: () => import('@/modules/admin/SystemSettingsView.vue'),
+    meta: { requiresAuth: true, permissions: ['system:manage'], pageTitle: '系统设置', pageSection: '系统管理' },
   },
   {
     path: '/forbidden', name: 'forbidden', component: () => import('@/views/ForbiddenView.vue'),
