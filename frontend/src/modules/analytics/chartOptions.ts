@@ -1,0 +1,138 @@
+import type { EChartsCoreOption } from 'echarts/core'
+
+import type { Breakdown, DailyCount, DailySeriesPoint, FunnelStep, NamedCount } from '@/modules/analytics/analytics.types'
+
+export const palette = ['#4f6ef7', '#22c55e', '#f59e0b', '#8b5cf6', '#06b6d4', '#ef4444', '#64748b']
+
+const axis = { axisLine: { lineStyle: { color: '#cbd5e1' } }, axisLabel: { color: '#64748b', fontSize: 11 } }
+
+export function countBars(data: NamedCount[], horizontal = false): EChartsCoreOption {
+  const labels = data.map((item) => item.label)
+  const values = data.map((item) => item.count)
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: horizontal ? 120 : 45, right: 18, top: 12, bottom: horizontal ? 24 : 70, containLabel: false },
+    xAxis: horizontal
+      ? { type: 'value', ...axis, splitLine: { lineStyle: { color: '#eef2f7' } } }
+      : { type: 'category', data: labels, ...axis, axisLabel: { ...axis.axisLabel, rotate: labels.length > 6 ? 32 : 0 } },
+    yAxis: horizontal
+      ? { type: 'category', data: labels, ...axis, inverse: true, axisLabel: { ...axis.axisLabel, width: 105, overflow: 'truncate' } }
+      : { type: 'value', ...axis, splitLine: { lineStyle: { color: '#eef2f7' } } },
+    series: [{ type: 'bar', data: values, barMaxWidth: 34, itemStyle: { borderRadius: horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] } }],
+  }
+}
+
+export function dailyOption(data: DailyCount[] | NamedCount[]): EChartsCoreOption {
+  const labels = data.map((item) => 'date' in item ? item.date : item.label)
+  const values = data.map((item) => item.count)
+  const line = data.length >= 8
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'axis' },
+    grid: { left: 48, right: 18, top: 16, bottom: 62 },
+    xAxis: { type: 'category', data: labels, boundaryGap: !line, ...axis, axisLabel: { ...axis.axisLabel, rotate: labels.length > 8 ? 35 : 0 } },
+    yAxis: { type: 'value', minInterval: 1, ...axis, splitLine: { lineStyle: { color: '#eef2f7' } } },
+    series: [{
+      type: line ? 'line' : 'bar', data: values, smooth: false, symbol: 'circle', symbolSize: 6,
+      areaStyle: line ? { color: 'rgba(79,110,247,.10)' } : undefined,
+      itemStyle: { borderRadius: line ? 0 : [4, 4, 0, 0] }, barMaxWidth: 34,
+    }],
+  }
+}
+
+export function dailySeriesOption(data: DailySeriesPoint[]): EChartsCoreOption {
+  const dates = [...new Set(data.map((item) => item.date))]
+  const groups = [...new Map(data.map((item) => [item.key, item.label])).entries()]
+  const line = dates.length >= 8
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'axis' },
+    legend: { bottom: 0, type: 'scroll', textStyle: { color: '#64748b', fontSize: 11 } },
+    grid: { left: 48, right: 18, top: 16, bottom: 70 },
+    xAxis: { type: 'category', data: dates, boundaryGap: !line, ...axis, axisLabel: { ...axis.axisLabel, rotate: dates.length > 8 ? 35 : 0 } },
+    yAxis: { type: 'value', minInterval: 1, ...axis, splitLine: { lineStyle: { color: '#eef2f7' } } },
+    series: groups.map(([key, label]) => ({
+      name: label, type: line ? 'line' : 'bar', stack: line ? undefined : 'throughput',
+      data: dates.map((date) => data.find((item) => item.date === date && item.key === key)?.count ?? 0),
+      smooth: false, symbol: 'circle', symbolSize: 6, barMaxWidth: 34,
+    })),
+  }
+}
+
+export function donutOption(data: NamedCount[]): EChartsCoreOption {
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'item', formatter: '{b}<br/>{c} ({d}%)' },
+    legend: { bottom: 0, type: 'scroll', textStyle: { color: '#64748b', fontSize: 11 } },
+    series: [{
+      type: 'pie', radius: ['45%', '70%'], center: ['50%', '43%'], avoidLabelOverlap: true,
+      label: { show: false }, emphasis: { label: { show: true, fontWeight: 'bold' } },
+      data: data.map((item) => ({ name: item.label, value: item.count })),
+    }],
+  }
+}
+
+export function funnelBars(data: FunnelStep[]): EChartsCoreOption {
+  return countBars(data.map((item) => ({ key: item.key, label: item.label, count: item.count })), true)
+}
+
+export function funnelOption(data: FunnelStep[]): EChartsCoreOption {
+  const maximum = Math.max(1, ...data.map((item) => item.count))
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: {
+      trigger: 'item',
+      formatter: (item: unknown) => {
+        const name = typeof item === 'object' && item !== null && 'name' in item ? String(item.name) : ''
+        const step = data.find((candidate) => candidate.label === name)
+        return step
+          ? `${step.label}<br/>${step.count} 篇 · 上一步转化 ${(step.rateFromPrevious * 100).toFixed(1)}%`
+          : name
+      },
+    },
+    series: [{
+      type: 'funnel', left: '7%', top: 8, bottom: 8, width: '86%',
+      min: 0, max: maximum, minSize: '18%', maxSize: '100%', sort: 'descending', gap: 4,
+      label: { show: true, position: 'inside', color: '#ffffff', formatter: '{b}  {c}', fontSize: 12 },
+      labelLine: { show: false },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 2, borderRadius: 4 },
+      emphasis: { label: { fontSize: 13, fontWeight: 'bold' } },
+      data: data.map((item) => ({ name: item.label, value: item.count })),
+    }],
+  }
+}
+
+export function treemapOption(data: NamedCount[]): EChartsCoreOption {
+  return {
+    aria: { enabled: true }, color: palette,
+    tooltip: { trigger: 'item', formatter: '{b}<br/>{c} 篇论文' },
+    series: [{
+      type: 'treemap', left: 4, right: 4, top: 4, bottom: 4,
+      roam: false, nodeClick: false, breadcrumb: { show: false },
+      label: { show: true, color: '#ffffff', fontSize: 12, overflow: 'truncate' },
+      upperLabel: { show: false },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 2, gapWidth: 2, borderRadius: 4 },
+      levels: [{ color: palette, colorMappingBy: 'index', itemStyle: { borderWidth: 2, gapWidth: 2 } }],
+      data: data.map((item) => ({ name: item.label, value: item.count, id: item.key })),
+    }],
+  }
+}
+
+export function rateBars(data: Breakdown[]): EChartsCoreOption {
+  return {
+    ...countBars(data.map((item) => ({ key: item.key, label: item.label, count: item.rate * 100 })), true),
+    tooltip: {
+      trigger: 'axis',
+      formatter: (items: unknown) => {
+        const first = Array.isArray(items) ? items[0] as { dataIndex?: number } : null
+        const item = data[first?.dataIndex ?? 0]
+        return item ? `${item.label}<br/>${(item.rate * 100).toFixed(1)}% (${item.numerator}/${item.denominator})` : ''
+      },
+    },
+  }
+}
+
+export function durationBars(values: NamedCount[]): EChartsCoreOption {
+  return countBars(values)
+}

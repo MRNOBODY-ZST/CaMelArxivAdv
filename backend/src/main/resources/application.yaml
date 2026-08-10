@@ -1,0 +1,117 @@
+spring:
+  application:
+    name: camel-arxiv-platform
+  main:
+    web-application-type: reactive
+  r2dbc:
+    url: ${SPRING_R2DBC_URL:r2dbc:postgresql://localhost:5432/camel_arxiv}
+    username: ${POSTGRES_USER:camel}
+    password: ${POSTGRES_PASSWORD:}
+    pool:
+      enabled: true
+      initial-size: 2
+      max-size: 20
+  flyway:
+    enabled: true
+    url: ${SPRING_FLYWAY_URL:jdbc:postgresql://localhost:5432/camel_arxiv}
+    user: ${POSTGRES_USER:camel}
+    password: ${POSTGRES_PASSWORD:}
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:camel}
+    password: ${RABBITMQ_PASSWORD:}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+  jackson:
+    time-zone: UTC
+
+server:
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+springdoc:
+  api-docs:
+    path: /api/openapi.json
+  swagger-ui:
+    path: /api/docs
+
+app:
+  live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+  persistence:
+    enabled: ${APP_PERSISTENCE_ENABLED:true}
+  personalization:
+    enabled: ${PERSONALIZATION_ENABLED:false}
+    provider: ${PERSONALIZATION_PROVIDER:openai}
+    model: ${PERSONALIZATION_MODEL:gpt-5.6-luna}
+    max-recipients: ${PERSONALIZATION_MAX_RECIPIENTS:100}
+  runtime:
+    ray-configured: ${RAY_CONFIGURED:false}
+    rabbit-configured: ${RABBITMQ_CONFIGURED:true}
+    live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+  arxiv:
+    legacy-base-url: ${ARXIV_LEGACY_BASE_URL:https://export.arxiv.org/api/query}
+    oai-base-url: ${ARXIV_OAI_BASE_URL:https://oaipmh.arxiv.org/oai}
+    official-hosts: ${ARXIV_OFFICIAL_HOSTS:export.arxiv.org,oaipmh.arxiv.org,arxiv.org}
+    taxonomy-snapshot: classpath:arxiv/taxonomy-2026-08.json
+    preview-cache-ttl: ${ARXIV_PREVIEW_CACHE_TTL:PT24H}
+    request-timeout: ${ARXIV_REQUEST_TIMEOUT:PT30S}
+    min-request-interval: ${ARXIV_MIN_REQUEST_INTERVAL:PT3S}
+    max-retries: ${ARXIV_MAX_RETRIES:3}
+    preview-max-page-size: ${ARXIV_PREVIEW_MAX_PAGE_SIZE:100}
+    import-max-papers: ${ARXIV_IMPORT_MAX_PAPERS:10000}
+    user-agent: ${ARXIV_USER_AGENT:CaMelArxivAdv/0.1 (admin@example.invalid)}
+  auth:
+    access-token-ttl: ${AUTH_ACCESS_TOKEN_TTL:PT10M}
+    refresh-token-ttl: ${AUTH_REFRESH_TOKEN_TTL:P14D}
+    max-login-failures: ${AUTH_MAX_LOGIN_FAILURES:5}
+    login-failure-window: ${AUTH_LOGIN_FAILURE_WINDOW:PT15M}
+    issuer: ${AUTH_ISSUER:camel-arxiv}
+    signing-key-base64: ${JWT_SIGNING_KEY_BASE64:}
+    fingerprint-hmac-key-base64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:}
+    cookie:
+      secure: ${AUTH_COOKIE_SECURE:true}
+      same-site: ${AUTH_COOKIE_SAME_SITE:Strict}
+      path: /api/v1/auth
+    bootstrap-admin:
+      username: ${INITIAL_ADMIN_USERNAME:}
+      email: ${INITIAL_ADMIN_EMAIL:}
+      display-name: ${INITIAL_ADMIN_DISPLAY_NAME:Administrator}
+      password: ${INITIAL_ADMIN_PASSWORD:}
+  contact:
+    data-protection:
+      encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}
+      email-hmac-key-base64: ${APP_EMAIL_HMAC_KEY_BASE64:}
+  template:
+    max-content-bytes: ${TEMPLATE_MAX_CONTENT_BYTES:102400}
+    assets:
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ACCESS_KEY:camelminio}
+      secret-key: ${MINIO_SECRET_KEY:change-this-for-local-development}
+      bucket: ${TEMPLATE_ASSET_BUCKET:template-assets}
+      signing-key-base64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:}
+      public-base-url: ${PUBLIC_BASE_URL:http://localhost:8080}
+      max-bytes: ${TEMPLATE_ASSET_MAX_BYTES:5242880}
+  smtp:
+    live-allowed: ${ALLOW_LIVE_SMTP:false}
+    local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}
+    connect-timeout: ${SMTP_CONNECT_TIMEOUT:PT5S}
+    read-timeout: ${SMTP_READ_TIMEOUT:PT10S}
+    write-timeout: ${SMTP_WRITE_TIMEOUT:PT10S}
+    encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}

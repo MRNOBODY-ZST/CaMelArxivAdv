@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-08-05T00:00:00Z</responseDate>
+  <request verb="ListSets">https://oaipmh.arxiv.org/oai</request>
+  <ListSets>
+    <set><setSpec>cs:cs:AI</setSpec><setName>Artificial Intelligence</setName></set>
+    <set><setSpec>math:math:NA</setSpec><setName>Numerical Analysis</setName></set>
+    <set><setSpec>physics:astro-ph:GA</setSpec><setName>Astrophysics of Galaxies</setName></set>
+    <set><setSpec>physics:hep-th</setSpec><setName>High Energy Physics - Theory</setName></set>
+  </ListSets>
+</OAI-PMH>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/" xmlns:arXiv="http://arxiv.org/OAI/arXiv/">
+  <responseDate>2026-08-05T00:00:01Z</responseDate>
+  <request verb="ListRecords">https://oaipmh.arxiv.org/oai</request>
+  <ListRecords>
+    <record>
+      <header><identifier>oai:arXiv.org:2608.00001</identifier><datestamp>2026-08-04</datestamp><setSpec>cs:cs:AI</setSpec></header>
+      <metadata><arXiv:arXiv>
+        <arXiv:id>2608.00001</arXiv:id><arXiv:created>2026-08-01</arXiv:created><arXiv:updated>2026-08-04</arXiv:updated>
+        <arXiv:authors><arXiv:author><arXiv:keyname>Lovelace</arXiv:keyname><arXiv:forenames>Ada</arXiv:forenames><arXiv:affiliation>Analytical Institute</arXiv:affiliation></arXiv:author></arXiv:authors>
+        <arXiv:title>Reliable Agents</arXiv:title><arXiv:categories>cs.AI cs.LG</arXiv:categories><arXiv:abstract>A robust agent study.</arXiv:abstract>
+        <arXiv:doi>10.1000/example</arXiv:doi><arXiv:journal-ref>Journal of Agents</arXiv:journal-ref><arXiv:comments>12 pages</arXiv:comments><arXiv:license>http://creativecommons.org/licenses/by/4.0/</arXiv:license>
+      </arXiv:arXiv></metadata>
+    </record>
+    <resumptionToken>opaque-token-2</resumptionToken>
+  </ListRecords>
+</OAI-PMH>

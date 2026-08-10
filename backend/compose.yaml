@@ -1,0 +1,4 @@
+# Compatibility entry point retained for IDE integrations generated with the
+# original Spring project. The root Compose file is the single source of truth.
+include:
+  - ../docker-compose.yml

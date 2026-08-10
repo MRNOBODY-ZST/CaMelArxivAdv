@@ -1,0 +1,71 @@
+# 安全与隐私
+
+## 数据分类
+
+| 分类 | 示例 | 存储/输出规则 |
+|---|---|---|
+| Secret | JWT、HMAC/AES 密钥、Refresh Token、SMTP 凭据 | 仅运行平台 Secret 或不可逆摘要/加密值；禁止日志、URL、前端存储和审计详情 |
+| 个人联系数据 | 完整邮箱、人工验证记录 | AES-256-GCM 加密；最小权限、显式披露、披露审计和后续保留策略 |
+| 脱敏证据 | 掩码邮箱、规则、相对路径、行号、短上下文 | 可供 `contact:read_masked` 查看；禁止恢复或拼接完整地址 |
+| 论文元数据 | 标题、摘要、作者、分类、版本、公开 URL | 按 arXiv 来源和许可展示；保留导入来源与同步时间 |
+| Source 临时数据 | TeX、归档、展开文件 | 只在 Worker tmpfs 有界处理，结束后删除，不进数据库/对象存储/消息/日志 |
+| 运营/追踪数据 | 模板、Campaign、退订、投递和追踪事件 | 模板 HTML 按 allowlist 净化；真实发送必须通过活动审批、抑制、频控、签名和保留策略；Phase 7–8 完成前保持关闭 |
+
+## 密钥与加密
+
+生产至少使用五把当前必需且互不相同的 32 字节随机密钥：
+
+- `JWT_SIGNING_KEY_BASE64`：Access Token 签名；
+- `AUTH_FINGERPRINT_HMAC_KEY_BASE64`：认证指纹/IP 等敏感值摘要；
+- `APP_ENCRYPTION_KEY_BASE64`：联系人 AES-256-GCM；
+- `APP_EMAIL_HMAC_KEY_BASE64`：联系人规范化值去重；
+- `TEMPLATE_ASSET_SIGNING_KEY_BASE64`：私有模板图片读取 URL 的 HMAC 签名。
+
+后续追踪启用时再单独提供 `TRACKING_SIGNING_KEY_BASE64`。不得把示例值带入生产，不得复用同一次随机输出，也不得提交 `.env`。联系人规范化值和显示值使用不同随机 nonce；解密认证失败必须作为完整性错误处理，不能回退为明文。
+
+SMTP 密码同样在应用边界使用 `APP_ENCRYPTION_KEY_BASE64` 做 AES-256-GCM，并为每次写入生成随机 nonce。读取 API 只返回 `passwordConfigured`；更新的 `password=null` 表示保留原密文，显式新值才轮换密文/nonce。密码、密文、nonce、测试收件人和 SMTP transcript 不进入响应、日志、审计或消息。
+
+模板图片仍保存在非公开 MinIO bucket。编辑器和内部测试邮件只使用绑定模板与资产 UUID 的 HMAC 签名应用 URL；应用提供内容前会验证签名、模板未归档和资产归属。生成邮件时仅把有效签名路径转换到 `PUBLIC_BASE_URL` 的绝对 URL，MinIO 凭据和对象键不会暴露。Nginx 对签名资产 location 强制关闭 access log，避免 capability 查询参数落盘。复制含图模板时会校验 SHA-256、复制私有对象与元数据并重签为副本 UUID，因此归档源模板不会破坏副本。任何不可变模板版本仍引用图片时，删除操作会被拒绝。
+
+轮换联系人/SMTP 加密或联系人 HMAC 密钥需要专门的在线迁移：先引入带版本的新密钥材料，批量解密/重新加密和重建 HMAC 唯一值，核对数量后再停止旧版本读取。直接替换环境变量会令既有数据无法解密，不是有效轮换方式。
+
+## 授权与审计
+
+默认拒绝所有业务 API；公开范围仅限登录/刷新/注销、健康、API 文档及后续受签名保护的追踪入口。数据库账号状态和 `tokenVersion` 在受保护请求中实时校验。
+
+- `paper:import`：创建单篇/批量 Source 提取任务；
+- `contact:read_masked`：读取脱敏列表和证据；
+- `contact:read_full`：显式读取单条完整邮箱；
+- `contact:verify`：以乐观版本确认或驳回映射；
+- `analytics:read`：读取聚合分析并导出不含完整邮箱的 CSV；
+- `template:read`/`template:manage`：读取或修改净化模板、版本和私有图片；
+- `smtp:read`/`smtp:manage`：读取非秘密账户状态或修改/内部测试 SMTP；
+- `audit:read`：查看审计事件。
+
+完整邮箱披露和验证变化均记录 Actor、资源、结果、Trace ID、哈希化网络来源与非敏感 before/after。审计详情不能包含邮箱、Token、Cookie、Source 正文或加密密钥。
+
+分析 API 在数据库侧以加密联系人 ID 聚合，永不为统计解密邮箱；只返回域名、数量、分子/分母和平台推导的域名类别。CSV 对公式前缀转义，并记录 `ANALYTICS_EXPORT_CREATED`。域名类别不能解释为机构归属。
+
+## 网络与执行隔离
+
+生产 Compose 只发布 Nginx；PostgreSQL、Redis、RabbitMQ、MinIO、API 和两个 Worker 均位于内部网络。容器以专用非 root 用户运行、禁止提权并丢弃 capabilities。Nginx 设置 CSP、frame 拒绝、`nosniff`、严格 Referrer Policy 和权限策略。
+
+arXiv 出站请求只允许固定官方 HTTPS 主机并共享至少三秒的 Redis 租约。Source URL 不能由用户输入；重定向逐跳复验。Python Worker 只通过归档/文本库读取 Source，不调用 shell、TeX 引擎或归档内容。完整限制见 [TeX Source 提取](TEX_EXTRACTION.md)。
+
+## 日志、错误与消息
+
+日志采用结构化非敏感字段和 Trace ID；HTTP 错误不返回类名、堆栈或 Secret。禁止记录 Authorization、Cookie、JWT、Refresh 原值、完整邮箱、SMTP Secret、Source 内容、OAI token 全文或完整 AMQP 帧。
+
+RabbitMQ 信封有版本、类型、大小和字段边界；消费者先验证再处理，只在事务提交后 ACK。永久策略/完整性错误进入 DLQ；只有确认根因并核实消息归属后才能定点重放或清理。
+
+## 数据最小化与保留
+
+平台只采集论文明确公开的邮箱，不猜测、不丰富、不验证 SMTP 可投递性。默认只展示掩码；完整值按最小权限单条披露。Source 原文即时清理，提取证据必须截断并脱敏。
+
+模板图片使用随机对象键存入私有 MinIO bucket，只能经具备模板权限的 API 读取；上传同时校验大小、声明类型与 magic signature，禁止 SVG/HTML 和任意 data URL。模板只持久化服务端净化后的 HTML；预览 iframe 保持无脚本 sandbox，变量渲染还会执行文本/URL 上下文校验。
+
+`data_retention_policies` 是后续保留任务的事实配置。Phase 8/9 完成前仍需补齐自动清理执行器和最终法务期限；正式邮件运营前还必须完成退订、抑制、活动快照、审批、频控、投诉/退信回路和隐私告知。`ALLOW_LIVE_SMTP=false` 在这些条件满足前保持强制关闭；当前 Mailpit 测试链路不构成发送授权。
+
+## 事件响应
+
+疑似密钥或联系人泄漏时：立即停止相关 API/Worker 扩容与邮件消费者，撤销会话/受影响 Secret，保留审计和任务证据，按 Trace ID/时间窗确认范围，并执行经过演练的密钥迁移。不要删除审计、任务或抑制记录来“清理”事件，也不要在工单中粘贴敏感原值。

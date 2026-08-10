@@ -1,0 +1,373 @@
+name: camel-arxiv
+
+x-backend-environment: &backend-environment
+  POSTGRES_DB: ${POSTGRES_DB:-camel_arxiv}
+  POSTGRES_USER: ${POSTGRES_USER:-camel}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-for-local-development}
+  SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/${POSTGRES_DB:-camel_arxiv}
+  SPRING_FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-camel_arxiv}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: ${RABBITMQ_USER:-camel}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-change-this-for-local-development}
+  SPRING_MAIL_HOST: mailpit
+  SPRING_MAIL_PORT: "1025"
+  SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH: "false"
+  SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE: "false"
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-camelminio}
+  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-this-for-local-development}
+  TEMPLATE_ASSET_BUCKET: ${TEMPLATE_ASSET_BUCKET:-template-assets}
+  TEMPLATE_ASSET_MAX_BYTES: ${TEMPLATE_ASSET_MAX_BYTES:-5242880}
+  TEMPLATE_ASSET_SIGNING_KEY_BASE64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:?TEMPLATE_ASSET_SIGNING_KEY_BASE64 is required}
+  TEMPLATE_MAX_CONTENT_BYTES: ${TEMPLATE_MAX_CONTENT_BYTES:-102400}
+  SMTP_LOCAL_ALLOWED_HOSTS: ${SMTP_LOCAL_ALLOWED_HOSTS:-mailpit,localhost,127.0.0.1}
+  SMTP_CONNECT_TIMEOUT: ${SMTP_CONNECT_TIMEOUT:-PT5S}
+  SMTP_READ_TIMEOUT: ${SMTP_READ_TIMEOUT:-PT10S}
+  SMTP_WRITE_TIMEOUT: ${SMTP_WRITE_TIMEOUT:-PT10S}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  ALLOW_LIVE_SMTP: "false"
+  APP_PERSISTENCE_ENABLED: ${APP_PERSISTENCE_ENABLED:-true}
+  AUTH_ACCESS_TOKEN_TTL: ${AUTH_ACCESS_TOKEN_TTL:-PT10M}
+  AUTH_REFRESH_TOKEN_TTL: ${AUTH_REFRESH_TOKEN_TTL:-P14D}
+  AUTH_MAX_LOGIN_FAILURES: ${AUTH_MAX_LOGIN_FAILURES:-5}
+  AUTH_LOGIN_FAILURE_WINDOW: ${AUTH_LOGIN_FAILURE_WINDOW:-PT15M}
+  AUTH_ISSUER: ${AUTH_ISSUER:-camel-arxiv}
+  AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+  AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-Strict}
+  JWT_SIGNING_KEY_BASE64: ${JWT_SIGNING_KEY_BASE64:?JWT_SIGNING_KEY_BASE64 is required}
+  AUTH_FINGERPRINT_HMAC_KEY_BASE64: ${AUTH_FINGERPRINT_HMAC_KEY_BASE64:?AUTH_FINGERPRINT_HMAC_KEY_BASE64 is required}
+  APP_ENCRYPTION_KEY_BASE64: ${APP_ENCRYPTION_KEY_BASE64:?APP_ENCRYPTION_KEY_BASE64 is required}
+  APP_EMAIL_HMAC_KEY_BASE64: ${APP_EMAIL_HMAC_KEY_BASE64:?APP_EMAIL_HMAC_KEY_BASE64 is required}
+  ARXIV_LEGACY_BASE_URL: https://export.arxiv.org/api/query
+  ARXIV_OAI_BASE_URL: https://oaipmh.arxiv.org/oai
+  ARXIV_OFFICIAL_HOSTS: export.arxiv.org,oaipmh.arxiv.org,arxiv.org
+  ARXIV_MIN_REQUEST_INTERVAL: ${ARXIV_MIN_REQUEST_INTERVAL:-PT3S}
+  ARXIV_PREVIEW_CACHE_TTL: ${ARXIV_PREVIEW_CACHE_TTL:-PT24H}
+  ARXIV_USER_AGENT: CaMelArxivAdv/0.1 (${ARXIV_CONTACT_EMAIL:-admin@example.invalid})
+  INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-}
+  INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+  INITIAL_ADMIN_DISPLAY_NAME: ${INITIAL_ADMIN_DISPLAY_NAME:-Administrator}
+  INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+  PERSONALIZATION_ENABLED: ${PERSONALIZATION_ENABLED:-false}
+  PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-openai}
+  PERSONALIZATION_MODEL: ${PERSONALIZATION_MODEL:-gpt-5.6-luna}
+  PERSONALIZATION_MAX_RECIPIENTS: ${PERSONALIZATION_MAX_RECIPIENTS:-100}
+  RAY_CONFIGURED: "true"
+  RABBITMQ_CONFIGURED: "true"
+
+x-personalization-environment: &personalization-environment
+  PERSONALIZATION_ENABLED: ${PERSONALIZATION_ENABLED:-false}
+  PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-openai}
+  PERSONALIZATION_MODEL: ${PERSONALIZATION_MODEL:-gpt-5.6-luna}
+  PERSONALIZATION_API_KEY: ${OPENAI_API_KEY:-}
+  PERSONALIZATION_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+  PERSONALIZATION_REQUEST_TIMEOUT_SECONDS: ${PERSONALIZATION_REQUEST_TIMEOUT_SECONDS:-60}
+  PERSONALIZATION_MAXIMUM_CONCURRENCY: ${PERSONALIZATION_MAXIMUM_CONCURRENCY:-16}
+  PERSONALIZATION_LOG_LEVEL: ${PERSONALIZATION_LOG_LEVEL:-INFO}
+
+x-application-security: &application-security
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-camel_arxiv}
+      POSTGRES_USER: ${POSTGRES_USER:-camel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-for-local-development}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  redis:
+    image: redis:8.0.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  rabbitmq:
+    image: rabbitmq:4.1.1-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-camel}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-change-this-for-local-development}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [data]
+
+  minio:
+    image: minio/minio:RELEASE.2025-05-24T17-08-30Z
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-camelminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-this-for-local-development}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  mailpit:
+    image: axllent/mailpit:v1.27.1
+    restart: unless-stopped
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  backend-api:
+    <<: *application-security
+    image: camel-arxiv/backend:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      <<: *backend-environment
+      SPRING_PROFILES_ACTIVE: api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      mailpit: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/actuator/health/readiness"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks: [app, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.50", memory: 1G }
+        reservations: { memory: 256M }
+
+  mail-worker:
+    <<: *application-security
+    image: camel-arxiv/backend:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      <<: *backend-environment
+      SPRING_PROFILES_ACTIVE: mail-worker
+      ALLOW_LIVE_SMTP: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      mailpit: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/actuator/health/readiness"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks: [app, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 768M }
+        reservations: { memory: 256M }
+
+  arxiv-worker:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      ARXIV_WORKER_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
+      ARXIV_WORKER_REDIS_URL: redis://redis:6379/0
+      ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS: "3"
+      ARXIV_WORKER_LOG_LEVEL: INFO
+      ARXIV_WORKER_SOURCE_BASE_URL: https://export.arxiv.org/e-print
+      ARXIV_WORKER_TEMP_ROOT: /var/tmp/arxiv-source
+      ARXIV_WORKER_MAX_ARCHIVE_BYTES: ${ARXIV_SOURCE_MAX_ARCHIVE_BYTES:-52428800}
+      ARXIV_WORKER_MAX_EXTRACTED_BYTES: ${ARXIV_SOURCE_MAX_EXTRACTED_BYTES:-262144000}
+      ARXIV_WORKER_MAX_SINGLE_FILE_BYTES: ${ARXIV_SOURCE_MAX_SINGLE_FILE_BYTES:-20971520}
+      ARXIV_WORKER_MAX_FILE_COUNT: ${ARXIV_SOURCE_MAX_FILE_COUNT:-5000}
+      ARXIV_WORKER_MAX_COMPRESSION_RATIO: ${ARXIV_SOURCE_MAX_COMPRESSION_RATIO:-100}
+    entrypoint: ["python", "-m", "app.main"]
+    tmpfs:
+      - /var/tmp/arxiv-source:size=536870912,mode=1777
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('rabbitmq', 5672), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [app, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 768M }
+        reservations: { memory: 128M }
+
+  ray-head:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      RAY_USAGE_STATS_ENABLED: "0"
+    entrypoint: ["python", "-m", "ray.scripts.scripts"]
+    command:
+      - start
+      - --head
+      - --port=6379
+      - --ray-client-server-port=10001
+      - --num-cpus=0
+      - --include-dashboard=false
+      - --object-store-memory=134217728
+      - --block
+    shm_size: 512mb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 6379), 3).close(); socket.create_connection(('127.0.0.1', 10001), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks: [app]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 1280M }
+        reservations: { memory: 512M }
+
+  ray-worker:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      <<: *personalization-environment
+      RAY_USAGE_STATS_ENABLED: "0"
+    entrypoint: ["python", "-m", "ray.scripts.scripts"]
+    command:
+      - start
+      - --address=ray-head:6379
+      - --num-cpus=${RAY_WORKER_CPUS:-2}
+      - --object-store-memory=134217728
+      - --block
+    shm_size: 512mb
+    depends_on:
+      ray-head: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('ray-head', 6379), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks: [app]
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 2G }
+        reservations: { memory: 768M }
+
+  personalization-worker:
+    <<: *application-security
+    image: camel-arxiv/arxiv-worker:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      <<: *personalization-environment
+      PERSONALIZATION_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
+      PERSONALIZATION_RAY_ADDRESS: ray://ray-head:10001
+    entrypoint: ["python", "-m", "app.personalization.main"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      ray-head: { condition: service_healthy }
+      ray-worker: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('rabbitmq', 5672), 3).close(); socket.create_connection(('ray-head', 10001), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [app, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+        reservations: { memory: 128M }
+
+  frontend:
+    <<: *application-security
+    image: camel-arxiv/frontend:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      backend-api: { condition: service_healthy }
+    ports:
+      - name: http
+        target: 8080
+        published: ${HTTP_PORT:-8080}
+        protocol: tcp
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [edge, app]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 128M }
+        reservations: { memory: 32M }
+
+networks:
+  edge:
+  app:
+  data:
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+  minio-data:
+  mailpit-data:
