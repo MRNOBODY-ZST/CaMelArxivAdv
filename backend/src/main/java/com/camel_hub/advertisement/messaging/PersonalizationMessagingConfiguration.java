@@ -1,5 +1,8 @@
 package com.camel_hub.advertisement.messaging;
 
+import com.camel_hub.advertisement.campaign.CampaignRepository;
+import com.camel_hub.advertisement.email.template.TemplateEngine;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Declarables;
 import org.springframework.amqp.core.Queue;
@@ -7,6 +10,8 @@ import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
+import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 public class PersonalizationMessagingConfiguration {
@@ -30,5 +35,20 @@ public class PersonalizationMessagingConfiguration {
 				BindingBuilder.bind(worker).to(jobs).with("mail.personalization.generate"),
 				BindingBuilder.bind(backend).to(results).with("mail.personalization.result"),
 				BindingBuilder.bind(archive).to(dead).with("#"));
+	}
+
+	@Bean
+	@Profile("api")
+	PersonalizationResultHandler personalizationResultHandler(
+			CampaignRepository repository, TemplateEngine templateEngine,
+			ObjectMapper objectMapper, TransactionalOperator transactions
+	) {
+		return new PersonalizationResultHandler(repository, templateEngine, objectMapper, transactions);
+	}
+
+	@Bean
+	@Profile("api")
+	PersonalizationResultConsumer personalizationResultConsumer(PersonalizationResultHandler handler) {
+		return new PersonalizationResultConsumer(handler);
 	}
 }

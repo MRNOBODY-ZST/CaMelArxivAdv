@@ -149,6 +149,87 @@ public final class CampaignRepository {
 				.bind("id", campaignId).map((row, metadata) -> row.get("total", Long.class)).one();
 	}
 
+	public Mono<Boolean> markPersonalizationResultProcessed(UUID messageId, String idempotencyKey) {
+		return databaseClient.sql("""
+				INSERT INTO processed_messages (message_id, consumer_name, idempotency_key, result)
+				VALUES (:messageId, 'personalization-result', :idempotencyKey, 'SUCCEEDED')
+				ON CONFLICT DO NOTHING RETURNING message_id
+				""").bind("messageId", messageId).bind("idempotencyKey", idempotencyKey)
+				.map((row, metadata) -> true).one().defaultIfEmpty(false);
+	}
+
+	public Mono<ResultContext> resultContext(UUID campaignId, UUID recipientId, UUID jobId) {
+		return databaseClient.sql("""
+				SELECT c.from_name, c.reply_to
+				FROM campaigns c JOIN campaign_recipients r ON r.campaign_id = c.id
+				WHERE c.id = :campaignId AND r.id = :recipientId AND c.generation_job_id = :jobId
+				""").bind("campaignId", campaignId).bind("recipientId", recipientId).bind("jobId", jobId)
+				.map((row, metadata) -> new ResultContext(
+						row.get("from_name", String.class), row.get("reply_to", String.class))).one();
+	}
+
+	public Mono<Boolean> storeGenerated(
+			UUID campaignId, UUID recipientId, UUID jobId, GeneratedDraft draft
+	) {
+		return databaseClient.sql("""
+				UPDATE campaign_recipients r SET
+				    personalization_status = 'GENERATED', rendered_subject = :subject,
+				    rendered_html = :html, rendered_text = :text,
+				    personalization_rationale = :rationale,
+				    personalization_error_code = NULL, personalization_error_message = NULL,
+				    personalization_attempts = personalization_attempts + 1, personalized_at = now()
+				FROM campaigns c
+				WHERE r.id = :recipientId AND r.campaign_id = :campaignId
+				  AND c.id = r.campaign_id AND c.generation_job_id = :jobId
+				  AND r.personalization_status <> 'GENERATED'
+				""").bind("subject", draft.subject()).bind("html", draft.html()).bind("text", draft.text())
+				.bind("rationale", draft.rationale()).bind("recipientId", recipientId)
+				.bind("campaignId", campaignId).bind("jobId", jobId)
+				.fetch().rowsUpdated().map(rows -> rows == 1);
+	}
+
+	public Mono<Boolean> storeFailed(
+			UUID campaignId, UUID recipientId, UUID jobId, String errorCode, String errorMessage
+	) {
+		return databaseClient.sql("""
+				UPDATE campaign_recipients r SET
+				    personalization_status = 'FAILED', personalization_error_code = :errorCode,
+				    personalization_error_message = :errorMessage,
+				    personalization_attempts = personalization_attempts + 1, personalized_at = NULL
+				FROM campaigns c
+				WHERE r.id = :recipientId AND r.campaign_id = :campaignId
+				  AND c.id = r.campaign_id AND c.generation_job_id = :jobId
+				  AND r.personalization_status <> 'GENERATED'
+				""").bind("errorCode", errorCode).bind("errorMessage", errorMessage)
+				.bind("recipientId", recipientId).bind("campaignId", campaignId).bind("jobId", jobId)
+				.fetch().rowsUpdated().map(rows -> rows == 1);
+	}
+
+	public Mono<Void> refreshGenerationState(UUID campaignId, UUID jobId) {
+		return databaseClient.sql("""
+				UPDATE campaigns campaign SET
+				    generation_status = CASE
+				      WHEN state.pending_count > 0 THEN 'RUNNING'
+				      WHEN state.failed_count = 0 THEN 'COMPLETED'
+				      WHEN state.generated_count = 0 THEN 'FAILED'
+				      ELSE 'PARTIALLY_FAILED'
+				    END,
+				    generation_completed_at = CASE WHEN state.pending_count = 0 THEN now() ELSE NULL END,
+				    generation_error_summary = CASE
+				      WHEN state.failed_count > 0 THEN state.failed_count || ' recipient personalization(s) failed'
+				      ELSE NULL
+				    END,
+				    updated_at = now()
+				FROM (
+				  SELECT count(*) FILTER (WHERE personalization_status IN ('PENDING', 'QUEUED', 'RUNNING')) AS pending_count,
+				         count(*) FILTER (WHERE personalization_status = 'GENERATED') AS generated_count,
+				         count(*) FILTER (WHERE personalization_status = 'FAILED') AS failed_count
+				  FROM campaign_recipients WHERE campaign_id = :campaignId
+				) state
+				WHERE campaign.id = :campaignId AND campaign.generation_job_id = :jobId
+				""").bind("campaignId", campaignId).bind("jobId", jobId).fetch().rowsUpdated().then();
+	}
+
 	private String selectSql() {
 		return """
 				SELECT c.id, c.name, c.purpose, c.status, c.template_id, template.name AS template_name,
@@ -221,4 +302,8 @@ public final class CampaignRepository {
 			String personalizationStatus, String subject, String html, String text, String rationale,
 			String errorCode, String errorMessage, Instant personalizedAt, Instant createdAt
 	) { }
+
+	public record ResultContext(String fromName, String replyTo) { }
+
+	public record GeneratedDraft(String subject, String html, String text, String rationale) { }
 }
