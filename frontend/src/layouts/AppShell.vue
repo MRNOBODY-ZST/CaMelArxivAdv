@@ -49,7 +49,7 @@ interface NavigationItem {
   anyPermissions?: readonly Permission[]
 }
 
-interface NavigationGroup {
+interface NavigationSection {
   id: string
   label: string
   defaultOpenOnWorkbench?: boolean
@@ -68,7 +68,7 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const navigation: readonly NavigationGroup[] = [
+const navigation: readonly NavigationSection[] = [
   { id: 'research', label: '研究数据', defaultOpenOnWorkbench: true, items: [
     { label: '论文发现', href: '/arxiv/discovery', icon: MagnifyingGlassIcon, permission: 'paper:read' },
     { label: '导入任务', href: '/jobs', icon: ArrowDownTrayIcon, permission: 'paper:read' },
