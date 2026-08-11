@@ -214,8 +214,9 @@ test('Edge desktop manages the local-only SMTP account without exposing its pass
   const consoleErrors = collectConsoleErrors(page)
 
   await page.goto('/admin/smtp-accounts')
-  await expect(page.getByRole('heading', { name: 'SMTP 账户', exact: true })).toBeVisible()
-  await expect(page.getByText('当前仅允许本机 Mailpit 白名单目的地')).toBeVisible()
+  await expect(page).toHaveURL(/\/admin\/mail-accounts$/)
+  await expect(page.getByRole('heading', { name: '邮件账户', exact: true })).toBeVisible()
+  await expect(page.getByText('公网 SMTP 已启用安全策略')).toBeVisible()
   const smtpCard = page.getByTestId(`smtp-account-${qaSmtpId}`)
   await expect(smtpCard.getByRole('heading', { name: qaSmtpName })).toBeVisible()
   await expect(smtpCard.getByText(/密码已安全配置/)).toBeVisible()
@@ -241,8 +242,9 @@ test('Edge mobile editor and navigation remain usable without horizontal overflo
 
   await page.getByTestId('mobile-navigation').click()
   await expect(page.getByRole('navigation', { name: '主导航' })).toBeVisible()
-  await page.getByRole('link', { name: 'SMTP 账户' }).click()
-  await expect(page.getByRole('heading', { name: 'SMTP 账户', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '系统管理' }).click()
+  await page.getByRole('link', { name: '邮件账户' }).click()
+  await expect(page.getByRole('heading', { name: '邮件账户', exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth > globalThis.innerWidth)).toBe(false)
   expect(consoleErrors).toEqual([])
 })

@@ -152,7 +152,7 @@ const SidebarContent = defineComponent({
             label: group.label,
             items: group.items,
             currentPath: route.path,
-            defaultOpen: route.path === '/' && group.defaultOpenOnWorkbench,
+            defaultOpen: route.path === '/' && group.defaultOpenOnWorkbench === true,
           })),
           ...(safetyDestination.value ? [h('li', { class: 'mt-auto border-t border-slate-200 pt-3' }, [
             h(RouterLink, {
