@@ -15,7 +15,7 @@ class RuntimeStatusControllerTest {
 	void exposesOnlyNonSecretReadinessInformation() {
 		var controller = new RuntimeStatusController(
 				new PersonalizationProperties(false, "openai", "gpt-test", 100),
-				new RuntimeStatusProperties(true, true, false));
+				new RuntimeStatusProperties(true, true, false, true));
 		WebTestClient client = WebTestClient.bindToController(controller)
 				.controllerAdvice(new GlobalExceptionHandler(null, null)).build();
 
@@ -24,7 +24,9 @@ class RuntimeStatusControllerTest {
 				.jsonPath("$.provider").isEqualTo("openai")
 				.jsonPath("$.model").isEqualTo("gpt-test")
 				.jsonPath("$.rayConfigured").isEqualTo(true)
+				.jsonPath("$.kafkaConfigured").isEqualTo(true)
 				.jsonPath("$.liveSmtpAllowed").isEqualTo(false)
+				.jsonPath("$.publicMailboxAllowed").isEqualTo(true)
 				.jsonPath("$.apiKey").doesNotExist()
 				.jsonPath("$.password").doesNotExist()
 				.jsonPath("$.secret").doesNotExist();

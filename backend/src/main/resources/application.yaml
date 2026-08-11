@@ -21,13 +21,26 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-  rabbitmq:
-    host: ${RABBITMQ_HOST:localhost}
-    port: ${RABBITMQ_PORT:5672}
-    username: ${RABBITMQ_USER:camel}
-    password: ${RABBITMQ_PASSWORD:}
-    publisher-confirm-type: correlated
-    publisher-returns: true
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: camel-backend
+    admin:
+      fail-fast: true
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        "[enable.idempotence]": true
+        "[max.in.flight.requests.per.connection]": 5
+    consumer:
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      isolation-level: read_committed
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: manual_immediate
   jackson:
     time-zone: UTC
 
@@ -63,8 +76,9 @@ app:
     max-recipients: ${PERSONALIZATION_MAX_RECIPIENTS:100}
   runtime:
     ray-configured: ${RAY_CONFIGURED:false}
-    rabbit-configured: ${RABBITMQ_CONFIGURED:true}
+    kafka-configured: ${KAFKA_CONFIGURED:true}
     live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+    public-mailbox-allowed: ${ALLOW_PUBLIC_MAILBOX:false}
   arxiv:
     legacy-base-url: ${ARXIV_LEGACY_BASE_URL:https://export.arxiv.org/api/query}
     oai-base-url: ${ARXIV_OAI_BASE_URL:https://oaipmh.arxiv.org/oai}
@@ -115,3 +129,9 @@ app:
     read-timeout: ${SMTP_READ_TIMEOUT:PT10S}
     write-timeout: ${SMTP_WRITE_TIMEOUT:PT10S}
     encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}
+  mailbox:
+    public-allowed: ${ALLOW_PUBLIC_MAILBOX:false}
+    local-allowed-hosts: ${MAILBOX_LOCAL_ALLOWED_HOSTS:mail-test,localhost,127.0.0.1}
+    connect-timeout: ${MAILBOX_CONNECT_TIMEOUT:PT5S}
+    read-timeout: ${MAILBOX_READ_TIMEOUT:PT10S}
+    max-preview-messages: ${MAILBOX_MAX_PREVIEW_MESSAGES:50}

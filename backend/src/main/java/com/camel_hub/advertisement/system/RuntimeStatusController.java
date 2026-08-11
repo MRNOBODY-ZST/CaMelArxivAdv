@@ -28,12 +28,14 @@ public class RuntimeStatusController {
 	Mono<RuntimeStatus> status() {
 		return Mono.just(new RuntimeStatus(
 				personalization.enabled(), personalization.provider(), personalization.model(),
-				runtime.rayConfigured(), runtime.rabbitConfigured(), runtime.liveSmtpAllowed(),
-				personalization.enabled() && runtime.rayConfigured() && runtime.rabbitConfigured()));
+				runtime.rayConfigured(), runtime.kafkaConfigured(), runtime.liveSmtpAllowed(),
+				runtime.publicMailboxAllowed(),
+				personalization.enabled() && runtime.rayConfigured() && runtime.kafkaConfigured()));
 	}
 
 	public record RuntimeStatus(
 			boolean personalizationEnabled, String provider, String model, boolean rayConfigured,
-			boolean rabbitConfigured, boolean liveSmtpAllowed, boolean generationReady
+			boolean kafkaConfigured, boolean liveSmtpAllowed, boolean publicMailboxAllowed,
+			boolean generationReady
 	) { }
 }

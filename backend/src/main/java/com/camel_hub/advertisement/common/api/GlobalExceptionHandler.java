@@ -23,6 +23,10 @@ import com.camel_hub.advertisement.campaign.SegmentValidationException;
 import com.camel_hub.advertisement.campaign.CampaignNotFoundException;
 import com.camel_hub.advertisement.campaign.CampaignValidationException;
 import com.camel_hub.advertisement.campaign.PersonalizationUnavailableException;
+import com.camel_hub.advertisement.email.mailbox.MailboxConflictException;
+import com.camel_hub.advertisement.email.mailbox.MailboxNotFoundException;
+import com.camel_hub.advertisement.email.mailbox.MailboxTransportException;
+import com.camel_hub.advertisement.email.mailbox.MailboxValidationException;
 import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
 import com.camel_hub.advertisement.email.smtp.SmtpNotFoundException;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
@@ -430,6 +434,38 @@ public class GlobalExceptionHandler {
 	) {
 		return response(exchange, HttpStatus.BAD_GATEWAY, "smtp_test_failed",
 				"SMTP operation failed", "SMTP failure category: " + exception.category().name(), Map.of());
+	}
+
+	@ExceptionHandler(MailboxValidationException.class)
+	ResponseEntity<ApiError> handleMailboxValidation(
+			MailboxValidationException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_mailbox_account",
+				"Mailbox account rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(MailboxNotFoundException.class)
+	ResponseEntity<ApiError> handleMailboxNotFound(
+			MailboxNotFoundException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.NOT_FOUND, "mailbox_account_not_found",
+				"Mailbox account not found", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(MailboxConflictException.class)
+	ResponseEntity<ApiError> handleMailboxConflict(
+			MailboxConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "mailbox_account_conflict",
+				"Mailbox account conflict", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(MailboxTransportException.class)
+	ResponseEntity<ApiError> handleMailboxTransport(
+			MailboxTransportException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.BAD_GATEWAY, "mailbox_operation_failed",
+				"Mailbox operation failed", "Mailbox failure category: " + exception.category().name(), Map.of());
 	}
 
 	@ExceptionHandler(ArxivDependencyException.class)

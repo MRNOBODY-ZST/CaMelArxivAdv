@@ -1,6 +1,11 @@
 package com.camel_hub.advertisement.email;
 
 import com.camel_hub.advertisement.audit.AuditService;
+import com.camel_hub.advertisement.email.mailbox.MailboxPolicy;
+import com.camel_hub.advertisement.email.mailbox.MailboxProperties;
+import com.camel_hub.advertisement.email.mailbox.MailboxRepository;
+import com.camel_hub.advertisement.email.mailbox.MailboxService;
+import com.camel_hub.advertisement.email.mailbox.MailboxTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpPolicy;
 import com.camel_hub.advertisement.email.smtp.SmtpProperties;
 import com.camel_hub.advertisement.email.smtp.SmtpRepository;
@@ -31,7 +36,9 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 @Profile("api")
-@EnableConfigurationProperties({TemplateProperties.class, TemplateAssetProperties.class, SmtpProperties.class})
+@EnableConfigurationProperties({
+		TemplateProperties.class, TemplateAssetProperties.class, SmtpProperties.class, MailboxProperties.class
+})
 public class EmailConfiguration {
 
 	@Bean
@@ -98,6 +105,26 @@ public class EmailConfiguration {
 
 	@Bean
 	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	MailboxRepository mailboxRepository(DatabaseClient databaseClient) {
+		return new MailboxRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	MailboxPolicy mailboxPolicy(MailboxProperties properties) {
+		return new MailboxPolicy(properties);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	MailboxTransport mailboxTransport(
+			SmtpSecretCrypto crypto, MailboxPolicy policy, MailboxProperties properties
+	) {
+		return new MailboxTransport(crypto, policy, properties);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	TemplateService templateService(
 			TemplateRepository repository, TemplateEngine engine, TemplateAssetCopyService assetCopyService,
 			AuditService auditService,
@@ -114,6 +141,17 @@ public class EmailConfiguration {
 			SmtpTransport transport
 	) {
 		return new SmtpService(repository, crypto, policy, auditService, hasher, transactions, transport);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	MailboxService mailboxService(
+			MailboxRepository repository, SmtpSecretCrypto crypto, MailboxPolicy policy,
+			MailboxTransport transport, MailboxProperties properties, AuditService auditService,
+			SensitiveValueHasher hasher, TransactionalOperator transactions
+	) {
+		return new MailboxService(
+				repository, crypto, policy, transport, properties, auditService, hasher, transactions);
 	}
 
 	@Bean

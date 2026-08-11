@@ -20,6 +20,8 @@ public final class Permission {
 	public static final String TEMPLATE_MANAGE = "template:manage";
 	public static final String SMTP_READ = "smtp:read";
 	public static final String SMTP_MANAGE = "smtp:manage";
+	public static final String MAILBOX_READ = "mailbox:read";
+	public static final String MAILBOX_MANAGE = "mailbox:manage";
 	public static final String CAMPAIGN_READ = "campaign:read";
 	public static final String CAMPAIGN_CREATE = "campaign:create";
 	public static final String CAMPAIGN_APPROVE = "campaign:approve";
