@@ -13,7 +13,6 @@ import {
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
   Bars3Icon,
-  BellIcon,
   ChartBarIcon,
   ChartPieIcon,
   ChevronDownIcon,
@@ -38,6 +37,7 @@ import { computed, defineComponent, h, type Component, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { useFocusReturningDisclosure } from '@/composables/useFocusReturningDisclosure'
+import NavigationGroup from '@/layouts/NavigationGroup.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { Permission } from '@/modules/auth/auth.types'
 
@@ -50,7 +50,9 @@ interface NavigationItem {
 }
 
 interface NavigationGroup {
+  id: string
   label: string
+  defaultOpenOnWorkbench?: boolean
   items: readonly NavigationItem[]
 }
 
@@ -67,20 +69,19 @@ const route = useRoute()
 const router = useRouter()
 
 const navigation: readonly NavigationGroup[] = [
-  { label: '概览', items: [{ label: '数据总览', href: '/', icon: HomeIcon }] },
-  { label: 'arXiv 数据', items: [
+  { id: 'research', label: '研究数据', defaultOpenOnWorkbench: true, items: [
     { label: '论文发现', href: '/arxiv/discovery', icon: MagnifyingGlassIcon, permission: 'paper:read' },
     { label: '导入任务', href: '/jobs', icon: ArrowDownTrayIcon, permission: 'paper:read' },
     { label: '论文库', href: '/papers', icon: ArchiveBoxIcon, permission: 'paper:read' },
     { label: '作者与联系人', href: '/contacts', icon: UsersIcon, permission: 'contact:read_masked' },
   ] },
-  { label: '邮件运营', items: [
+  { id: 'outreach', label: '邮件触达', defaultOpenOnWorkbench: true, items: [
     { label: '邮件模板', href: '/email/templates', icon: DocumentTextIcon, permission: 'template:read' },
     { label: '收件人分组', href: '/email/segments', icon: FolderIcon, permission: 'campaign:read' },
     { label: '邮件活动', href: '/email/campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
     { label: '发送记录', href: '/email/deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
   ] },
-  { label: '数据分析', items: [
+  { id: 'insights', label: '分析洞察', items: [
     { label: '采集分析', href: '/analytics/ingestion', icon: ChartBarIcon, permission: 'analytics:read' },
     { label: '论文分析', href: '/analytics/papers', icon: DocumentChartBarIcon, permission: 'analytics:read' },
     { label: '联系人分析', href: '/analytics/contacts', icon: ChartPieIcon, permission: 'analytics:read' },
@@ -88,7 +89,7 @@ const navigation: readonly NavigationGroup[] = [
     { label: '活动分析', href: '/analytics/campaigns', icon: DocumentChartBarIcon, permission: 'analytics:read' },
     { label: '链接分析', href: '/analytics/links', icon: LinkIcon, permission: 'analytics:read' },
   ] },
-  { label: '系统管理', items: [
+  { id: 'administration', label: '系统管理', items: [
     { label: '邮件账户', href: '/admin/mail-accounts', icon: ServerStackIcon, anyPermissions: ['smtp:read', 'mailbox:read'] },
     { label: '用户管理', href: '/admin/users', icon: UserGroupIcon, permission: 'user:read' },
     { label: '角色与权限', href: '/admin/roles', icon: ShieldCheckIcon, permission: 'role:read' },
@@ -107,8 +108,13 @@ const visibleNavigation = computed(() => navigation
   }))
   .filter((group) => group.items.length > 0))
 
-const pageTitle = computed(() => route.meta.pageTitle ?? '数据总览')
+const pageTitle = computed(() => route.meta.pageTitle ?? '工作台')
 const pageSection = computed(() => route.meta.pageSection ?? '概览')
+const safetyDestination = computed(() => {
+  if (auth.hasPermission('smtp:read') || auth.hasPermission('mailbox:read')) return '/admin/mail-accounts'
+  if (auth.hasPermission('system:manage')) return '/admin/settings'
+  return null
+})
 
 watch(() => route.fullPath, () => {
   if (sidebarOpen.value) void closeSidebar()
@@ -128,21 +134,35 @@ const SidebarContent = defineComponent({
         h('span', { class: 'text-base font-semibold tracking-tight text-slate-900' }, 'CaMel Arxiv'),
       ]),
       h('nav', { class: 'flex flex-1 flex-col', 'aria-label': '主导航' }, [
-        h('ul', { class: 'flex flex-1 flex-col gap-y-5', role: 'list' }, [
-          ...visibleNavigation.value.map((group) => h('li', { key: group.label }, [
-            h('p', { class: 'mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400' }, group.label),
-            h('ul', { class: 'space-y-0.5', role: 'list' }, group.items.map((item) => h('li', { key: item.label }, [
-              h(RouterLink, {
-                to: item.href,
-                'aria-current': route.path === item.href ? 'page' : undefined,
-                class: [
-                  'group flex min-h-10 items-center gap-3 rounded-md px-2.5 text-sm font-medium',
-                  route.path === item.href ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900',
-                ],
-              }, { default: () => [h(item.icon, { class: ['size-5 shrink-0', route.path === item.href ? 'text-brand-500' : 'text-slate-400 group-hover:text-slate-600'], 'aria-hidden': true }), item.label] }),
-            ]))),
-          ])),
-          h('li', { class: 'mt-auto pt-2' }, [h('div', { class: 'rounded-md bg-slate-50 p-3 text-xs/5 text-slate-500' }, [h('p', { class: 'font-medium text-slate-700' }, '邮件协议安全'), h('p', '公网连接强制 TLS · 草稿不会自动发送')])]),
+        h('ul', { class: 'flex flex-1 flex-col gap-y-2', role: 'list' }, [
+          h('li', [h(RouterLink, {
+            to: '/',
+            'aria-current': route.path === '/' ? 'page' : undefined,
+            class: [
+              'group flex min-h-10 items-center gap-3 rounded-md px-2.5 text-sm font-semibold',
+              route.path === '/' ? 'bg-brand-50 text-brand-700' : 'text-slate-700 hover:bg-slate-50 hover:text-slate-950',
+            ],
+          }, { default: () => [
+            h(HomeIcon, { class: ['size-5 shrink-0', route.path === '/' ? 'text-brand-500' : 'text-slate-400'], 'aria-hidden': true }),
+            '工作台',
+          ] })]),
+          ...visibleNavigation.value.map((group) => h(NavigationGroup, {
+            key: group.id,
+            id: group.id,
+            label: group.label,
+            items: group.items,
+            currentPath: route.path,
+            defaultOpen: route.path === '/' && group.defaultOpenOnWorkbench,
+          })),
+          ...(safetyDestination.value ? [h('li', { class: 'mt-auto border-t border-slate-200 pt-3' }, [
+            h(RouterLink, {
+              to: safetyDestination.value,
+              class: 'group flex min-h-11 items-center gap-3 rounded-md px-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-950',
+            }, { default: () => [
+              h(ShieldCheckIcon, { class: 'size-5 text-emerald-500', 'aria-hidden': true }),
+              h('span', [h('span', { class: 'block text-slate-800' }, '安全发送'), h('span', { class: 'block text-[11px] font-normal text-slate-400' }, '公网连接强制 TLS')]),
+            ] }),
+          ])] : []),
         ]),
       ]),
     ])
@@ -243,32 +263,6 @@ const SidebarContent = defineComponent({
             {{ pageSection }} / {{ pageTitle }}
           </p>
         </div>
-        <button
-          type="button"
-          class="hidden min-h-11 items-center gap-2 rounded-md px-3 text-sm text-slate-500 hover:bg-slate-50 sm:flex"
-          aria-label="打开全局搜索"
-        >
-          <MagnifyingGlassIcon class="size-5" /><span class="hidden xl:inline">全局搜索</span><kbd class="hidden rounded border border-slate-200 px-1.5 py-0.5 text-[10px] text-slate-400 xl:inline">⌘K</kbd>
-        </button>
-        <span class="hidden items-center gap-2 text-xs font-medium text-slate-600 md:flex"><span class="size-2 rounded-full bg-slate-300" />运行中任务 —</span>
-        <button
-          data-testid="mobile-task-status"
-          type="button"
-          class="grid min-h-11 min-w-11 place-items-center rounded-md hover:bg-slate-50 md:hidden"
-          aria-label="运行中任务 —"
-        >
-          <span
-            class="size-2 rounded-full bg-slate-300"
-            aria-hidden="true"
-          />
-        </button>
-        <button
-          type="button"
-          class="min-h-11 min-w-11 p-2 text-slate-400 hover:text-slate-600"
-          aria-label="查看通知"
-        >
-          <BellIcon class="size-5" />
-        </button>
         <Menu
           as="div"
           class="relative"

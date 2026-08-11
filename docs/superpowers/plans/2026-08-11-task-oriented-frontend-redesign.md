@@ -175,7 +175,7 @@ Expected: FAIL because the shell still renders all groups and inert header contr
 
 - [ ] **Step 6: Refactor `AppShell.vue`**
 
-Replace the render-function sidebar group markup with `NavigationGroup`. Use labels “研究数据”, “邮件触达”, “分析洞察”, and “系统管理”. Keep permission filtering before passing items. Remove inert search, notification, and fake task-count controls. Keep page metadata and the user menu. Add a quiet header status with text “系统在线” only when the authenticated shell is rendered; do not imply component-level health.
+Replace the render-function sidebar group markup with `NavigationGroup`. Use labels “研究数据”, “邮件触达”, “分析洞察”, and “系统管理”. Keep permission filtering before passing items. Remove inert search, notification, fake task-count, and static health controls. Keep page metadata and the user menu. Live health remains in the dashboard attention rail, where it is backed by `getSystemHealth()`.
 
 - [ ] **Step 7: Run tests and commit**
 

@@ -52,7 +52,7 @@ Render different home screens for operators, analysts, and administrators. This 
 - Keep the four domain groups: research data, email outreach, analytics, and administration.
 - Make domain groups collapsible. The group containing the active route opens automatically; the first two workflow groups are open on the home page; secondary analytics and administration start collapsed.
 - Remove inert global-search and notification controls from the header.
-- Keep the current page title, breadcrumb, user menu, and a truthful system-health indicator.
+- Keep the current page title, breadcrumb, and user menu. System health belongs only in the dashboard attention rail, where it is backed by the live health request.
 - Replace the static sidebar safety card with a compact “安全发送” link to mail accounts and system settings only when permitted.
 
 ### Dashboard priority order
