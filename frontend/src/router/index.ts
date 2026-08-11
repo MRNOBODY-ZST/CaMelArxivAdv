@@ -21,7 +21,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/', name: 'dashboard', component: () => import('@/views/DashboardView.vue'),
-    meta: { requiresAuth: true, pageTitle: '数据总览', pageSection: '概览' },
+    meta: { requiresAuth: true, pageTitle: '工作台', pageSection: '概览' },
   },
   {
     path: '/change-password', name: 'change-password',

@@ -194,7 +194,6 @@ git commit -m "feat: focus the application navigation"
 
 **Files:**
 - Create: `frontend/src/views/dashboard/DashboardNextAction.vue`
-- Create: `frontend/src/views/dashboard/DashboardMetricStrip.vue`
 - Create: `frontend/src/views/dashboard/DashboardWorkflow.vue`
 - Create: `frontend/src/views/dashboard/DashboardAttention.vue`
 - Create: `frontend/src/views/dashboard/DashboardFunnel.vue`
@@ -212,7 +211,6 @@ Mount real components with literal props. Assert:
 expect(nextAction.get('h2').text()).toBe('检查联系人提取结果')
 expect(nextAction.get('a').attributes('href')).toBe('/contacts')
 expect(workflow.findAll('li')).toHaveLength(4)
-expect(metricStrip.findAll('article')).toHaveLength(3)
 expect(attention.get('[aria-label="系统状态"]').text()).toContain('运行正常')
 expect(funnel.findAll('[data-testid="funnel-row"]')).toHaveLength(2)
 ```
@@ -225,9 +223,9 @@ Run: `npm test -- src/views/dashboard/__tests__/dashboard.components.spec.ts --r
 
 Expected: FAIL because the dashboard components do not exist.
 
-- [ ] **Step 3: Implement the next action and metric strip**
+- [ ] **Step 3: Implement the next action and shared-border workflow statistics**
 
-Adapt Page Heading with Actions and Stats with Shared Borders. The primary action uses one restrained brand-tinted surface. `DashboardMetricStrip` uses a two-column mobile grid and three-column desktop layout; tooltips remain available through accessible `title` text.
+Adapt Page Heading with Actions and Stats with Shared Borders. The primary action uses one restrained brand-tinted surface. Integrate the three available API metrics into the four workflow stages so each value appears exactly once.
 
 - [ ] **Step 4: Implement workflow, attention, and funnel components**
 
@@ -296,7 +294,6 @@ Use this desktop structure:
     <div class="min-w-0 space-y-6">
       <DashboardNextAction />
       <DashboardWorkflow />
-      <DashboardMetricStrip />
     </div>
     <DashboardAttention />
   </div>
@@ -337,7 +334,6 @@ git commit -m "feat: turn the dashboard into a guided workbench"
 - Modify: `frontend/src/styles.css`
 - Modify: `frontend/src/views/DashboardView.vue`
 - Modify: `frontend/src/views/dashboard/DashboardNextAction.vue`
-- Modify: `frontend/src/views/dashboard/DashboardMetricStrip.vue`
 - Modify: `frontend/src/views/dashboard/DashboardWorkflow.vue`
 - Modify: `frontend/src/views/dashboard/DashboardAttention.vue`
 - Modify: `frontend/src/views/dashboard/DashboardFunnel.vue`

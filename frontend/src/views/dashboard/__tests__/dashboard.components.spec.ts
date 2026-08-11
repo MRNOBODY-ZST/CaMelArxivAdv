@@ -2,10 +2,8 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
-import type { Metric } from '@/modules/analytics/analytics.types'
 import DashboardAttention from '@/views/dashboard/DashboardAttention.vue'
 import DashboardFunnel from '@/views/dashboard/DashboardFunnel.vue'
-import DashboardMetricStrip from '@/views/dashboard/DashboardMetricStrip.vue'
 import DashboardNextAction from '@/views/dashboard/DashboardNextAction.vue'
 import DashboardWorkflow from '@/views/dashboard/DashboardWorkflow.vue'
 import type {
@@ -34,21 +32,6 @@ describe('dashboard presentation components', () => {
 
     expect(wrapper.emitted('retry')).toHaveLength(1)
     expect(wrapper.find('a').exists()).toBe(false)
-  })
-
-  it('uses a shared-border metric strip without fabricating missing values', () => {
-    const wrapper = mount(DashboardMetricStrip, {
-      props: { metrics: [
-        metric('cohortPapers', '已导入论文', 81, 'count'),
-        metric('parsedCoverage', '解析覆盖率', 0.284, 'rate'),
-        metric('emailDiscovery', '邮箱发现率', 0.148, 'rate'),
-      ] },
-    })
-
-    expect(wrapper.findAll('article')).toHaveLength(3)
-    expect(wrapper.text()).toContain('28.4%')
-    expect(wrapper.text()).toContain('14.8%')
-    expect(wrapper.text()).not.toContain('12,840')
   })
 
   it('renders the four-stage workflow as real navigation', async () => {
@@ -106,10 +89,6 @@ const stages: DashboardWorkflowStage[] = [
   { key: 'contacts', title: '整理联系人', description: '审核邮箱和有效性', valueLabel: '14.8% 邮箱发现率', actionLabel: '查看联系人', href: '/contacts', tone: 'attention' },
   { key: 'outreach', title: '个性化触达', description: '选择收件人并生成草稿', valueLabel: '暂无数据', actionLabel: '管理邮件活动', href: '/email/campaigns', tone: 'neutral' },
 ]
-
-function metric(key: string, label: string, value: number, unit: Metric['unit']): Metric {
-  return { key, label, value, numerator: unit === 'rate' ? Math.round(value * 1_000) : value, denominator: unit === 'rate' ? 1_000 : 1, unit, definition: `${label} fixture` }
-}
 
 async function mountWithRouter(component: Parameters<typeof mount>[0], props: Record<string, unknown>) {
   const router = createRouter({

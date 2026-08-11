@@ -91,10 +91,6 @@ Renders the four-stage workflow as an open list with a continuous visual rail. E
 
 Renders a compact list of operational signals. Positive state is quiet; warnings use amber; errors use rose. It does not become another card grid.
 
-### `DashboardMetricStrip.vue`
-
-Adapts the template library's “Stats with shared borders” component. It retains real metric definitions via accessible help text and avoids horizontal scrolling on ordinary mobile widths by using a two-column grid.
-
 ### `NavigationGroup.vue`
 
 Encapsulates expandable sidebar groups, permission-filtered items, active state, keyboard semantics, and active-route auto-expansion. It uses native buttons and `aria-expanded`.
@@ -105,7 +101,7 @@ The implementation adapts these target-compliant Vue + Tailwind 4.2 templates fr
 
 - `application-ui/page-examples/home-screens/01__sidebar.vue`: main/attention split and open list rhythm;
 - `application-ui/headings/page-headings/01__with-actions.vue`: page heading and primary action alignment;
-- `application-ui/data-display/stats/05__with-shared-borders.vue`: compact metric strip;
+- `application-ui/data-display/stats/05__with-shared-borders.vue`: shared-border workflow statistics;
 - `application-ui/lists/feeds/01__simple-with-icons.vue`: workflow rail structure;
 - `application-ui/feedback/empty-states/03__with-starting-points.vue`: actionable no-data state;
 - `application-ui/application-shells/sidebar-layouts/03__sidebar-with-header.vue`: responsive shell and mobile drawer.
