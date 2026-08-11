@@ -18,7 +18,7 @@
 | 角色 | 默认权限 |
 |---|---|
 | `SUPER_ADMIN` | 全部 26 项权限 |
-| `ADMIN` | `user:read`, `user:create`, `user:update`, `user:disable`, `role:read`, `paper:read`, `paper:import`, `paper:delete`, `contact:read_masked`, `contact:read_full`, `contact:verify`, `contact:export`, `job:manage`, `template:read`, `template:manage`, `smtp:read`, `smtp:manage`, `campaign:read`, `campaign:create`, `campaign:approve`, `campaign:send`, `campaign:pause`, `analytics:read` |
+| `ADMIN` | `user:read`, `user:create`, `user:update`, `user:disable`, `role:read`, `paper:read`, `paper:import`, `paper:delete`, `contact:read_masked`, `contact:read_full`, `contact:verify`, `contact:export`, `job:manage`, `template:read`, `template:manage`, `smtp:read`, `smtp:manage`, `mailbox:read`, `mailbox:manage`, `campaign:read`, `campaign:create`, `campaign:approve`, `campaign:send`, `campaign:pause`, `analytics:read` |
 | `CAMPAIGN_MANAGER` | `paper:read`, `contact:read_masked`, `template:read`, `template:manage`, `campaign:read`, `campaign:create`, `campaign:send`, `campaign:pause`, `analytics:read` |
 | `DATA_ANALYST` | `paper:read`, `paper:import`, `contact:read_masked`, `contact:export`, `job:manage`, `analytics:read` |
 | `VIEWER` | `paper:read`, `campaign:read`, `analytics:read` |
@@ -32,7 +32,7 @@ paper:read paper:import paper:delete
 contact:read_masked contact:read_full contact:verify contact:export
 job:manage
 template:read template:manage
-smtp:read smtp:manage
+smtp:read smtp:manage mailbox:read mailbox:manage
 campaign:read campaign:create campaign:approve campaign:send campaign:pause
 analytics:read audit:read system:manage
 ```

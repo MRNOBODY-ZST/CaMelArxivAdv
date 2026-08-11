@@ -157,6 +157,7 @@ function recipient(): CampaignRecipient {
 function runtime(enabled: boolean): RuntimeStatus {
   return {
     personalizationEnabled: enabled, provider: 'openai', model: 'gpt-5.6-luna',
-    rayConfigured: true, rabbitConfigured: true, liveSmtpAllowed: false, generationReady: enabled,
+    rayConfigured: true, kafkaConfigured: true, liveSmtpAllowed: true,
+    publicMailboxAllowed: true, generationReady: enabled,
   }
 }

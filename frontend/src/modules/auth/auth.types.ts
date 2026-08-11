@@ -5,6 +5,7 @@ export const PERMISSION_CODES = [
   'contact:read_masked', 'contact:read_full', 'contact:verify', 'contact:export',
   'job:manage', 'template:read', 'template:manage',
   'smtp:read', 'smtp:manage',
+  'mailbox:read', 'mailbox:manage',
   'campaign:read', 'campaign:create', 'campaign:approve', 'campaign:send', 'campaign:pause',
   'analytics:read', 'audit:read', 'system:manage',
 ] as const

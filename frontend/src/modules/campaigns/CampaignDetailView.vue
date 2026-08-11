@@ -35,7 +35,7 @@ const generationUnavailableReason = computed(() => {
   if (!runtime.value) return '生成运行状态不可用，请由系统管理员检查服务配置。'
   if (!runtime.value.personalizationEnabled) return '个性化生成当前未启用：请在后端配置服务密钥后开启。'
   if (!runtime.value.rayConfigured) return 'Ray 计算集群尚未配置。'
-  if (!runtime.value.rabbitConfigured) return 'RabbitMQ 消息队列尚未配置。'
+  if (!runtime.value.kafkaConfigured) return 'Kafka 消息平台尚未配置。'
   if (campaign.value?.generationStatus !== 'NOT_REQUESTED') return '当前活动已经开始或完成生成，不能重复提交。'
   if (campaign.value?.status !== 'DRAFT') return '只有草稿活动可以生成个性化内容。'
   return ''

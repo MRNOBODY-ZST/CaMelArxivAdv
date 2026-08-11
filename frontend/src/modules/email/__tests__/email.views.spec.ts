@@ -31,7 +31,7 @@ describe('email administration views', () => {
     expect(wrapper.get('[data-testid="template-empty"]').text()).toContain('创建第一封邮件模板')
   })
 
-  it('makes local-only SMTP state and password preservation explicit', async () => {
+  it('makes public SMTP TLS policy and password preservation explicit', async () => {
     vi.mocked(emailApi.listSmtpAccounts).mockResolvedValue({
       items: [{
         id: 'smtp-1', name: 'Mailpit', host: 'mailpit', port: 1025, tlsMode: 'PLAIN_LOCAL_ONLY',
@@ -46,7 +46,7 @@ describe('email administration views', () => {
 
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="local-only-banner"]').text()).toContain('仅允许本机 Mailpit')
+    expect(wrapper.get('[data-testid="public-smtp-banner"]').text()).toContain('公网主机必须使用 STARTTLS')
     expect(wrapper.get('[data-testid="password-sentinel"]').text()).toContain('已安全配置')
     expect(wrapper.text()).not.toContain('sender@example.org')
     expect(wrapper.text()).not.toContain('reply@example.org')

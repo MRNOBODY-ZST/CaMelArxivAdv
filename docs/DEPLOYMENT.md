@@ -6,9 +6,9 @@
 cp .env.example .env
 ```
 
-生产部署必须替换数据库、RabbitMQ、MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`TEMPLATE_ASSET_SIGNING_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`AUTH_FINGERPRINT_HMAC_KEY_BASE64` 分别生成独立 32 字节随机值；后续启用追踪时再独立生成 `TRACKING_SIGNING_KEY_BASE64`。`docker-compose.yml` 对当前五把密钥使用必填插值，缺少任一值时配置渲染会直接失败。不要提交 `.env`，也不要复用随机输出。
+生产部署必须替换数据库与 MinIO 密码，并为 `APP_ENCRYPTION_KEY_BASE64`、`APP_EMAIL_HMAC_KEY_BASE64`、`TEMPLATE_ASSET_SIGNING_KEY_BASE64`、`JWT_SIGNING_KEY_BASE64`、`AUTH_FINGERPRINT_HMAC_KEY_BASE64` 分别生成独立 32 字节随机值；后续启用追踪时再独立生成 `TRACKING_SIGNING_KEY_BASE64`。Kafka 生产集群还必须独立配置 TLS/SASL 与 ACL。`docker-compose.yml` 对当前五把密钥使用必填插值，缺少任一值时配置渲染会直接失败。不要提交 `.env`，也不要复用随机输出。
 
-首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。真实 SMTP 仍保持 `ALLOW_LIVE_SMTP=false`，后续启用也只能由部署平台注入 Secret，不能写入 Compose 或镜像。
+首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。公网 SMTP/IMAP/POP3 由 `ALLOW_LIVE_SMTP` 与 `ALLOW_PUBLIC_MAILBOX` 控制，账户密码只能通过受权 API 写入加密存储，不能写入 Compose、镜像或日志。公网目标必须使用 TLS。
 
 个性化草稿默认使用 `PERSONALIZATION_ENABLED=false`。要启用时，必须由运行平台 Secret 注入 `OPENAI_API_KEY`，再设置 `PERSONALIZATION_ENABLED=true`；Key 为空时 Worker 会拒绝启动启用态。可配置 `PERSONALIZATION_MODEL`、并发和超时，但不要把 Key 写入 `.env.example`、Compose、镜像或前端。Ray head、Ray worker 和 personalization worker 只加入内部网络，10001/6379 不得发布到宿主机或公网。
 
@@ -44,7 +44,7 @@ docker compose -f docker-compose.yml ps
 生产基线只发布 `${HTTP_PORT:-8080}`。TLS 应在受信任的入口代理/负载均衡终止；边缘代理必须清除客户端自带的 forwarding headers。仓库 Nginx 只把连接的 `$remote_addr` 写入 `X-Forwarded-For`，不追加客户端链。若 Nginx 前还有负载均衡器，必须仅对其受控 CIDR 配置 `set_real_ip_from`，再启用 `real_ip_header`/`real_ip_recursive`，使 `$remote_addr` 成为真实客户端地址；禁止信任任意来源的转发头。公网部署还需要：
 
 - 外部 Secret Manager 和密钥轮换；
-- 托管 PostgreSQL/Redis/RabbitMQ 或可靠备份；
+- 托管 PostgreSQL/Redis/Kafka 或可靠备份；
 - TLS、域名、WAF/速率限制和集中日志；
 - 镜像仓库、签名、SBOM 与漏洞扫描；
 - 至少两个 API 副本和独立 worker 扩缩容；
@@ -56,11 +56,11 @@ Compose 的 `deploy.resources` 是容量指导；非 Swarm 运行时应在编排
 
 1. 备份 PostgreSQL/MinIO，验证可恢复。
 2. 构建并扫描不可变版本镜像，设置 `APP_VERSION`。
-3. 先启动 PostgreSQL/Redis/RabbitMQ/MinIO，等待健康。
+3. 先启动 PostgreSQL/Redis/Kafka/MinIO，等待健康并确认 `kafka-init` 已创建八个主题。
 4. 单实例启动 API 执行 Flyway；迁移成功后扩容 API/worker。
 5. 启动 Ray head/worker 和个性化消费者；检查内部 Ray Client、`mail.personalization.worker` 与 `mail.personalization.results.backend`。
 6. 启动前端，验证 `/healthz`、API readiness 和关键只读请求。
-7. 验证离线分类 API、Worker heartbeat、`arxiv.jobs.worker`/`arxiv.results.backend` bindings 和 Outbox 发布。
+7. 验证离线分类 API、Worker heartbeat、`camel.arxiv.jobs.v1`/`camel.arxiv.results.v1` consumer lag 和 Outbox 发布。
 8. 用少量明确 arXiv ID 做导入冒烟，确认 Job 终态、事件回放和论文库。
 9. 对一篇小型公开 Source 做提取冒烟，确认归档限制、加密联系人、脱敏 UI、提取运行和临时目录为空后再开放批量提取。
 10. 观察错误率、数据库连接、Redis 租约、队列/DLQ 和 tmpfs 使用量后再开放流量。

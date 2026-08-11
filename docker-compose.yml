@@ -8,14 +8,7 @@ x-backend-environment: &backend-environment
   SPRING_FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-camel_arxiv}
   REDIS_HOST: redis
   REDIS_PORT: "6379"
-  RABBITMQ_HOST: rabbitmq
-  RABBITMQ_PORT: "5672"
-  RABBITMQ_USER: ${RABBITMQ_USER:-camel}
-  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-change-this-for-local-development}
-  SPRING_MAIL_HOST: mailpit
-  SPRING_MAIL_PORT: "1025"
-  SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH: "false"
-  SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE: "false"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   MINIO_ENDPOINT: http://minio:9000
   MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-camelminio}
   MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-this-for-local-development}
@@ -23,12 +16,17 @@ x-backend-environment: &backend-environment
   TEMPLATE_ASSET_MAX_BYTES: ${TEMPLATE_ASSET_MAX_BYTES:-5242880}
   TEMPLATE_ASSET_SIGNING_KEY_BASE64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:?TEMPLATE_ASSET_SIGNING_KEY_BASE64 is required}
   TEMPLATE_MAX_CONTENT_BYTES: ${TEMPLATE_MAX_CONTENT_BYTES:-102400}
-  SMTP_LOCAL_ALLOWED_HOSTS: ${SMTP_LOCAL_ALLOWED_HOSTS:-mailpit,localhost,127.0.0.1}
+  SMTP_LOCAL_ALLOWED_HOSTS: ${SMTP_LOCAL_ALLOWED_HOSTS:-mailpit,mail-test,localhost,127.0.0.1}
   SMTP_CONNECT_TIMEOUT: ${SMTP_CONNECT_TIMEOUT:-PT5S}
   SMTP_READ_TIMEOUT: ${SMTP_READ_TIMEOUT:-PT10S}
   SMTP_WRITE_TIMEOUT: ${SMTP_WRITE_TIMEOUT:-PT10S}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
-  ALLOW_LIVE_SMTP: "false"
+  ALLOW_LIVE_SMTP: ${ALLOW_LIVE_SMTP:-true}
+  ALLOW_PUBLIC_MAILBOX: ${ALLOW_PUBLIC_MAILBOX:-true}
+  MAILBOX_LOCAL_ALLOWED_HOSTS: ${MAILBOX_LOCAL_ALLOWED_HOSTS:-mail-test,localhost,127.0.0.1}
+  MAILBOX_CONNECT_TIMEOUT: ${MAILBOX_CONNECT_TIMEOUT:-PT5S}
+  MAILBOX_READ_TIMEOUT: ${MAILBOX_READ_TIMEOUT:-PT10S}
+  MAILBOX_MAX_PREVIEW_MESSAGES: ${MAILBOX_MAX_PREVIEW_MESSAGES:-50}
   APP_PERSISTENCE_ENABLED: ${APP_PERSISTENCE_ENABLED:-true}
   AUTH_ACCESS_TOKEN_TTL: ${AUTH_ACCESS_TOKEN_TTL:-PT10M}
   AUTH_REFRESH_TOKEN_TTL: ${AUTH_REFRESH_TOKEN_TTL:-P14D}
@@ -56,7 +54,7 @@ x-backend-environment: &backend-environment
   PERSONALIZATION_MODEL: ${PERSONALIZATION_MODEL:-gpt-5.6-luna}
   PERSONALIZATION_MAX_RECIPIENTS: ${PERSONALIZATION_MAX_RECIPIENTS:-100}
   RAY_CONFIGURED: "true"
-  RABBITMQ_CONFIGURED: "true"
+  KAFKA_CONFIGURED: "true"
 
 x-personalization-environment: &personalization-environment
   PERSONALIZATION_ENABLED: ${PERSONALIZATION_ENABLED:-false}
@@ -67,6 +65,7 @@ x-personalization-environment: &personalization-environment
   PERSONALIZATION_REQUEST_TIMEOUT_SECONDS: ${PERSONALIZATION_REQUEST_TIMEOUT_SECONDS:-60}
   PERSONALIZATION_MAXIMUM_CONCURRENCY: ${PERSONALIZATION_MAXIMUM_CONCURRENCY:-16}
   PERSONALIZATION_LOG_LEVEL: ${PERSONALIZATION_LOG_LEVEL:-INFO}
+  PERSONALIZATION_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
 x-application-security: &application-security
   init: true
@@ -107,20 +106,57 @@ services:
       retries: 10
     networks: [data]
 
-  rabbitmq:
-    image: rabbitmq:4.1.1-management-alpine
+  kafka:
+    image: apache/kafka:4.1.2
     restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-camel}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-change-this-for-local-development}
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
+      - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "127.0.0.1:9092"]
       interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    networks: [data]
+
+  kafka-init:
+    image: apache/kafka:4.1.2
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for topic in \
+          camel.arxiv.jobs.v1 \
+          camel.arxiv.results.v1 \
+          camel.arxiv.retry.v1 \
+          camel.arxiv.dlt.v1 \
+          camel.mail.personalization.jobs.v1 \
+          camel.mail.personalization.results.v1 \
+          camel.mail.personalization.retry.v1 \
+          camel.mail.personalization.dlt.v1; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:9092 \
+            --create --if-not-exists \
+            --topic "$${topic}" \
+            --partitions 3 \
+            --replication-factor 1
+        done
+    depends_on:
+      kafka: { condition: service_healthy }
     networks: [data]
 
   minio:
@@ -155,6 +191,22 @@ services:
       retries: 10
     networks: [data]
 
+  mail-test:
+    image: greenmail/standalone:2.1.11
+    restart: unless-stopped
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=researcher:mail-test-password@example.test
+    healthcheck:
+      test: ["CMD", "bash", "-c", ": </dev/tcp/127.0.0.1/3143"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [data]
+
   backend-api:
     <<: *application-security
     image: camel-arxiv/backend:${APP_VERSION:-dev}
@@ -167,9 +219,10 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
       minio: { condition: service_healthy }
       mailpit: { condition: service_healthy }
+      mail-test: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/actuator/health/readiness"]
       interval: 15s
@@ -191,11 +244,11 @@ services:
     environment:
       <<: *backend-environment
       SPRING_PROFILES_ACTIVE: mail-worker
-      ALLOW_LIVE_SMTP: "false"
+      ALLOW_LIVE_SMTP: ${ALLOW_LIVE_SMTP:-true}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
       mailpit: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/actuator/health/readiness"]
@@ -216,7 +269,7 @@ services:
       context: .
       dockerfile: worker/Dockerfile
     environment:
-      ARXIV_WORKER_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
+      ARXIV_WORKER_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       ARXIV_WORKER_REDIS_URL: redis://redis:6379/0
       ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS: "3"
       ARXIV_WORKER_LOG_LEVEL: INFO
@@ -231,10 +284,10 @@ services:
     tmpfs:
       - /var/tmp/arxiv-source:size=536870912,mode=1777
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('rabbitmq', 5672), 3).close()"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('kafka', 9092), 3).close()"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -315,15 +368,14 @@ services:
       dockerfile: worker/Dockerfile
     environment:
       <<: *personalization-environment
-      PERSONALIZATION_RABBITMQ_URL: amqp://${RABBITMQ_USER:-camel}:${RABBITMQ_PASSWORD:-change-this-for-local-development}@rabbitmq:5672/
       PERSONALIZATION_RAY_ADDRESS: ray://ray-head:10001
     entrypoint: ["python", "-m", "app.personalization.main"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
       ray-head: { condition: service_healthy }
       ray-worker: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('rabbitmq', 5672), 3).close(); socket.create_connection(('ray-head', 10001), 3).close()"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('kafka', 9092), 3).close(); socket.create_connection(('ray-head', 10001), 3).close()"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -368,6 +420,6 @@ networks:
 volumes:
   postgres-data:
   redis-data:
-  rabbitmq-data:
+  kafka-data:
   minio-data:
   mailpit-data:

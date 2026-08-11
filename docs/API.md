@@ -143,9 +143,9 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 机器提取的联系人默认 `UNVERIFIED`。API 不支持批量完整邮箱披露；列表、Job 事件和错误体不会返回完整地址。
 
-### 邮件模板、私有图片与 SMTP
+### 邮件模板、私有图片与邮件协议账户
 
-模板读取需要 `template:read`，修改需要 `template:manage`；SMTP 读取/修改分别需要 `smtp:read`/`smtp:manage`。模板测试发送同时要求 `template:manage` 与 `smtp:manage`。
+模板读取需要 `template:read`，修改需要 `template:manage`；SMTP 读取/修改分别需要 `smtp:read`/`smtp:manage`，IMAP/POP3 读取/修改分别需要 `mailbox:read`/`mailbox:manage`。模板测试发送同时要求 `template:manage` 与 `smtp:manage`。
 
 | 方法与路径 | 说明 |
 |---|---|
@@ -167,12 +167,16 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 | `GET/PUT/DELETE /api/v1/smtp-accounts/{id}` | 读取、乐观更新或删除未被活动引用的账户；更新密码为 `null` 表示保留 |
 | `POST /api/v1/smtp-accounts/{id}/test-connection` | 验证握手并返回 `CONNECTION_SUCCEEDED` 或稳定错误类别 |
 | `POST /api/v1/smtp-accounts/{id}/test-email` | 发送一封内部诊断邮件并返回 `SMTP_ACCEPTED` |
+| `GET/POST /api/v1/mailbox-accounts` | 分页读取或创建 IMAP/POP3 账户；只返回 `passwordConfigured` |
+| `GET/PUT/DELETE /api/v1/mailbox-accounts/{id}` | 读取、乐观更新或删除邮箱账户；更新密码为 `null` 表示保留 |
+| `POST /api/v1/mailbox-accounts/{id}/test-connection` | 验证协议、TLS 与认证，返回稳定错误类别 |
+| `GET /api/v1/mailbox-accounts/{id}/messages?limit=20` | 以只读方式返回有界邮件头预览；发件人脱敏，不读取正文或附件 |
 
 模板仅允许 `author_name`、`first_name`、`paper_title`、`arxiv_id`、`primary_category`、`paper_url`、`organization` 和 `unsubscribe_url`。文本变量按文本转义；HTML 属性只允许完整的 URL 变量，且渲染值必须是无 user-info 的绝对 HTTP(S) URL。脚本、事件处理器、iframe、`javascript:`、危险 data URL、未知/畸形变量会被移除或拒绝。开启 `autoGenerateText` 时，状态随模板版本持久化，纯文本会从净化 HTML 重建并保留安全链接目标。
 
 资产签名 URL 只授权读取一张仍属于未归档模板的图片，不授予模板 API 权限。签名使用独立运行时密钥且不会包含 MinIO 对象键，边缘代理不会把带签名的查询串写入 access log；测试邮件渲染时会把有效的相对签名路径转换为 `PUBLIC_BASE_URL` 下的绝对 URL。复制模板会深拷贝被引用的图片并为副本重签，源模板归档后副本不受影响。模板主题和发件人名称会在变量替换后再次校验最终长度与控制字符，避免样例值绕过 Header 边界。
 
-`ALLOW_LIVE_SMTP=false` 时服务端只允许配置的 Mailpit/本机白名单目标，即使数据库账户标记为启用也不能访问公网 SMTP。`PLAIN_LOCAL_ONLY` 只用于该白名单；真实目标必须使用要求证书/主机名校验的 TLS 模式。
+`ALLOW_LIVE_SMTP` 与 `ALLOW_PUBLIC_MAILBOX` 分别控制公网 SMTP 和 IMAP/POP3。`PLAIN_LOCAL_ONLY` 只用于精确匹配的本地白名单；公网目标必须使用要求证书与主机名校验的 STARTTLS 或隐式 TLS。邮箱预览只以 `READ_ONLY` 打开文件夹，不删除邮件、不更改 flag，也不返回正文或附件。
 
 ### 数据统计
 
@@ -219,7 +223,7 @@ Access Token 只保存在前端内存；Refresh Token 使用 HttpOnly/Secure/Sam
 
 长任务 API 返回任务 ID；状态由 `jobs` 状态机管理。`/api/v1/jobs/{id}/stream` 提供 SSE，断线后客户端携带最后事件 ID 续传，无法维持流时每 5 秒轮询任务详情。
 
-RabbitMQ 信封固定包含：
+Kafka 信封固定包含：
 
 ```json
 {
@@ -236,7 +240,7 @@ RabbitMQ 信封固定包含：
 
 不支持的 `version` 必须拒绝；消费者只有在幂等写入成功后 ACK。
 
-Phase 3 的 RabbitMQ 拓扑使用 `arxiv.jobs`、`arxiv.results`、`arxiv.retry` 和 `arxiv.dead` 四个 durable topic exchange。命令 routing key 为 `arxiv.import.metadata`、`arxiv.sync.oai`、`arxiv.sync.taxonomy`；结果和 `worker.heartbeat` 均进入 API 结果队列。元数据批次最多 100 条，分类最多 500 条；分类内容随 `ARXIV_JOB_COMPLETED` 传输，使 active snapshot 与成功终态在一个数据库事务中提交。所有消息按数据库列宽做严格版本、大小和字段校验，永久约束错误进入 DLQ。
+Kafka 使用显式创建的 `camel.arxiv.{jobs,results,retry,dlt}.v1` 与 `camel.mail.personalization.{jobs,results,retry,dlt}.v1` 八个主题；自动建主题关闭。命令类型保留在信封与 Header 中，结果和 `WORKER_HEARTBEAT` 进入对应 results 主题。生产者启用幂等与 `acks=all`，消费者手工提交 offset；重试先写 retry 主题，达到上限或永久约束错误写 DLT。元数据批次最多 100 条，分类最多 500 条；分类内容随 `ARXIV_JOB_COMPLETED` 传输，使 active snapshot 与成功终态在一个数据库事务中提交。
 
 Phase 4 增加命令 `arxiv.extract.source` 和结果 `ARXIV_EXTRACTION_RESULT`。命令只含 Job、解析器版本及有界 `{paperId, arxivId}` 目标，不含 URL；结果只含 Source 状态/格式/尺寸、检查文件数、作者/机构、规范化联系人、置信度和脱敏证据，不含归档或 TeX 正文。API 在每篇结果事务中写提取运行、加密联系人、映射、证据、任务项、事件与幂等标记；只有全部任务项结果已持久化且计数一致，`ARXIV_JOB_COMPLETED` 才能提交任务终态。
 

@@ -8,11 +8,11 @@ curl -fsS http://localhost:8080/healthz
 curl -fsS http://localhost:8080/api/v1/system/health
 docker compose exec -T postgres pg_isready -U camel -d camel_arxiv
 docker compose exec -T redis redis-cli ping
-docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+docker compose exec -T kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092
 docker compose exec -T ray-head python -c "import socket; socket.create_connection(('127.0.0.1', 10001), 3).close()"
 ```
 
-正常基线为十二个服务 running/healthy，worker `RestartCount=0`。健康接口只返回状态，不暴露连接信息。
+正常基线为十三个服务 running/healthy、`kafka-init` 成功退出，worker `RestartCount=0`。健康接口只返回状态，不暴露连接信息。
 
 ## 日志与排障
 
@@ -21,20 +21,20 @@ docker compose logs --since=15m backend-api
 docker compose logs --since=15m mail-worker
 docker compose logs --since=15m arxiv-worker
 docker compose logs --since=15m personalization-worker ray-head ray-worker
-docker compose logs --since=15m postgres rabbitmq redis
+docker compose logs --since=15m postgres kafka redis
 ```
 
-按 Trace ID 串联 Nginx、API、任务事件和 worker 消息。禁止为了排障临时输出 Authorization、Cookie、邮箱、SMTP Secret、JWT、Source 内容或完整消息帧。Python worker 即使在 DEBUG 下也把 AMQP 协议库限制为 WARNING。
+按 Trace ID 串联 Nginx、API、任务事件和 worker 消息。禁止为了排障临时输出 Authorization、Cookie、邮箱、SMTP Secret、JWT、Source 内容或完整消息帧。Python worker 即使在 DEBUG 下也把 Kafka 协议库限制为 WARNING。
 
 常见现象：
 
 | 现象 | 检查 | 处理 |
 |---|---|---|
-| 前端 502/业务 API 意外 404 | `backend-api` health/logs 和 Nginx upstream | 先处理 Flyway/依赖连接；若只重建过后端容器，待其 healthy 后重建 `frontend`，使 Nginx 重新解析 Compose 服务地址 |
-| Worker 重启 | `docker inspect ... RestartCount` 与 worker logs | 检查入口、消息版本、RabbitMQ 凭据 |
+| 前端 502/业务 API 意外 404 | `backend-api` health/logs、Nginx upstream 与 Docker DNS | 先处理 Flyway/依赖连接；边缘 Nginx 使用 `127.0.0.11` 动态重解析 `backend-api`，后端 healthy 后应自行恢复。若仍失败，检查服务名与网络，不要用固定容器 IP |
+| Worker 重启 | `docker inspect ... RestartCount` 与 worker logs | 检查入口、消息版本、Kafka bootstrap 与 consumer group |
 | 任务长时间 RUNNING | `jobs.heartbeat_at`、worker heartbeat、队列积压 | 标记失联任务并按幂等键安全重试 |
 | arXiv 预览 503 | Redis、`backend-api` 日志、官方状态 | Redis 故障时保持 fail-closed；不要临时绕过全局限速 |
-| 分类同步停在 PENDING | `outbox_messages.published_at`、`arxiv.jobs.worker` binding | 先修复 Outbox/RabbitMQ；不要直接手工替换 active snapshot |
+| 分类同步停在 PENDING | `outbox_messages.published_at`、`camel.arxiv.jobs.v1` consumer lag | 先修复 Outbox/Kafka；不要直接手工替换 active snapshot |
 | OAI 同步反复重试 | Job checkpoint、`badResumptionToken`、官方 OAI 状态 | 让 Worker 按保存日期安全重启游标；不要编辑不透明 token |
 | Source 为 `SOURCE_UNAVAILABLE` | 官方论文 Source 可用性、Job 事件 | 这是论文级可接受终态；不要换第三方镜像或伪造 Source |
 | Source 为 `SECURITY_REJECTED` | 非敏感错误码、归档尺寸/格式、Worker 版本 | 保留归档边界，不手工解包；确认是否为格式变化后以测试夹具升级解析器 |
@@ -75,32 +75,32 @@ docker compose exec -T postgres psql -U camel -d camel_arxiv \
 docker compose exec -T postgres pg_dump -U camel -d camel_arxiv -Fc > camel_arxiv.dump
 ```
 
-恢复必须在隔离环境定期演练。MinIO、RabbitMQ definitions 和运行平台 Secret 需要独立备份；Redis 不作为唯一事实源。
+恢复必须在隔离环境定期演练。MinIO、Kafka topic/ACL 配置和运行平台 Secret 需要独立备份；Redis 不作为唯一事实源。
 
-## 队列与幂等
+## Kafka 主题与幂等
 
-- 监控 ready/unacked 数、最老消息年龄、重试和 DLQ。
-- 只在根因处理后重放 DLQ；保留原 `messageId`/`idempotencyKey`。
-- Outbox 发布后设置 `published_at`；消费者完成业务事务后记录 `processed_messages` 再 ACK。
+- 监控 consumer group lag、最老消息年龄、retry 和 DLT。
+- 只在根因处理后重放 DLT；保留原 `messageId`/`idempotencyKey`。
+- Outbox 发布后设置 `published_at`；消费者完成业务事务后记录 `processed_messages` 再手工提交 offset。
 - 不手工删除未知积压，也不直接把失败任务改为成功。
 
-Phase 3 队列快速检查：
+Kafka 快速检查：
 
 ```bash
-docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
-docker compose exec -T rabbitmq rabbitmqctl list_bindings source_name destination_name routing_key
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --all-groups --describe
 docker compose exec -T postgres psql -U camel -d camel_arxiv \
   -c "select id,type,status,current_stage,progress_percent,heartbeat_at from jobs where type like 'ARXIV_%' order by created_at desc limit 20;"
 docker compose exec -T postgres psql -U camel -d camel_arxiv \
   -c "select worker_id,status,current_job_id,last_seen_at from worker_heartbeats order by last_seen_at desc;"
 ```
 
-正常拓扑包含 `arxiv.jobs.worker <- arxiv.#`、`arxiv.results.backend <- arxiv.#` 和 `arxiv.results.backend <- worker.heartbeat`。`mail-worker` 不应消费 arXiv 结果队列，且其 `mail-worker` profile 不注册 `/api/v1/**` 业务 Controller。
+正常拓扑包含八个 `camel.*.v1` 主题；`kafka-init` 必须成功，broker 的 `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`。`mail-worker` 不应消费 arXiv results 主题，且其 `mail-worker` profile 不注册 `/api/v1/**` 业务 Controller。
 
 Phase 4 Source 快速检查：
 
 ```bash
-docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group camel-arxiv-workers-v1 --describe
 docker compose exec -T postgres psql -U camel -d camel_arxiv \
   -c "select id,status,current_stage,total_count,processed_count,success_count,failed_count from jobs where type='ARXIV_FETCH_AND_PARSE_SOURCE' order by created_at desc limit 20;"
 docker compose exec -T postgres psql -U camel -d camel_arxiv \
@@ -124,7 +124,7 @@ docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source
 - 官方 Source 请求与 Legacy/OAI 共用全局三秒租约；禁止为了吞吐建立绕过 Redis 的 Worker 池。
 - 默认只允许 tar/tar.gz/zip/gzip TeX/纯 TeX，并同时执行下载、展开、单文件、文件数、路径深度、include 深度、压缩比和解析时间上限。
 - Source 归档/展开文件只存在于 Worker tmpfs。`cleanup_confirmed=false` 不是可忽略告警，应隔离该 Worker 并确认目录和挂载生命周期。
-- 结果消息永久校验失败时可能进入 `arxiv.dead.archive`。先按 Job/Message ID 验证其确为本平台消息和失败根因；未知积压不得 purge。修复消费者后以原幂等键定点重放，重复结果会安全 ACK。
+- 结果消息永久校验失败时进入 `camel.arxiv.dlt.v1`。先按 Job/Message ID 验证其确为本平台消息和失败根因；未知积压不得删除。修复消费者后以原幂等键定点重放，重复结果会安全提交 offset。
 - 联系人列表按论文筛选时选择该论文范围内最新映射；全局列表选择联系人全局最新映射。人工验证使用 `mappingId` 与 `expectedVersion`，409 表示应刷新而不是覆盖。
 
 ## 邮件安全操作
@@ -133,14 +133,14 @@ docker compose exec -T arxiv-worker sh -c 'test -z "$(find /var/tmp/arxiv-source
 
 ```bash
 docker compose ps ray-head ray-worker personalization-worker
-docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged \
-  | grep 'mail.personalization'
+docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --group camel-personalization-workers-v1 --describe
 curl -fsS http://localhost:8080/api/v1/system/runtime
 ```
 
 未设置 `OPENAI_API_KEY` 时应保持 `PERSONALIZATION_ENABLED=false`，运行状态返回 `generationReady=false`，活动生成请求返回 503 且不创建收件人。启用后先用一个不超过数人的受控分组验收结构化草稿、退订变量、脚本净化、失败分类和幂等，再提高批量上限。生成结束不会自动进入 SMTP 投递。
 
-开发/CI 只使用 Mailpit。以开发覆盖启动后，在 `/admin/smtp-accounts` 创建 `mailpit:1025`、`PLAIN_LOCAL_ONLY` 账户；`ALLOW_LIVE_SMTP=false` 时任何公网 SMTP 主机都应返回 400。连接测试成功只表示握手成功，测试邮件的 `SMTP_ACCEPTED` 只表示 Mailpit/SMTP 接受，不是最终投递。
+开发/CI 的发送验收只使用 Mailpit；IMAP/POP3 验收使用隔离的 GreenMail。以开发覆盖启动后，在 `/admin/mail-accounts` 创建 `mailpit:1025`、`PLAIN_LOCAL_ONLY` SMTP 账户，以及 `mail-test:3143` IMAP 或 `mail-test:3110` POP3 账户（登录用户 `researcher`，收件地址 `researcher@example.test`）。连接测试成功只表示握手/认证成功，测试邮件的 `SMTP_ACCEPTED` 只表示 Mailpit/SMTP 接受，不是最终投递。公网账户必须使用 STARTTLS 或隐式 TLS；不要用真实发送作为故障诊断手段。
 
 本机验收顺序：
 
@@ -160,7 +160,7 @@ Edge E2E 要求账号同时拥有模板和 SMTP 管理权限；它会通过 API 
 
 ## V9 分析索引修正维护窗口
 
-已发布 V8 必须保持 checksum 不变。V9 在 PostgreSQL 事务中删除并重建两条索引以修正日期前导列；`DROP/CREATE INDEX` 会与写入竞争。生产升级必须先进入停写维护窗口：停止 `backend-api`、`mail-worker`、`arxiv-worker`，确认 RabbitMQ 业务队列无进行中消息并记录积压，确认 PostgreSQL 有足够临时/索引磁盘空间和无长事务，再只启动一个迁移实例。V9 设置 `lock_timeout=5s`，仍有写事务时升级应快速失败，不得无限等待或反复重启争锁。成功后检查 `pg_stat_user_indexes` 中九个 `ix_*_analytics_*` 索引有效、应用只读对账和 `EXPLAIN` 命中，再恢复 API/Worker。若 5 秒锁超时，先找出并正常结束写入方；不得直接杀死未知事务。
+已发布 V8 必须保持 checksum 不变。V9 在 PostgreSQL 事务中删除并重建两条索引以修正日期前导列；`DROP/CREATE INDEX` 会与写入竞争。生产升级必须先进入停写维护窗口：停止 `backend-api`、`mail-worker`、`arxiv-worker`，确认 Kafka 业务队列无进行中消息并记录积压，确认 PostgreSQL 有足够临时/索引磁盘空间和无长事务，再只启动一个迁移实例。V9 设置 `lock_timeout=5s`，仍有写事务时升级应快速失败，不得无限等待或反复重启争锁。成功后检查 `pg_stat_user_indexes` 中九个 `ix_*_analytics_*` 索引有效、应用只读对账和 `EXPLAIN` 命中，再恢复 API/Worker。若 5 秒锁超时，先找出并正常结束写入方；不得直接杀死未知事务。
 
 ## 保留与隐私
 

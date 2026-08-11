@@ -2,6 +2,7 @@ import type { PageResponse } from '@/modules/jobs/jobs.types'
 
 export type TemplateStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED'
 export type SmtpTlsMode = 'STARTTLS_REQUIRED' | 'TLS_IMPLICIT' | 'PLAIN_LOCAL_ONLY'
+export type MailboxProtocol = 'IMAP' | 'POP3'
 export type PreviewDevice = 'desktop' | 'mobile'
 
 export const TEMPLATE_VARIABLES = [
@@ -126,7 +127,41 @@ export interface SmtpTestResult {
   correlationId: string
 }
 
+export interface MailboxAccountRequest {
+  name: string
+  protocol: MailboxProtocol
+  host: string
+  port: number
+  tlsMode: SmtpTlsMode
+  username: string
+  password: string | null
+  folderName: string
+  enabled: boolean
+}
+
+export interface MailboxAccountView extends Omit<MailboxAccountRequest, 'password'> {
+  id: string
+  passwordConfigured: boolean
+  lastTestedAt: string | null
+  lastTestStatus: string | null
+  lastTestError: string | null
+  lockVersion: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MailboxMessageHeader {
+  remoteId: string
+  subject: string
+  fromMasked: string
+  receivedAt: string | null
+  sentAt: string | null
+  sizeBytes: number
+  hasAttachments: boolean
+}
+
 export type TemplatePage = PageResponse<TemplateView>
 export type SmtpPage = PageResponse<SmtpAccountView>
+export type MailboxPage = PageResponse<MailboxAccountView>
 
 export type TemplateSampleValues = Record<TemplateVariable, string>

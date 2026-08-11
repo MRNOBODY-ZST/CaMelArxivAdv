@@ -8,7 +8,7 @@ Source 提取只接受数据库中已导入论文的 UUID。API 根据论文记�
 flowchart LR
     U["授权用户"] -->|"单篇/批量提取"| A["Spring API"]
     A -->|"Job + Items + Outbox（同一事务）"| P[("PostgreSQL")]
-    A --> Q["RabbitMQ"]
+    A --> Q["Kafka"]
     Q --> W["隔离 Python Worker"]
     W -->|"官方 HTTPS + 全局租约"| X["export.arxiv.org/e-print"]
     W --> T["有界 tmpfs 临时目录"]
@@ -53,10 +53,10 @@ Worker 还固定限制目录深度 20、include 深度 16、单篇解析时间 6
 - Job 只有在所有任务项都存在已持久化结果且成功/跳过/失败计数一致时才能进入终态，避免结果进入 DLQ 后任务被误标成功。
 - 规范化邮箱和显示邮箱分别使用 AES-256-GCM、各自随机 nonce 加密；去重使用另一把独立密钥计算 HMAC-SHA-256。数据库明文只保留规范化域名和已经脱敏的短证据。
 - 联系人列表始终脱敏。完整地址只在显式 `full=true`、具备 `contact:read_full` 时短暂解密，并记录 `CONTACT_EMAIL_DISCLOSED` 审计事件。
-- Source 归档和展开文件不进入 PostgreSQL、RabbitMQ、MinIO 或应用日志；任务结束后只保留尺寸、格式、文件数、解析器版本、清理证明和脱敏证据。
+- Source 归档和展开文件不进入 PostgreSQL、Kafka、MinIO 或应用日志；任务结束后只保留尺寸、格式、文件数、解析器版本、清理证明和脱敏证据。
 
 ## 失败分类与排障
 
-`SOURCE_UNAVAILABLE` 表示官方没有可下载 Source；`SECURITY_REJECTED` 表示下载、格式或归档违反安全边界；`FAILED` 表示不可恢复的解析/持久化错误。可恢复的上游错误按现有 RabbitMQ 重试策略处理，超过上限进入 `arxiv.dead`。
+`SOURCE_UNAVAILABLE` 表示官方没有可下载 Source；`SECURITY_REJECTED` 表示下载、格式或归档违反安全边界；`FAILED` 表示不可恢复的解析/持久化错误。可恢复的上游错误按现有 Kafka 重试策略处理，超过上限进入 `camel.arxiv.dlt.v1`。
 
 不要通过降低安全限制、改用第三方镜像、手工解压未知归档或在日志中打印消息全文来排障。应按 Job ID 检查任务事件、提取运行的非敏感指标、Worker heartbeat、队列和临时目录是否为空，操作步骤见 [运维手册](OPERATIONS.md)。

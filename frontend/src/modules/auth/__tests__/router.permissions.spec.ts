@@ -30,6 +30,13 @@ describe('router permissions', () => {
     expect(authorRoute?.meta?.permissions).toEqual(['analytics:read'])
   })
 
+  it('allows either SMTP or mailbox read permission on the canonical mail account route', () => {
+    const route = routes.find((candidate) => candidate.path === '/admin/mail-accounts')
+
+    expect(route?.meta?.requiresAuth).toBe(true)
+    expect(route?.meta?.anyPermissions).toEqual(['smtp:read', 'mailbox:read'])
+  })
+
   it.each([
     ['/email/segments', 'campaign:read'],
     ['/email/campaigns', 'campaign:read'],

@@ -27,6 +27,5 @@
 data/
 minio-data/
 postgres-data/
-rabbitmq-data/
+kafka-data/
 redis-data/
-

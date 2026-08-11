@@ -6,7 +6,7 @@ import DashboardView from '@/views/DashboardView.vue'
 vi.mock('@/api/system', () => ({
   getSystemHealth: vi.fn().mockResolvedValue({
     status: 'UP',
-    components: { database: 'UP', redis: 'UP', rabbitmq: 'UP' },
+    components: { database: 'UP', redis: 'UP', kafka: 'UP' },
   }),
 }))
 

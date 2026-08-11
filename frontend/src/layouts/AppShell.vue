@@ -46,6 +46,7 @@ interface NavigationItem {
   href: string
   icon: Component
   permission?: Permission
+  anyPermissions?: readonly Permission[]
 }
 
 interface NavigationGroup {
@@ -88,7 +89,7 @@ const navigation: readonly NavigationGroup[] = [
     { label: '链接分析', href: '/analytics/links', icon: LinkIcon, permission: 'analytics:read' },
   ] },
   { label: '系统管理', items: [
-    { label: 'SMTP 账户', href: '/admin/smtp-accounts', icon: ServerStackIcon, permission: 'smtp:read' },
+    { label: '邮件账户', href: '/admin/mail-accounts', icon: ServerStackIcon, anyPermissions: ['smtp:read', 'mailbox:read'] },
     { label: '用户管理', href: '/admin/users', icon: UserGroupIcon, permission: 'user:read' },
     { label: '角色与权限', href: '/admin/roles', icon: ShieldCheckIcon, permission: 'role:read' },
     { label: '审计日志', href: '/admin/audit', icon: ClipboardDocumentListIcon, permission: 'audit:read' },
@@ -99,7 +100,10 @@ const navigation: readonly NavigationGroup[] = [
 const visibleNavigation = computed(() => navigation
   .map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.permission || auth.hasPermission(item.permission)),
+    items: group.items.filter((item) => (
+      (!item.permission || auth.hasPermission(item.permission))
+      && (!item.anyPermissions || item.anyPermissions.some(auth.hasPermission))
+    )),
   }))
   .filter((group) => group.items.length > 0))
 
@@ -138,7 +142,7 @@ const SidebarContent = defineComponent({
               }, { default: () => [h(item.icon, { class: ['size-5 shrink-0', route.path === item.href ? 'text-brand-500' : 'text-slate-400 group-hover:text-slate-600'], 'aria-hidden': true }), item.label] }),
             ]))),
           ])),
-          h('li', { class: 'mt-auto pt-2' }, [h('div', { class: 'rounded-md bg-slate-50 p-3 text-xs/5 text-slate-500' }, [h('p', { class: 'font-medium text-slate-700' }, '安全发送默认开启'), h('p', '真实 SMTP 当前默认禁用')])]),
+          h('li', { class: 'mt-auto pt-2' }, [h('div', { class: 'rounded-md bg-slate-50 p-3 text-xs/5 text-slate-500' }, [h('p', { class: 'font-medium text-slate-700' }, '邮件协议安全'), h('p', '公网连接强制 TLS · 草稿不会自动发送')])]),
         ]),
       ]),
     ])

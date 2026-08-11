@@ -8,6 +8,7 @@ declare module 'vue-router' {
     publicLayout?: boolean
     requiresAuth?: boolean
     permissions?: readonly Permission[]
+    anyPermissions?: readonly Permission[]
     pageTitle?: string
     pageSection?: string
   }
@@ -129,9 +130,13 @@ export const routes: RouteRecordRaw[] = [
     },
   },
   {
-    path: '/admin/smtp-accounts', name: 'admin-smtp-accounts', component: () => import('@/modules/email/SmtpAccountsView.vue'),
-    meta: { requiresAuth: true, permissions: ['smtp:read'], pageTitle: 'SMTP 账户', pageSection: '系统管理' },
+    path: '/admin/mail-accounts', name: 'admin-mail-accounts', component: () => import('@/modules/email/MailAccountsView.vue'),
+    meta: {
+      requiresAuth: true, anyPermissions: ['smtp:read', 'mailbox:read'],
+      pageTitle: '邮件账户', pageSection: '系统管理',
+    },
   },
+  { path: '/admin/smtp-accounts', redirect: '/admin/mail-accounts' },
   {
     path: '/admin/settings', name: 'admin-settings', component: () => import('@/modules/admin/SystemSettingsView.vue'),
     meta: { requiresAuth: true, permissions: ['system:manage'], pageTitle: '系统设置', pageSection: '系统管理' },
@@ -159,6 +164,9 @@ export function installAuthGuards(target: Router): void {
       return { name: 'change-password' }
     }
     if (to.meta.permissions && !auth.hasEveryPermission(to.meta.permissions)) {
+      return { name: 'forbidden' }
+    }
+    if (to.meta.anyPermissions && !to.meta.anyPermissions.some(auth.hasPermission)) {
       return { name: 'forbidden' }
     }
     return true

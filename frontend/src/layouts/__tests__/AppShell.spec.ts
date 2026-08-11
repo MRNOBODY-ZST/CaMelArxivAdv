@@ -27,7 +27,7 @@ describe('AppShell', () => {
     expect(wrapper.text()).toContain('论文库')
     expect(wrapper.text()).not.toContain('角色与权限')
     expect(wrapper.text()).not.toContain('审计日志')
-    expect(wrapper.text()).not.toContain('SMTP 账户')
+    expect(wrapper.text()).not.toContain('邮件账户')
   })
 
   it('exposes the dedicated author relationship analytics route', () => {

@@ -18,13 +18,14 @@ services:
   backend-api:
     environment:
       APP_ENV: development
-      ALLOW_LIVE_SMTP: "false"
+      ALLOW_LIVE_SMTP: ${ALLOW_LIVE_SMTP:-true}
+      ALLOW_PUBLIC_MAILBOX: ${ALLOW_PUBLIC_MAILBOX:-true}
       AUTH_COOKIE_SECURE: "false"
 
   mail-worker:
     environment:
       APP_ENV: development
-      ALLOW_LIVE_SMTP: "false"
+      ALLOW_LIVE_SMTP: ${ALLOW_LIVE_SMTP:-true}
       AUTH_COOKIE_SECURE: "false"
 
   arxiv-worker:

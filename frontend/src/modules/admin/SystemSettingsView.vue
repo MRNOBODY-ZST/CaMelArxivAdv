@@ -13,8 +13,9 @@ const error = ref('')
 const runtime = ref<RuntimeStatus | null>(null)
 const runtimeItems = computed(() => runtime.value ? [
   { label: 'Ray 分布式计算', ready: runtime.value.rayConfigured, readyLabel: '已连接', blockedLabel: '未连接' },
-  { label: 'RabbitMQ 消息队列', ready: runtime.value.rabbitConfigured, readyLabel: '已连接', blockedLabel: '未连接' },
+  { label: 'Kafka 消息平台', ready: runtime.value.kafkaConfigured, readyLabel: '已连接', blockedLabel: '未连接' },
   { label: '公网 SMTP 外发', ready: runtime.value.liveSmtpAllowed, readyLabel: '允许', blockedLabel: '禁止（安全）' },
+  { label: '公网 IMAP / POP3', ready: runtime.value.publicMailboxAllowed, readyLabel: '允许（强制 TLS）', blockedLabel: '禁止' },
 ] : [])
 
 async function load(): Promise<void> {
@@ -49,7 +50,7 @@ onMounted(load)
       >
         系统设置
       </h1><p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
-        查看个性化生成、Ray、消息队列和 SMTP 安全开关；接口不返回任何密钥或凭据。
+        查看个性化生成、Ray、Kafka 与邮件协议安全开关；接口不返回任何密钥或凭据。
       </p>
     </header>
     <DsAlert
@@ -76,9 +77,9 @@ onMounted(load)
         tone="success"
         title="个性化生成已就绪"
       >
-        活动可提交到 RabbitMQ，并由 Ray 集群分发生成任务。
+        活动可提交到 Kafka，并由 Ray 集群分发生成任务。
       </DsAlert>
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <DsCard padding="sm">
           <div class="flex items-center justify-between gap-3">
             <p class="text-sm font-semibold text-slate-900">
@@ -122,7 +123,7 @@ onMounted(load)
             <h2 class="text-sm font-semibold text-slate-900">
               安全配置说明
             </h2><p class="mt-1 text-sm/6 text-slate-500">
-              状态页仅报告开关、服务名和模型名。密钥只通过运行环境注入，不会写入数据库、前端包或日志。当前 SMTP 外发开关为“{{ runtime.liveSmtpAllowed ? '允许' : '禁止' }}”。
+              状态页仅报告开关、服务名和模型名。密钥只通过运行环境注入，不会写入前端包或日志。当前 SMTP 外发为“{{ runtime.liveSmtpAllowed ? '允许' : '禁止' }}”，IMAP/POP3 公网连接为“{{ runtime.publicMailboxAllowed ? '允许（强制 TLS）' : '禁止' }}”。
             </p>
           </div>
         </div>

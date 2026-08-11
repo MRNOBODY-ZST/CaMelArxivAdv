@@ -19,6 +19,8 @@ export const permissions = {
   templateManage: 'template:manage',
   smtpRead: 'smtp:read',
   smtpManage: 'smtp:manage',
+  mailboxRead: 'mailbox:read',
+  mailboxManage: 'mailbox:manage',
   campaignRead: 'campaign:read',
   campaignCreate: 'campaign:create',
   campaignApprove: 'campaign:approve',

@@ -1,4 +1,5 @@
 import type {
+  MailboxAccountRequest,
   PreviewDevice,
   SmtpAccountRequest,
   TemplateSampleValues,
@@ -19,6 +20,14 @@ export function createTemplateDraft(): TemplateUpsertRequest {
       textContent: '',
       autoGenerateText: true,
     },
+  }
+}
+
+export function createMailboxDraft(): MailboxAccountRequest {
+  return {
+    name: '本机 IMAP 测试账户', protocol: 'IMAP', host: 'mail-test', port: 3143,
+    tlsMode: 'PLAIN_LOCAL_ONLY', username: 'researcher', password: '',
+    folderName: 'INBOX', enabled: true,
   }
 }
 

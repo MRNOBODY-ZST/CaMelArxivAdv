@@ -19,6 +19,8 @@ import { emailApi, emailErrorMessage } from '@/modules/email/email.api'
 import { createSmtpDraft, maskEmailAddress, passwordForUpdate } from '@/modules/email/email.editor'
 import type { SmtpAccountRequest, SmtpAccountView, SmtpTlsMode } from '@/modules/email/email.types'
 
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+
 const auth = useAuthStore()
 const accounts = ref<SmtpAccountView[]>([])
 const loading = ref(true)
@@ -156,12 +158,24 @@ function tlsLabel(mode: SmtpTlsMode): string {
   <div class="space-y-6">
     <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <p class="text-xs font-semibold uppercase tracking-wider text-brand-600">
+        <p
+          v-if="!embedded"
+          class="text-xs font-semibold uppercase tracking-wider text-brand-600"
+        >
           系统管理
         </p>
-        <h1 class="mt-1 text-2xl font-semibold tracking-tight text-slate-950">
+        <h1
+          v-if="!embedded"
+          class="mt-1 text-2xl font-semibold tracking-tight text-slate-950"
+        >
           SMTP 账户
         </h1>
+        <h2
+          v-else
+          class="mt-1 text-lg font-semibold tracking-tight text-slate-950"
+        >
+          出站 SMTP
+        </h2>
         <p class="mt-2 max-w-2xl text-sm/6 text-slate-500">
           管理出站连接和速率上限。密码以 AES-GCM 加密保存，读取接口永不返回密码或密文。
         </p>
@@ -175,11 +189,11 @@ function tlsLabel(mode: SmtpTlsMode): string {
     </div>
 
     <DsAlert
-      data-testid="local-only-banner"
+      data-testid="public-smtp-banner"
       tone="info"
-      title="真实 SMTP 已禁用"
+      title="公网 SMTP 已启用安全策略"
     >
-      当前仅允许本机 Mailpit 白名单目的地；服务端会拒绝所有公网 SMTP 主机，即使账户被标记为启用。
+      公网主机必须使用 STARTTLS 或隐式 TLS 并校验证书主机名；明文连接只允许 Mailpit 等精确匹配的本地白名单。
     </DsAlert>
     <DsAlert
       v-if="errorMessage"
@@ -209,7 +223,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
     <DsCard v-else-if="accounts.length === 0">
       <DsEmptyState
         title="尚未配置 SMTP"
-        description="添加本机 Mailpit 账户后即可验证模板渲染和 MIME 内容。"
+        description="添加 SMTP 账户后可测试连接；批量发送仍受活动审批与发送状态机控制。"
       >
         <template #icon>
           <ServerStackIcon class="size-6" />
@@ -330,7 +344,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
     <DsModal
       :open="modalOpen"
       :title="modalTitle"
-      description="真实 SMTP 被服务端开关硬性禁用；本阶段建议仅使用 mailpit:1025。"
+      description="公网目标必须选择 STARTTLS 或隐式 TLS；PLAIN_LOCAL_ONLY 仅用于本地白名单。"
       @close="modalOpen = false"
     >
       <form
@@ -421,7 +435,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
         <DsSwitch
           v-model="form.enabled"
           label="启用此账户"
-          description="仍受真实 SMTP 总开关和目的地主机白名单约束。"
+          description="连接仍受公网协议开关、TLS 与本地主机白名单约束。"
         />
       </form>
       <template #actions>
@@ -443,7 +457,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
     <DsModal
       :open="Boolean(testingAccount)"
       title="发送内部测试邮件"
-      description="仅向本机 Mailpit 发送一封诊断消息，SMTP 接受不代表最终投递。"
+      description="向显式地址发送一封诊断消息；SMTP 接受不代表最终投递。请优先使用本机 Mailpit。"
       @close="testingAccount = null"
     >
       <DsInput
@@ -462,7 +476,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
           :busy="saving"
           @click="sendDiagnostic"
         >
-          发送到 Mailpit
+          发送测试邮件
         </DsButton>
       </template>
     </DsModal>

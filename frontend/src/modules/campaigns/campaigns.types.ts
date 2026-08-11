@@ -137,8 +137,9 @@ export interface RuntimeStatus {
   provider: string
   model: string
   rayConfigured: boolean
-  rabbitConfigured: boolean
+  kafkaConfigured: boolean
   liveSmtpAllowed: boolean
+  publicMailboxAllowed: boolean
   generationReady: boolean
 }
 
@@ -148,4 +149,3 @@ export type RecipientPage = PageResponse<CampaignRecipient>
 export type DeliveryPage = PageResponse<DeliveryView>
 export type CampaignAnalyticsPage = PageResponse<CampaignAnalyticsView>
 export type LinkAnalyticsPage = PageResponse<LinkAnalyticsView>
-

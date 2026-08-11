@@ -18,16 +18,17 @@ if [[ ! -f "$compose_file" ]]; then
   exit 1
 fi
 
-compose_json=$(docker compose --project-directory "$project_root" -f "$compose_file" config --format json)
+compose_json=$(docker compose --env-file /dev/null --project-directory "$project_root" -f "$compose_file" config --format json)
 development_compose_json=$(
   docker compose \
+    --env-file /dev/null \
     --project-directory "$project_root" \
     -f "$compose_file" \
     -f "$development_compose_file" \
     config --format json
 )
 actual_services=$(jq -r '.services | keys[]' <<<"$compose_json")
-required_services=(postgres redis rabbitmq minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend mailpit)
+required_services=(postgres redis kafka kafka-init minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend mailpit mail-test)
 
 for service in "${required_services[@]}"; do
   if ! grep -qx "$service" <<<"$actual_services"; then
@@ -36,15 +37,56 @@ for service in "${required_services[@]}"; do
   fi
 done
 
-if [[ $(jq -r '.services["mail-worker"].environment.ALLOW_LIVE_SMTP' <<<"$compose_json") != "false" ]]; then
-  echo "mail-worker must disable live SMTP by default" >&2
+if [[ $(jq -r '.services["mail-worker"].environment.ALLOW_LIVE_SMTP' <<<"$compose_json") != "true" ]]; then
+  echo "mail-worker must enable policy-protected public SMTP" >&2
   exit 1
 fi
 
-if [[ $(jq -r '.services["backend-api"].environment.ALLOW_LIVE_SMTP' <<<"$compose_json") != "false" ]]; then
-  echo "backend-api must disable live SMTP by default" >&2
+if [[ $(jq -r '.services["backend-api"].environment.ALLOW_LIVE_SMTP' <<<"$compose_json") != "true" ]]; then
+  echo "backend-api must enable policy-protected public SMTP" >&2
   exit 1
 fi
+
+if [[ $(jq -r '.services["backend-api"].environment.ALLOW_PUBLIC_MAILBOX' <<<"$compose_json") != "true" ]]; then
+  echo "backend-api must enable TLS-protected public mailbox connections" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.SPRING_KAFKA_BOOTSTRAP_SERVERS' <<<"$compose_json") != "kafka:9092" ]]; then
+  echo "backend-api must connect to the internal Kafka broker" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services.kafka.environment.KAFKA_AUTO_CREATE_TOPICS_ENABLE' <<<"$compose_json") != "false" ]]; then
+  echo "Kafka topic auto-creation must remain disabled" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_KAFKA_BOOTSTRAP_SERVERS' <<<"$compose_json") != "kafka:9092" ]]; then
+  echo "arxiv-worker must connect to the internal Kafka broker" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["personalization-worker"].environment.PERSONALIZATION_KAFKA_BOOTSTRAP_SERVERS' <<<"$compose_json") != "kafka:9092" ]]; then
+  echo "personalization-worker must connect to the internal Kafka broker" >&2
+  exit 1
+fi
+
+topic_init_command=$(jq -r '(.services["kafka-init"].command // []) | join(" ")' <<<"$compose_json")
+for topic in \
+  camel.arxiv.jobs.v1 \
+  camel.arxiv.results.v1 \
+  camel.arxiv.retry.v1 \
+  camel.arxiv.dlt.v1 \
+  camel.mail.personalization.jobs.v1 \
+  camel.mail.personalization.results.v1 \
+  camel.mail.personalization.retry.v1 \
+  camel.mail.personalization.dlt.v1; do
+  if [[ "$topic_init_command" != *"$topic"* ]]; then
+    echo "Kafka initializer is missing topic: $topic" >&2
+    exit 1
+  fi
+done
 
 if [[ $(jq -r '.services["backend-api"].environment.TEMPLATE_ASSET_BUCKET' <<<"$compose_json") != "template-assets" ]]; then
   echo "backend-api must use the dedicated private template asset bucket" >&2
@@ -53,6 +95,11 @@ fi
 
 if [[ $(jq -r '.services["backend-api"].environment.SMTP_LOCAL_ALLOWED_HOSTS' <<<"$compose_json") != *"mailpit"* ]]; then
   echo "backend-api local SMTP allowlist must include Mailpit" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.MAILBOX_LOCAL_ALLOWED_HOSTS' <<<"$compose_json") != *"mail-test"* ]]; then
+  echo "backend-api local mailbox allowlist must include the isolated test server" >&2
   exit 1
 fi
 
@@ -188,6 +235,13 @@ if grep -Fq '$proxy_add_x_forwarded_for' "$project_root/infra/nginx/default.conf
   exit 1
 fi
 
+if ! grep -Fq 'resolver 127.0.0.11' "$project_root/infra/nginx/default.conf" \
+  || ! grep -Fq 'set $backend_upstream backend-api:8080;' "$project_root/infra/nginx/default.conf" \
+  || grep -Fq 'proxy_pass http://backend-api:8080;' "$project_root/infra/nginx/default.conf"; then
+  echo "Edge Nginx must re-resolve the backend container after runtime replacement" >&2
+  exit 1
+fi
+
 signed_asset_location=$(
   sed -n '/location \^~ \/api\/v1\/template-assets\//,/^    }/p' \
     "$project_root/infra/nginx/default.conf"
@@ -197,7 +251,7 @@ if [[ -z "$signed_asset_location" ]] || ! grep -Fq 'access_log off;' <<<"$signed
   exit 1
 fi
 
-for internal_service in postgres redis rabbitmq minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker mailpit; do
+for internal_service in postgres redis kafka kafka-init minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker mailpit mail-test; do
   if [[ $(jq -r --arg service "$internal_service" '.services[$service] | has("ports")' <<<"$compose_json") == "true" ]]; then
     echo "$internal_service must not publish production ports" >&2
     exit 1

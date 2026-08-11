@@ -1,6 +1,6 @@
 # 数据模型与 ERD
 
-Flyway 从空库按十一个不可变迁移建立 54 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+Flyway 从空库按十三个不可变迁移建立 54 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
 
 ## 领域关系概览
 
@@ -54,6 +54,8 @@ erDiagram
 | `V9__correct_analytics_index_order.sql` | Phase 5 追加式索引修正 | 保持 V8 checksum；调整 Job/错误日期前导列；5 秒锁等待失败保护 |
 | `V10__template_smtp_administration.sql` | Phase 6 模板/SMTP 管理与私有图片 | 模板/SMTP 乐观锁；未删除模板名称唯一；图片对象键/大小/类型约束和读取索引 |
 | `V11__persist_template_text_generation_mode.sql` | Phase 6 文本替代一致性 | 每个不可变模板版本持久化 `auto_generate_text`，保证重开、复制和恢复不丢失模式 |
+| `V12__campaign_personalization.sql` | 论文感知的活动/收件人个性化状态 | 活动生成状态与时间一致性；收件人生成结果、失败摘要、尝试次数和查询索引 |
+| `V13__kafka_and_mailbox_accounts.sql` | Kafka Outbox 主题与 IMAP/POP3 收件账户 | 待发布主题索引；协议/TLS/端口/文件夹/密钥约束；收件账户权限与乐观锁 |
 
 ## 数据语义
 
@@ -70,6 +72,8 @@ erDiagram
 - `campaign_recipients` 是活动获批时的不可变收件人快照，不从实时 Contact 关系直接发送。
 - `email_template_versions` 保存净化 HTML、纯文本、验证摘要和自动文本模式；更新与恢复只追加版本。`template_assets` 只保存随机 MinIO 对象键、magic 校验后的媒体类型、尺寸和 SHA-256，实际对象保持私有。
 - `smtp_accounts` 的密码只保存 AES-GCM 密文和随机 nonce；乐观锁保护留空保留/显式轮换，API 不投影秘密列。
+- `mailbox_accounts` 以相同的 AES-GCM 边界保存 IMAP/POP3 密码，公网只允许 STARTTLS 或隐式 TLS；邮件预览只在只读连接中返回有界、脱敏的邮件头，不持久化正文或附件。
+- `outbox_messages.topic_name` 保存版本化 Kafka 主题；发布成功前 PostgreSQL 始终是消息事实来源，Kafka 重投依赖消息 ID 与结果表幂等约束。
 - `suppression_entries` 和 `unsubscribe_records` 在任何发送尝试前检查。
 - `tracking_events` 保存受保留策略控制的原始事件；仪表盘使用聚合表。
 

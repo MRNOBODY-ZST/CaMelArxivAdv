@@ -23,7 +23,7 @@
 
 后续追踪启用时再单独提供 `TRACKING_SIGNING_KEY_BASE64`。不得把示例值带入生产，不得复用同一次随机输出，也不得提交 `.env`。联系人规范化值和显示值使用不同随机 nonce；解密认证失败必须作为完整性错误处理，不能回退为明文。
 
-SMTP 密码同样在应用边界使用 `APP_ENCRYPTION_KEY_BASE64` 做 AES-256-GCM，并为每次写入生成随机 nonce。读取 API 只返回 `passwordConfigured`；更新的 `password=null` 表示保留原密文，显式新值才轮换密文/nonce。密码、密文、nonce、测试收件人和 SMTP transcript 不进入响应、日志、审计或消息。
+SMTP/IMAP/POP3 密码同样在应用边界使用 `APP_ENCRYPTION_KEY_BASE64` 做 AES-256-GCM，并为每次写入生成随机 nonce。读取 API 只返回 `passwordConfigured`；更新的 `password=null` 表示保留原密文，显式新值才轮换密文/nonce。密码、密文、nonce、测试收件人和协议 transcript 不进入响应、日志、审计或消息。
 
 模板图片仍保存在非公开 MinIO bucket。编辑器和内部测试邮件只使用绑定模板与资产 UUID 的 HMAC 签名应用 URL；应用提供内容前会验证签名、模板未归档和资产归属。生成邮件时仅把有效签名路径转换到 `PUBLIC_BASE_URL` 的绝对 URL，MinIO 凭据和对象键不会暴露。Nginx 对签名资产 location 强制关闭 access log，避免 capability 查询参数落盘。复制含图模板时会校验 SHA-256、复制私有对象与元数据并重签为副本 UUID，因此归档源模板不会破坏副本。任何不可变模板版本仍引用图片时，删除操作会被拒绝。
 
@@ -40,6 +40,7 @@ SMTP 密码同样在应用边界使用 `APP_ENCRYPTION_KEY_BASE64` 做 AES-256-G
 - `analytics:read`：读取聚合分析并导出不含完整邮箱的 CSV；
 - `template:read`/`template:manage`：读取或修改净化模板、版本和私有图片；
 - `smtp:read`/`smtp:manage`：读取非秘密账户状态或修改/内部测试 SMTP；
+- `mailbox:read`/`mailbox:manage`：读取非秘密 IMAP/POP3 状态与脱敏邮件头，或修改/测试邮箱账户；
 - `audit:read`：查看审计事件。
 
 完整邮箱披露和验证变化均记录 Actor、资源、结果、Trace ID、哈希化网络来源与非敏感 before/after。审计详情不能包含邮箱、Token、Cookie、Source 正文或加密密钥。
@@ -48,15 +49,15 @@ SMTP 密码同样在应用边界使用 `APP_ENCRYPTION_KEY_BASE64` 做 AES-256-G
 
 ## 网络与执行隔离
 
-生产 Compose 只发布 Nginx；PostgreSQL、Redis、RabbitMQ、MinIO、API 和两个 Worker 均位于内部网络。容器以专用非 root 用户运行、禁止提权并丢弃 capabilities。Nginx 设置 CSP、frame 拒绝、`nosniff`、严格 Referrer Policy 和权限策略。
+生产 Compose 只发布 Nginx；PostgreSQL、Redis、Kafka、MinIO、API 和两个 Worker 均位于内部网络。容器以专用非 root 用户运行、禁止提权并丢弃 capabilities。Nginx 设置 CSP、frame 拒绝、`nosniff`、严格 Referrer Policy 和权限策略。
 
 arXiv 出站请求只允许固定官方 HTTPS 主机并共享至少三秒的 Redis 租约。Source URL 不能由用户输入；重定向逐跳复验。Python Worker 只通过归档/文本库读取 Source，不调用 shell、TeX 引擎或归档内容。完整限制见 [TeX Source 提取](TEX_EXTRACTION.md)。
 
 ## 日志、错误与消息
 
-日志采用结构化非敏感字段和 Trace ID；HTTP 错误不返回类名、堆栈或 Secret。禁止记录 Authorization、Cookie、JWT、Refresh 原值、完整邮箱、SMTP Secret、Source 内容、OAI token 全文或完整 AMQP 帧。
+日志采用结构化非敏感字段和 Trace ID；HTTP 错误不返回类名、堆栈或 Secret。禁止记录 Authorization、Cookie、JWT、Refresh 原值、完整邮箱、SMTP Secret、Source 内容、OAI token 全文或完整 Kafka 帧。
 
-RabbitMQ 信封有版本、类型、大小和字段边界；消费者先验证再处理，只在事务提交后 ACK。永久策略/完整性错误进入 DLQ；只有确认根因并核实消息归属后才能定点重放或清理。
+Kafka 信封有版本、类型、大小和字段边界；消费者先验证再处理，只在事务提交后 ACK。永久策略/完整性错误进入 DLQ；只有确认根因并核实消息归属后才能定点重放或清理。
 
 ## 数据最小化与保留
 
@@ -64,7 +65,7 @@ RabbitMQ 信封有版本、类型、大小和字段边界；消费者先验证�
 
 模板图片使用随机对象键存入私有 MinIO bucket，只能经具备模板权限的 API 读取；上传同时校验大小、声明类型与 magic signature，禁止 SVG/HTML 和任意 data URL。模板只持久化服务端净化后的 HTML；预览 iframe 保持无脚本 sandbox，变量渲染还会执行文本/URL 上下文校验。
 
-`data_retention_policies` 是后续保留任务的事实配置。Phase 8/9 完成前仍需补齐自动清理执行器和最终法务期限；正式邮件运营前还必须完成退订、抑制、活动快照、审批、频控、投诉/退信回路和隐私告知。`ALLOW_LIVE_SMTP=false` 在这些条件满足前保持强制关闭；当前 Mailpit 测试链路不构成发送授权。
+`data_retention_policies` 是后续保留任务的事实配置。Phase 8/9 完成前仍需补齐自动清理执行器和最终法务期限；正式邮件运营前还必须完成退订、抑制、活动快照、审批、频控、投诉/退信回路和隐私告知。启用公网协议只代表允许管理员建立受 TLS 保护的连接，不构成批量发送授权；当前 Mailpit/GreenMail 测试链路也不构成发送授权。
 
 ## 事件响应
 

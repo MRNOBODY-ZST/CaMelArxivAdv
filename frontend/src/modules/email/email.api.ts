@@ -2,6 +2,10 @@ import axios from 'axios'
 
 import { apiClient } from '@/api/client'
 import type {
+  MailboxAccountRequest,
+  MailboxAccountView,
+  MailboxMessageHeader,
+  MailboxPage,
   SmtpAccountRequest,
   SmtpAccountView,
   SmtpPage,
@@ -76,6 +80,30 @@ export const emailApi = {
   },
   async deleteSmtpAccount(id: string, expectedLockVersion: number): Promise<void> {
     await apiClient.delete(`/smtp-accounts/${id}`, { params: { expectedLockVersion } })
+  },
+  async listMailboxAccounts(page = 1, pageSize = 100): Promise<MailboxPage> {
+    return (await apiClient.get<MailboxPage>('/mailbox-accounts', { params: { page, pageSize } })).data
+  },
+  async createMailboxAccount(account: MailboxAccountRequest): Promise<MailboxAccountView> {
+    return (await apiClient.post<MailboxAccountView>('/mailbox-accounts', account)).data
+  },
+  async updateMailboxAccount(
+    id: string, expectedLockVersion: number, account: MailboxAccountRequest,
+  ): Promise<MailboxAccountView> {
+    return (await apiClient.put<MailboxAccountView>(`/mailbox-accounts/${id}`, {
+      expectedLockVersion, account,
+    })).data
+  },
+  async testMailboxConnection(id: string): Promise<SmtpTestResult> {
+    return (await apiClient.post<SmtpTestResult>(`/mailbox-accounts/${id}/test-connection`)).data
+  },
+  async previewMailboxMessages(id: string, limit = 20): Promise<MailboxMessageHeader[]> {
+    return (await apiClient.get<MailboxMessageHeader[]>(`/mailbox-accounts/${id}/messages`, {
+      params: { limit },
+    })).data
+  },
+  async deleteMailboxAccount(id: string, expectedLockVersion: number): Promise<void> {
+    await apiClient.delete(`/mailbox-accounts/${id}`, { params: { expectedLockVersion } })
   },
 }
 
