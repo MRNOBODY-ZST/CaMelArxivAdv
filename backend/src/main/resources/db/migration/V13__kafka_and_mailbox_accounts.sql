@@ -70,6 +70,6 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT role.id, permission.id
 FROM roles role
 CROSS JOIN permissions permission
-WHERE role.code = 'OPERATIONS_ADMIN'
+WHERE role.code = 'ADMIN'
   AND permission.code IN ('mailbox:read', 'mailbox:manage')
 ON CONFLICT (role_id, permission_id) DO NOTHING;

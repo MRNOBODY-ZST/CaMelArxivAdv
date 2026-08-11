@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 				+ "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration,"
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration,"
-				+ "org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration,"
+				+ "org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration,"
 				+ "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
 })
 class MailWorkerProfileIsolationTest {

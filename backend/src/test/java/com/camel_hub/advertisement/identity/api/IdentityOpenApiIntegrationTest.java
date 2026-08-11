@@ -17,7 +17,7 @@ import static org.springframework.security.test.web.reactive.server.SecurityMock
 		"spring.autoconfigure.exclude="
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration,"
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration,"
-				+ "org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration"
+				+ "org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration"
 })
 class IdentityOpenApiIntegrationTest {
 

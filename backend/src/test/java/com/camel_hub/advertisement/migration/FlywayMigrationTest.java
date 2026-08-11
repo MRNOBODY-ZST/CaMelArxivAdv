@@ -25,8 +25,9 @@ class FlywayMigrationTest {
 			"paper:read", "paper:import", "paper:delete",
 			"contact:read_masked", "contact:read_full", "contact:verify", "contact:export",
 			"job:manage",
-			"template:read", "template:manage",
-			"smtp:read", "smtp:manage",
+				"template:read", "template:manage",
+				"smtp:read", "smtp:manage",
+				"mailbox:read", "mailbox:manage",
 			"campaign:read", "campaign:create", "campaign:approve", "campaign:send",
 			"campaign:pause",
 			"analytics:read", "audit:read", "system:manage");
@@ -53,22 +54,24 @@ class FlywayMigrationTest {
 				"papers",
 				"paper_imports",
 				"contacts",
-				"jobs",
-				"smtp_accounts",
+					"jobs",
+					"smtp_accounts",
+					"mailbox_accounts",
 				"email_templates",
 				"email_template_versions",
 				"template_assets",
 				"campaigns",
 				"tracking_events",
 				"audit_logs");
-		assertThat(constraintNames()).contains(
+			assertThat(constraintNames()).contains(
 				"uk_papers_arxiv_id",
 				"uk_campaign_recipient",
 				"uk_jobs_idempotency_key",
 				"uk_contacts_email_hmac",
 				"uk_email_template_version",
 				"uk_template_assets_object_key",
-				"uk_tracking_token");
+					"uk_tracking_token");
+			assertThat(columnNames("outbox_messages")).contains("topic_name").doesNotContain("exchange_name");
 		assertThat(flyway.migrate().migrationsExecuted).isZero();
 		assertThat(canInsertGlobalAggregateRows()).isTrue();
 	}
@@ -133,7 +136,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(4);
+				assertThat(latest.migrate().migrationsExecuted).isEqualTo(5);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);

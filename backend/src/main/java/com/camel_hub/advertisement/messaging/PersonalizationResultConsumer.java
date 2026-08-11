@@ -1,14 +1,12 @@
 package com.camel_hub.advertisement.messaging;
 
-import com.rabbitmq.client.Channel;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 public final class PersonalizationResultConsumer {
@@ -16,25 +14,34 @@ public final class PersonalizationResultConsumer {
 	private static final Logger LOGGER = LoggerFactory.getLogger(PersonalizationResultConsumer.class);
 	private static final Duration HANDLER_TIMEOUT = Duration.ofSeconds(30);
 	private final PersonalizationResultHandler handler;
+	private final KafkaDeadLetterPublisher deadLetters;
 
-	public PersonalizationResultConsumer(PersonalizationResultHandler handler) {
+	public PersonalizationResultConsumer(
+			PersonalizationResultHandler handler, KafkaDeadLetterPublisher deadLetters
+	) {
 		this.handler = handler;
+		this.deadLetters = deadLetters;
 	}
 
-	@RabbitListener(queues = "mail.personalization.results.backend", ackMode = "MANUAL")
-	public void consume(Message message, Channel channel) throws IOException {
-		long tag = message.getMessageProperties().getDeliveryTag();
+	@KafkaListener(
+			topics = KafkaTopics.PERSONALIZATION_RESULTS,
+			groupId = "camel-backend-personalization-results-v1")
+	public void consume(ConsumerRecord<String, String> record, Acknowledgment acknowledgment) {
 		try {
-			handler.handle(new String(message.getBody(), StandardCharsets.UTF_8)).block(HANDLER_TIMEOUT);
-			channel.basicAck(tag, false);
+			handler.handle(record.value()).block(HANDLER_TIMEOUT);
+			acknowledgment.acknowledge();
 		}
-		catch (IllegalArgumentException | DataIntegrityViolationException exception) {
-			LOGGER.warn("Rejected invalid personalization result: {}", exception.getMessage());
-			channel.basicReject(tag, false);
+		catch (IllegalArgumentException exception) {
+			LOGGER.warn("Dead-lettering invalid personalization result at {}-{}@{}",
+					record.topic(), record.partition(), record.offset());
+			deadLetters.publish(record, KafkaTopics.PERSONALIZATION_DLT, "INVALID_CONTRACT");
+			acknowledgment.acknowledge();
 		}
-		catch (RuntimeException exception) {
-			LOGGER.warn("Personalization result persistence failed and will be retried", exception);
-			channel.basicNack(tag, false, true);
+		catch (DataIntegrityViolationException exception) {
+			LOGGER.warn("Dead-lettering personalization persistence violation at {}-{}@{}",
+					record.topic(), record.partition(), record.offset());
+			deadLetters.publish(record, KafkaTopics.PERSONALIZATION_DLT, "PERSISTENCE_CONSTRAINT");
+			acknowledgment.acknowledge();
 		}
 	}
 }

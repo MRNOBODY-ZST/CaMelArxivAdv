@@ -51,7 +51,7 @@ import static org.springframework.security.test.web.reactive.server.SecurityMock
 				+ "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration,"
 				+ "org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration,"
-				+ "org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration,"
+				+ "org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration,"
 				+ "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
 })
 @Import(GlobalExceptionHandlerTest.ProbeConfiguration.class)
