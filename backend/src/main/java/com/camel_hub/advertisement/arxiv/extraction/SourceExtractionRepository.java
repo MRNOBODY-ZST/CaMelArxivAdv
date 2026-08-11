@@ -88,10 +88,10 @@ public final class SourceExtractionRepository {
 	private Mono<Void> insertOutbox(Command command) {
 		return databaseClient.sql("""
 				INSERT INTO outbox_messages (
-				  id, exchange_name, routing_key, message_type, message_version,
+				  id, topic_name, routing_key, message_type, message_version,
 				  aggregate_id, idempotency_key, payload, trace_id)
 				VALUES (
-				  :messageId, 'arxiv.jobs', 'arxiv.source.extract', :type, 1,
+				  :messageId, 'camel.arxiv.jobs.v1', 'arxiv.source.extract', :type, 1,
 				  :jobId, :outboxKey, CAST(:envelope AS jsonb), :traceId)
 				""").bind("messageId", command.messageId()).bind("type", command.type())
 				.bind("jobId", command.jobId()).bind("outboxKey", "command:" + command.idempotencyKey())

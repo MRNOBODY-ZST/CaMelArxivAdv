@@ -113,10 +113,10 @@ public final class CampaignRepository {
 	public Mono<Void> insertOutbox(PersonalizationCommandMessage message, String payload) {
 		return databaseClient.sql("""
 				INSERT INTO outbox_messages (
-				    id, exchange_name, routing_key, message_type, message_version,
+				    id, topic_name, routing_key, message_type, message_version,
 				    aggregate_id, idempotency_key, payload, trace_id
 				)
-				VALUES (:messageId, 'mail.jobs', 'mail.personalization.generate', :type, :version,
+				VALUES (:messageId, 'camel.mail.personalization.jobs.v1', 'mail.personalization.generate', :type, :version,
 				        :campaignId, :idempotencyKey, CAST(:payload AS jsonb), :traceId)
 				""").bind("messageId", message.messageId()).bind("type", message.type())
 				.bind("version", message.version()).bind("campaignId", message.campaignId())

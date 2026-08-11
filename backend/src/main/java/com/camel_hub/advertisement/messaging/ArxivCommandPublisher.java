@@ -1,11 +1,9 @@
 package com.camel_hub.advertisement.messaging;
 
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.core.MessageBuilder;
-import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.connection.CorrelationData;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -17,13 +15,15 @@ import java.util.concurrent.TimeUnit;
 public class ArxivCommandPublisher {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(ArxivCommandPublisher.class);
-	private static final Duration CONFIRM_TIMEOUT = Duration.ofSeconds(10);
-	private final RabbitTemplate rabbitTemplate;
+	private static final Duration ACK_TIMEOUT = Duration.ofSeconds(10);
+	private final KafkaTemplate<String, String> kafkaTemplate;
 	private final OutboxRepository repository;
 	private final int batchSize;
 
-	public ArxivCommandPublisher(RabbitTemplate rabbitTemplate, OutboxRepository repository, int batchSize) {
-		this.rabbitTemplate = rabbitTemplate;
+	public ArxivCommandPublisher(
+			KafkaTemplate<String, String> kafkaTemplate, OutboxRepository repository, int batchSize
+	) {
+		this.kafkaTemplate = kafkaTemplate;
 		this.repository = repository;
 		this.batchSize = batchSize;
 	}
@@ -32,10 +32,8 @@ public class ArxivCommandPublisher {
 	public void scheduledDispatch() {
 		dispatchOnce().subscribe(
 				published -> {
-					if (published > 0) {
-						LOGGER.debug("Published {} arXiv outbox messages", published);
-					}
-				}, exception -> LOGGER.warn("arXiv outbox dispatch failed", exception));
+					if (published > 0) LOGGER.debug("Published {} outbox records to Kafka", published);
+				}, exception -> LOGGER.warn("Kafka outbox dispatch failed", exception));
 	}
 
 	public Mono<Integer> dispatchOnce() {
@@ -49,33 +47,27 @@ public class ArxivCommandPublisher {
 
 	private Mono<Void> publish(OutboxRepository.OutboxMessage outbox) {
 		return Mono.fromCallable(() -> {
-			CorrelationData correlation = new CorrelationData(outbox.id().toString());
-			var message = MessageBuilder
-					.withBody(outbox.payload().getBytes(StandardCharsets.UTF_8))
-					.setContentType(MessageProperties.CONTENT_TYPE_JSON)
-					.setContentEncoding(StandardCharsets.UTF_8.name())
-					.setMessageId(outbox.id().toString())
-					.setType(outbox.type())
-					.setHeader("contractVersion", outbox.version())
-					.setHeader("outboxAttempt", outbox.attemptCount())
-					.build();
-			rabbitTemplate.send(outbox.exchange(), outbox.routingKey(), message, correlation);
-			CorrelationData.Confirm confirm = correlation.getFuture()
-					.get(CONFIRM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-			if (!confirm.ack()) {
-				throw new IllegalStateException("Broker rejected message: " + safeReason(confirm.reason()));
-			}
+			ProducerRecord<String, String> record = new ProducerRecord<>(
+					outbox.topic(), outbox.id().toString(), outbox.payload());
+			record.headers()
+					.add("messageId", bytes(outbox.id().toString()))
+					.add("messageType", bytes(outbox.type()))
+					.add("contractVersion", bytes(Integer.toString(outbox.version())))
+					.add("routingKey", bytes(outbox.routingKey()))
+					.add("outboxAttempt", bytes(Integer.toString(outbox.attemptCount())));
+			kafkaTemplate.send(record).get(ACK_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 			return true;
 		}).subscribeOn(Schedulers.boundedElastic())
 				.flatMap(ignored -> repository.markPublished(outbox.id()));
 	}
 
-	private String failureSummary(Throwable exception) {
-		String message = exception.getMessage();
-		return exception.getClass().getSimpleName() + (message == null ? "" : ": " + message);
+	private byte[] bytes(String value) {
+		return value.getBytes(StandardCharsets.UTF_8);
 	}
 
-	private String safeReason(String reason) {
-		return reason == null ? "unspecified" : reason.replaceAll("[\\p{Cntrl}]", " ").strip();
+	private String failureSummary(Throwable exception) {
+		String message = exception.getMessage();
+		String value = exception.getClass().getSimpleName() + (message == null ? "" : ": " + message);
+		return value.replaceAll("[\\p{Cntrl}]", " ").strip();
 	}
 }

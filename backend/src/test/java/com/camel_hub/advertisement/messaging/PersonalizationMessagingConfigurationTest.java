@@ -1,29 +1,25 @@
 package com.camel_hub.advertisement.messaging;
 
+import org.apache.kafka.clients.admin.NewTopic;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.core.Binding;
-import org.springframework.amqp.core.Queue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PersonalizationMessagingConfigurationTest {
 
 	@Test
-	void declaresDurableWorkerResultAndDeadLetterRoutes() {
-		var topology = new PersonalizationMessagingConfiguration().personalizationTopology();
-
-		assertThat(topology.getDeclarablesByType(Queue.class))
-				.extracting(Queue::getName)
-				.contains("mail.personalization.worker", "mail.personalization.results.backend",
-						"mail.personalization.retry.30s", "mail.dead.archive");
-		assertThat(topology.getDeclarablesByType(Binding.class))
-				.anySatisfy(binding -> {
-					assertThat(binding.getDestination()).isEqualTo("mail.personalization.worker");
-					assertThat(binding.getRoutingKey()).isEqualTo("mail.personalization.generate");
-				})
-				.anySatisfy(binding -> {
-					assertThat(binding.getDestination()).isEqualTo("mail.personalization.results.backend");
-					assertThat(binding.getRoutingKey()).isEqualTo("mail.personalization.result");
+	void declaresVersionedPersonalizationTopicsWithExplicitPartitions() {
+		assertThat(PersonalizationMessagingConfiguration.topics())
+				.extracting(NewTopic::name)
+				.containsExactlyInAnyOrder(
+						"camel.mail.personalization.jobs.v1",
+						"camel.mail.personalization.results.v1",
+						"camel.mail.personalization.retry.v1",
+						"camel.mail.personalization.dlt.v1");
+		assertThat(PersonalizationMessagingConfiguration.topics())
+				.allSatisfy(topic -> {
+					assertThat(topic.numPartitions()).isEqualTo(3);
+					assertThat(topic.replicationFactor()).isEqualTo((short) 1);
 				});
 	}
 }

@@ -22,7 +22,10 @@ public class OutboxRepository {
 				WITH candidates AS (
 				    SELECT id FROM outbox_messages
 				    WHERE published_at IS NULL AND available_at <= now()
-				      AND exchange_name IN ('arxiv.jobs', 'arxiv.results', 'mail.jobs', 'mail.results')
+				      AND topic_name IN (
+				          'camel.arxiv.jobs.v1', 'camel.arxiv.results.v1',
+				          'camel.mail.personalization.jobs.v1', 'camel.mail.personalization.results.v1'
+				      )
 				    ORDER BY available_at, id
 				    FOR UPDATE SKIP LOCKED
 				    LIMIT :limit
@@ -32,12 +35,12 @@ public class OutboxRepository {
 				    available_at = now() + interval '30 seconds'
 				FROM candidates
 				WHERE message.id = candidates.id
-				RETURNING message.id, message.exchange_name, message.routing_key,
+				RETURNING message.id, message.topic_name, message.routing_key,
 				          message.message_type, message.message_version,
 				          CAST(message.payload AS text) AS payload_text, message.attempt_count
 				""").bind("limit", limit)
 				.map((row, metadata) -> new OutboxMessage(
-						row.get("id", UUID.class), row.get("exchange_name", String.class),
+						row.get("id", UUID.class), row.get("topic_name", String.class),
 						row.get("routing_key", String.class), row.get("message_type", String.class),
 						row.get("message_version", Integer.class), row.get("payload_text", String.class),
 						row.get("attempt_count", Integer.class)))
@@ -68,7 +71,7 @@ public class OutboxRepository {
 	}
 
 	public record OutboxMessage(
-			UUID id, String exchange, String routingKey, String type,
+			UUID id, String topic, String routingKey, String type,
 			int version, String payload, int attemptCount
 	) {
 	}

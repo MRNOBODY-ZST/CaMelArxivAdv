@@ -65,11 +65,11 @@ public class ArxivImportRepository {
 	private Mono<Void> insertOutbox(CommandRecord command) {
 		return databaseClient.sql("""
 				INSERT INTO outbox_messages (
-				    id, exchange_name, routing_key, message_type, message_version,
+				    id, topic_name, routing_key, message_type, message_version,
 				    aggregate_id, idempotency_key, payload, trace_id
 				)
 				VALUES (
-				    :messageId, 'arxiv.jobs', :routingKey, :type, 1,
+				    :messageId, 'camel.arxiv.jobs.v1', :routingKey, :type, 1,
 				    :jobId, :outboxKey, CAST(:payload AS jsonb), :traceId
 				)
 				""").bind("messageId", command.messageId()).bind("routingKey", command.routingKey())

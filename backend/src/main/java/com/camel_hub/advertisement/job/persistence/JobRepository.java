@@ -110,10 +110,10 @@ public class JobRepository {
 	) {
 		return databaseClient.sql("""
 				INSERT INTO outbox_messages (
-				    id, exchange_name, routing_key, message_type, message_version,
+				    id, topic_name, routing_key, message_type, message_version,
 				    aggregate_id, idempotency_key, payload, trace_id
 				)
-				SELECT :messageId, 'arxiv.jobs', :routingKey, :type, 1,
+				SELECT :messageId, 'camel.arxiv.jobs.v1', :routingKey, :type, 1,
 				       id, :outboxKey,
 				       jsonb_build_object(
 				         'version', 1, 'messageId', :messageId, 'type', type,
