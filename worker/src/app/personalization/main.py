@@ -3,14 +3,13 @@ from __future__ import annotations
 import asyncio
 import signal
 
-import aio_pika
-from aio_pika import ExchangeType
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from app.config import PersonalizationSettings
-from app.messaging.rabbit import settle_delivery
+from app.messaging.kafka import forward_retry, settle_delivery
 from app.observability.logging import configure_logging, get_logger
 from app.personalization.consumer import PersonalizationCommandProcessor
-from app.personalization.rabbit import PersonalizationResultPublisher
+from app.personalization.kafka import PersonalizationResultPublisher
 from app.personalization.ray_executor import RayPersonalizationExecutor
 
 
@@ -23,59 +22,66 @@ async def run(settings: PersonalizationSettings | None = None) -> None:
     for handled_signal in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(handled_signal, stop_event.set)
 
-    connection = await aio_pika.connect_robust(active.rabbitmq_url.get_secret_value())
+    producer = AIOKafkaProducer(
+        bootstrap_servers=active.kafka_bootstrap_servers,
+        client_id=active.kafka_client_id,
+        security_protocol=active.kafka_security_protocol,
+        enable_idempotence=True,
+    )
+    consumer = AIOKafkaConsumer(
+        active.jobs_topic,
+        active.retry_topic,
+        bootstrap_servers=active.kafka_bootstrap_servers,
+        client_id=active.kafka_client_id,
+        group_id=active.consumer_group,
+        security_protocol=active.kafka_security_protocol,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+        isolation_level="read_committed",
+        max_poll_records=1,
+        max_poll_interval_ms=900_000,
+    )
     executor = RayPersonalizationExecutor(active)
+    await producer.start()
+    await consumer.start()
     try:
-        channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
-        await channel.set_qos(prefetch_count=1)
-        jobs = await channel.declare_exchange(
-            active.jobs_exchange, ExchangeType.TOPIC, durable=True
-        )
-        results = await channel.declare_exchange(
-            active.results_exchange, ExchangeType.TOPIC, durable=True
-        )
-        retry = await channel.declare_exchange(
-            active.retry_exchange, ExchangeType.TOPIC, durable=True
-        )
-        await channel.declare_exchange(active.dead_exchange, ExchangeType.TOPIC, durable=True)
-        queue = await channel.declare_queue(
-            active.jobs_queue,
-            durable=True,
-            arguments={"x-dead-letter-exchange": active.dead_exchange},
-        )
-        retry_queue = await channel.declare_queue(
-            active.retry_queue,
-            durable=True,
-            arguments={
-                "x-message-ttl": 30_000,
-                "x-dead-letter-exchange": active.jobs_exchange,
-            },
-        )
-        await queue.bind(jobs, "mail.personalization.generate")
-        await retry_queue.bind(retry, "mail.#")
         processor = PersonalizationCommandProcessor(
             executor,
-            PersonalizationResultPublisher(results),
+            PersonalizationResultPublisher(producer, active.results_topic),
             maximum_command_bytes=active.maximum_command_bytes,
         )
-
-        async def consume(message: aio_pika.abc.AbstractIncomingMessage) -> None:
-            outcome = await processor.process(message.body)
-            await settle_delivery(message, outcome, retry)
-
-        consumer_tag = await queue.consume(consume, no_ack=False)
         logger.info(
             "personalization_worker_started",
             providerEnabled=active.enabled,
             model=active.model,
         )
-        try:
-            await stop_event.wait()
-        finally:
-            await queue.cancel(consumer_tag)
+        while not stop_event.is_set():
+            try:
+                record = await asyncio.wait_for(consumer.getone(), timeout=1.0)
+            except TimeoutError:
+                continue
+            if record.topic == active.retry_topic:
+                await forward_retry(
+                    record,
+                    producer,
+                    consumer,
+                    default_topic=active.jobs_topic,
+                )
+                continue
+            outcome = await processor.process(record.value)
+            await settle_delivery(
+                record,
+                outcome,
+                producer,
+                consumer,
+                retry_topic=active.retry_topic,
+                dead_letter_topic=active.dead_letter_topic,
+                retry_delay_ms=int(active.retry_delay_seconds * 1_000),
+            )
     finally:
         executor.close()
-        await connection.close()
+        await consumer.stop()
+        await producer.stop()
         logger.info("personalization_worker_stopped")
 
 

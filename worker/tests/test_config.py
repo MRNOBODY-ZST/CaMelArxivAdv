@@ -15,6 +15,9 @@ def test_defaults_enforce_safe_arxiv_rate_and_hosts() -> None:
     )
     assert settings.max_archive_bytes == 50 * 1024 * 1024
     assert settings.max_extracted_bytes == 250 * 1024 * 1024
+    assert settings.kafka_bootstrap_servers == "localhost:9092"
+    assert settings.jobs_topic == "camel.arxiv.jobs.v1"
+    assert settings.consumer_group == "camel-arxiv-workers-v1"
 
 
 def test_rejects_an_arxiv_interval_below_three_seconds() -> None:

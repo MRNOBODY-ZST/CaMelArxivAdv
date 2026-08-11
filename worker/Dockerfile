@@ -22,6 +22,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 USER camel
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-  CMD python -c "import socket; socket.create_connection(('rabbitmq', 5672), 3).close()" || exit 1
+  CMD python -c "import app.main; import app.personalization.main" || exit 1
 
 ENTRYPOINT ["python", "-m", "app.main"]

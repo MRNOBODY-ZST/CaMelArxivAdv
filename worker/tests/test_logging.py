@@ -27,5 +27,4 @@ def test_structured_log_processor_redacts_sensitive_fields() -> None:
 def test_dependency_protocol_logs_remain_quiet_in_debug_mode() -> None:
     configure_logging("DEBUG")
 
-    assert logging.getLogger("aio_pika").getEffectiveLevel() >= logging.WARNING
-    assert logging.getLogger("aiormq").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("aiokafka").getEffectiveLevel() >= logging.WARNING

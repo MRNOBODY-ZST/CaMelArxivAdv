@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,13 +25,18 @@ class Settings(BaseSettings):
     worker_id: str = Field(default_factory=_default_worker_id, min_length=1, max_length=120)
     worker_version: str = "0.1.0"
     log_level: str = "INFO"
-    rabbitmq_url: SecretStr = SecretStr("amqp://guest:guest@localhost:5672/")
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = (
+        "PLAINTEXT"
+    )
+    kafka_client_id: str = "camel-arxiv-worker"
+    consumer_group: str = "camel-arxiv-workers-v1"
     redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
-    results_exchange: str = "arxiv.results"
-    jobs_exchange: str = "arxiv.jobs"
-    retry_exchange: str = "arxiv.retry"
-    dead_exchange: str = "arxiv.dead"
-    jobs_queue: str = "arxiv.jobs.worker"
+    results_topic: str = "camel.arxiv.results.v1"
+    jobs_topic: str = "camel.arxiv.jobs.v1"
+    retry_topic: str = "camel.arxiv.retry.v1"
+    dead_letter_topic: str = "camel.arxiv.dlt.v1"
+    retry_delay_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     command_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     metadata_batch_size: int = Field(default=50, ge=1, le=100)
     heartbeat_interval_seconds: float = Field(default=15.0, ge=5.0, le=300.0)
@@ -71,17 +77,21 @@ class PersonalizationSettings(BaseSettings):
     api_key: SecretStr | None = None
     api_base_url: str = "https://api.openai.com/v1"
     request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
-    rabbitmq_url: SecretStr = SecretStr("amqp://guest:guest@localhost:5672/")
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = (
+        "PLAINTEXT"
+    )
+    kafka_client_id: str = "camel-personalization-worker"
+    consumer_group: str = "camel-personalization-workers-v1"
     ray_address: str = Field(default="auto", min_length=1, max_length=255)
     maximum_command_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     maximum_concurrency: int = Field(default=16, ge=1, le=256)
     log_level: str = "INFO"
-    jobs_exchange: str = "mail.jobs"
-    results_exchange: str = "mail.results"
-    retry_exchange: str = "mail.retry"
-    dead_exchange: str = "mail.dead"
-    jobs_queue: str = "mail.personalization.worker"
-    retry_queue: str = "mail.personalization.retry.30s"
+    jobs_topic: str = "camel.mail.personalization.jobs.v1"
+    results_topic: str = "camel.mail.personalization.results.v1"
+    retry_topic: str = "camel.mail.personalization.retry.v1"
+    dead_letter_topic: str = "camel.mail.personalization.dlt.v1"
+    retry_delay_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:

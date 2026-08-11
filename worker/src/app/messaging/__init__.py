@@ -1,1 +1,1 @@
-"""Versioned RabbitMQ contracts."""
+"""Versioned Kafka contracts and delivery helpers."""

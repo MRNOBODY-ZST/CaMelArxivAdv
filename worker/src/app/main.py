@@ -8,10 +8,9 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-import aio_pika
 import httpx
 import redis.asyncio as redis_async
-from aio_pika import DeliveryMode, ExchangeType, Message
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from pydantic import ValidationError
 from structlog.typing import FilteringBoundLogger
 
@@ -25,7 +24,7 @@ from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import RedisJobStore
 from app.jobs.source_extraction import SourceExtractionRunner
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
-from app.messaging.rabbit import RabbitResultPublisher, settle_delivery
+from app.messaging.kafka import KafkaResultPublisher, forward_retry, settle_delivery
 from app.observability.logging import configure_logging, get_logger
 
 
@@ -58,149 +57,154 @@ def build_heartbeat_message(
 
 
 async def run(settings: Settings | None = None) -> None:
-    active_settings = settings or Settings()
-    configure_logging(active_settings.log_level)
-    logger = get_logger().bind(workerId=active_settings.worker_id, workerType="ARXIV")
+    active = settings or Settings()
+    configure_logging(active.log_level)
+    logger = get_logger().bind(workerId=active.worker_id, workerType="ARXIV")
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for handled_signal in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(handled_signal, stop_event.set)
 
-    logger.info("worker_starting", version=active_settings.worker_version)
-    runtime_state = WorkerRuntimeState()
-    connection = await aio_pika.connect_robust(
-        active_settings.rabbitmq_url.get_secret_value(),
-        timeout=active_settings.request_timeout_seconds,
+    producer = AIOKafkaProducer(
+        bootstrap_servers=active.kafka_bootstrap_servers,
+        client_id=active.kafka_client_id,
+        security_protocol=active.kafka_security_protocol,
+        enable_idempotence=True,
     )
+    consumer = AIOKafkaConsumer(
+        active.jobs_topic,
+        active.retry_topic,
+        bootstrap_servers=active.kafka_bootstrap_servers,
+        client_id=active.kafka_client_id,
+        group_id=active.consumer_group,
+        security_protocol=active.kafka_security_protocol,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+        isolation_level="read_committed",
+        max_poll_records=1,
+        max_poll_interval_ms=900_000,
+    )
+    await producer.start()
+    await consumer.start()
+    redis = redis_async.from_url(active.redis_url.get_secret_value())  # type: ignore[no-untyped-call]
+    runtime_state = WorkerRuntimeState()
+    heartbeat_task: asyncio.Task[None] | None = None
     try:
-        channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
-        await channel.set_qos(prefetch_count=1)
-        exchange = await channel.declare_exchange(
-            active_settings.results_exchange,
-            ExchangeType.TOPIC,
-            durable=True,
-        )
-        jobs_exchange = await channel.declare_exchange(
-            active_settings.jobs_exchange, ExchangeType.TOPIC, durable=True
-        )
-        retry_exchange = await channel.declare_exchange(
-            active_settings.retry_exchange, ExchangeType.TOPIC, durable=True
-        )
-        await channel.declare_exchange(
-            active_settings.dead_exchange, ExchangeType.TOPIC, durable=True
-        )
-        queue = await channel.declare_queue(
-            active_settings.jobs_queue,
-            durable=True,
-            arguments={"x-dead-letter-exchange": active_settings.dead_exchange},
-        )
-        await queue.bind(jobs_exchange, "arxiv.import.metadata")
-        await queue.bind(jobs_exchange, "arxiv.sync.oai")
-        await queue.bind(jobs_exchange, "arxiv.sync.taxonomy")
-        await queue.bind(jobs_exchange, "arxiv.source.extract")
-        await queue.bind(jobs_exchange, "arxiv.source.reextract")
-        redis = redis_async.from_url(  # type: ignore[no-untyped-call]
-            active_settings.redis_url.get_secret_value()
-        )
-        lease = RedisGlobalArxivRateLease(redis, active_settings.min_request_interval_seconds)
+        lease = RedisGlobalArxivRateLease(redis, active.min_request_interval_seconds)
         store = RedisJobStore(redis)
-        timeout = httpx.Timeout(active_settings.request_timeout_seconds)
+        timeout = httpx.Timeout(active.request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as http:
             processor = ArxivCommandProcessor(
                 LegacyApiClient(
                     http,
                     lease,
-                    active_settings.legacy_base_url,
-                    active_settings.allowed_arxiv_hosts,
-                    active_settings.user_agent,
+                    active.legacy_base_url,
+                    active.allowed_arxiv_hosts,
+                    active.user_agent,
                 ),
                 OaiClient(
                     http,
                     lease,
-                    active_settings.oai_base_url,
-                    active_settings.allowed_arxiv_hosts,
-                    active_settings.user_agent,
+                    active.oai_base_url,
+                    active.allowed_arxiv_hosts,
+                    active.user_agent,
                 ),
-                RabbitResultPublisher(exchange),
+                KafkaResultPublisher(producer, active.results_topic),
                 store,
-                batch_size=active_settings.metadata_batch_size,
-                maximum_command_bytes=active_settings.command_max_bytes,
+                batch_size=active.metadata_batch_size,
+                maximum_command_bytes=active.command_max_bytes,
                 source_runner=SourceExtractionRunner(
                     SourceDownloader(
                         http,
                         lease,
-                        base_url=active_settings.source_base_url,
-                        allowed_hosts=active_settings.allowed_arxiv_hosts,
-                        user_agent=active_settings.user_agent,
-                        maximum_bytes=active_settings.max_archive_bytes,
-                        maximum_redirects=active_settings.max_redirects,
-                        maximum_retries=active_settings.max_request_retries,
+                        base_url=active.source_base_url,
+                        allowed_hosts=active.allowed_arxiv_hosts,
+                        user_agent=active.user_agent,
+                        maximum_bytes=active.max_archive_bytes,
+                        maximum_redirects=active.max_redirects,
+                        maximum_retries=active.max_request_retries,
                     ),
                     archive_limits=ArchiveLimits(
-                        maximum_extracted_bytes=active_settings.max_extracted_bytes,
-                        maximum_single_file_bytes=active_settings.max_single_file_bytes,
-                        maximum_file_count=active_settings.max_file_count,
-                        maximum_directory_depth=active_settings.max_directory_depth,
-                        maximum_compression_ratio=active_settings.max_compression_ratio,
+                        maximum_extracted_bytes=active.max_extracted_bytes,
+                        maximum_single_file_bytes=active.max_single_file_bytes,
+                        maximum_file_count=active.max_file_count,
+                        maximum_directory_depth=active.max_directory_depth,
+                        maximum_compression_ratio=active.max_compression_ratio,
                     ),
-                    maximum_include_depth=active_settings.max_include_depth,
-                    maximum_parse_seconds=active_settings.max_parse_seconds,
-                    temporary_root=active_settings.temp_root,
-                    parser_version=active_settings.worker_version,
+                    maximum_include_depth=active.max_include_depth,
+                    maximum_parse_seconds=active.max_parse_seconds,
+                    temporary_root=active.temp_root,
+                    parser_version=active.worker_version,
                 ),
             )
-
-            async def consume(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+            heartbeat_task = asyncio.create_task(
+                _heartbeat_loop(active, producer, stop_event, logger, runtime_state)
+            )
+            logger.info("worker_started", version=active.worker_version)
+            while not stop_event.is_set():
+                try:
+                    record = await asyncio.wait_for(consumer.getone(), timeout=1.0)
+                except TimeoutError:
+                    continue
+                if record.topic == active.retry_topic:
+                    await forward_retry(
+                        record,
+                        producer,
+                        consumer,
+                        default_topic=active.jobs_topic,
+                    )
+                    continue
                 runtime_state.status = "BUSY"
-                runtime_state.current_job_id = _command_job_id(message.body)
+                runtime_state.current_job_id = _command_job_id(record.value)
                 try:
                     try:
-                        outcome = await processor.process(message.body)
+                        outcome = await processor.process(record.value)
                     except Exception:
                         logger.exception("command_processing_failed_unexpectedly")
                         outcome = CommandOutcome.REQUEUE
-                    await settle_delivery(message, outcome, retry_exchange)
+                    await settle_delivery(
+                        record,
+                        outcome,
+                        producer,
+                        consumer,
+                        retry_topic=active.retry_topic,
+                        dead_letter_topic=active.dead_letter_topic,
+                        retry_delay_ms=int(active.retry_delay_seconds * 1_000),
+                    )
                 finally:
                     runtime_state.status = "IDLE"
                     runtime_state.current_job_id = None
-
-            consumer_tag = await queue.consume(consume, no_ack=False)
-            try:
-                await _heartbeat_loop(
-                    active_settings, exchange, stop_event, logger, runtime_state
-                )
-            finally:
-                await queue.cancel(consumer_tag)
-                await redis.aclose()
     finally:
-        logger.info("worker_stopping")
-        await connection.close()
+        stop_event.set()
+        if heartbeat_task is not None:
+            await heartbeat_task
+        await redis.aclose()
+        await consumer.stop()
+        await producer.stop()
+        logger.info("worker_stopped")
 
 
 async def _heartbeat_loop(
-    active_settings: Settings,
-    exchange: aio_pika.abc.AbstractExchange,
+    settings: Settings,
+    producer: AIOKafkaProducer,
     stop_event: asyncio.Event,
     logger: FilteringBoundLogger,
     state: WorkerRuntimeState,
 ) -> None:
     while not stop_event.is_set():
-        heartbeat = build_heartbeat_message(active_settings, state)
-        await exchange.publish(
-            Message(
-                body=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
-                content_type="application/json",
-                delivery_mode=DeliveryMode.PERSISTENT,
-                message_id=str(heartbeat.message_id),
-                timestamp=heartbeat.occurred_at,
+        heartbeat = build_heartbeat_message(settings, state)
+        await producer.send_and_wait(
+            settings.results_topic,
+            value=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
+            key=str(heartbeat.message_id).encode("ascii"),
+            headers=(
+                ("messageType", heartbeat.type.value.encode("ascii")),
+                ("contractVersion", b"1"),
             ),
-            routing_key="worker.heartbeat",
         )
         logger.info("heartbeat_published", messageId=str(heartbeat.message_id))
         try:
-            await asyncio.wait_for(
-                stop_event.wait(), timeout=active_settings.heartbeat_interval_seconds
-            )
+            await asyncio.wait_for(stop_event.wait(), timeout=settings.heartbeat_interval_seconds)
         except TimeoutError:
             continue
 
