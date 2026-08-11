@@ -59,6 +59,7 @@ async def test_retry_is_durably_published_before_source_offset_commit() -> None:
     )
 
     assert events == ["publish:camel.arxiv.retry.v1", "commit"]
+    assert isinstance(producer.calls[0]["headers"], list)
     assert dict(producer.calls[0]["headers"])["camelRetryCount"] == b"1"
     assert dict(producer.calls[0]["headers"])["camelNotBeforeEpochMs"] == b"31000"
 
@@ -127,6 +128,7 @@ async def test_result_publisher_uses_message_id_key_and_contract_header() -> Non
 
     call = producer.calls[0]
     assert call["key"] == str(message.message_id).encode()
+    assert isinstance(call["headers"], list)
     assert dict(call["headers"])["contractVersion"] == b"1"
 
 
@@ -158,6 +160,7 @@ async def test_due_retry_is_forwarded_to_original_topic_before_commit() -> None:
 
     assert sleeps == [30.0]
     assert events == ["publish:camel.arxiv.jobs.v1", "commit"]
+    assert isinstance(producer.calls[0]["headers"], list)
     forwarded_headers = dict(producer.calls[0]["headers"])
     assert "camelNotBeforeEpochMs" not in forwarded_headers
     assert forwarded_headers["camelRetryCount"] == b"1"

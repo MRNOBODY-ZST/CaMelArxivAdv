@@ -28,7 +28,7 @@ class KafkaProducer(Protocol):
         key: bytes | None = None,
         partition: int | None = None,
         timestamp_ms: int | None = None,
-        headers: Sequence[tuple[str, bytes]] | None = None,
+        headers: list[tuple[str, bytes]] | None = None,
     ) -> object: ...
 
 
@@ -46,11 +46,15 @@ class KafkaResultPublisher:
             self._topic,
             value=message.model_dump_json(by_alias=True).encode("utf-8"),
             key=str(message.message_id).encode("ascii"),
-            headers=(
-                ("messageType", message.type.value.encode("ascii")),
-                ("contractVersion", str(message.version).encode("ascii")),
-            ),
+            headers=contract_headers(message.type.value, message.version),
         )
+
+
+def contract_headers(message_type: str, version: int) -> list[tuple[str, bytes]]:
+    return [
+        ("messageType", message_type.encode("ascii")),
+        ("contractVersion", str(version).encode("ascii")),
+    ]
 
 
 async def settle_delivery(
@@ -75,7 +79,7 @@ async def settle_delivery(
             dead_letter_topic,
             value=incoming.value,
             key=incoming.key,
-            headers=(*headers.items(), ("failureCategory", failure)),
+            headers=[*headers.items(), ("failureCategory", failure)],
         )
         await _commit(consumer, incoming)
         return
@@ -87,7 +91,7 @@ async def settle_delivery(
         retry_topic,
         value=incoming.value,
         key=incoming.key,
-        headers=tuple(headers.items()),
+        headers=list(headers.items()),
     )
     await _commit(consumer, incoming)
 
@@ -115,7 +119,7 @@ async def forward_retry(
         default_topic,
         value=incoming.value,
         key=incoming.key,
-        headers=tuple(forwarded.items()),
+        headers=list(forwarded.items()),
     )
     await _commit(consumer, incoming)
 

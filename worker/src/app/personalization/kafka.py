@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.messaging.kafka import KafkaProducer
+from app.messaging.kafka import KafkaProducer, contract_headers
 from app.personalization.contracts import PersonalizationResult
 
 
@@ -14,8 +14,5 @@ class PersonalizationResultPublisher:
             self._topic,
             value=result.model_dump_json(by_alias=True).encode("utf-8"),
             key=str(result.message_id).encode("ascii"),
-            headers=(
-                ("messageType", result.type.encode("ascii")),
-                ("contractVersion", str(result.version).encode("ascii")),
-            ),
+            headers=contract_headers(result.type, result.version),
         )

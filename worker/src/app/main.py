@@ -24,7 +24,12 @@ from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import RedisJobStore
 from app.jobs.source_extraction import SourceExtractionRunner
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
-from app.messaging.kafka import KafkaResultPublisher, forward_retry, settle_delivery
+from app.messaging.kafka import (
+    KafkaResultPublisher,
+    contract_headers,
+    forward_retry,
+    settle_delivery,
+)
 from app.observability.logging import configure_logging, get_logger
 
 
@@ -177,10 +182,17 @@ async def run(settings: Settings | None = None) -> None:
     finally:
         stop_event.set()
         if heartbeat_task is not None:
-            await heartbeat_task
-        await redis.aclose()
-        await consumer.stop()
-        await producer.stop()
+            try:
+                await heartbeat_task
+            except Exception:
+                logger.exception("heartbeat_task_failed_during_shutdown")
+        try:
+            await redis.aclose()
+        finally:
+            try:
+                await consumer.stop()
+            finally:
+                await producer.stop()
         logger.info("worker_stopped")
 
 
@@ -197,10 +209,7 @@ async def _heartbeat_loop(
             settings.results_topic,
             value=heartbeat.model_dump_json(by_alias=True).encode("utf-8"),
             key=str(heartbeat.message_id).encode("ascii"),
-            headers=(
-                ("messageType", heartbeat.type.value.encode("ascii")),
-                ("contractVersion", b"1"),
-            ),
+            headers=contract_headers(heartbeat.type.value, heartbeat.version),
         )
         logger.info("heartbeat_published", messageId=str(heartbeat.message_id))
         try:
