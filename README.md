@@ -1,10 +1,14 @@
 # CaMel Arxiv Outreach Platform
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库包含生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取、真实 PostgreSQL 分析、安全模板/私有图片/本机 SMTP，以及基于 Kafka、Ray Core 和 OpenAI Responses API 的逐作者个性化草稿生成链路。
+面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库包含生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取、真实 PostgreSQL 分析、安全模板/私有图片/SMTP，以及基于 Kafka、Ray Core、OpenAI / Anthropic API 的逐作者个性化草稿生成链路。
 
 > 活动发送和追踪仍按 `IMPLEMENTATION_PLAN.md` 的 Phase 7–9 继续开发。公网 SMTP/IMAP/POP3 账户管理已启用，但生成草稿不会自动发送；尚无业务数据时只显示空状态，不生成演示指标。
 
-个性化生成默认关闭。只有在运行环境通过 Secret 注入 `OPENAI_API_KEY` 并设置 `PERSONALIZATION_ENABLED=true` 后，活动页才允许提交生成任务。ChatGPT 订阅与 API 凭据/计费相互独立；未配置 Key 时界面会明确显示禁用，不会生成伪数据。请求使用 Responses API 的严格 JSON Schema 输出且设置 `store=false`，公开作者/论文内容在提交前经过字段白名单；邮箱地址和 SMTP 凭据不会发送给模型。
+个性化生成默认关闭。只有在运行环境通过 Secret 注入 `PERSONALIZATION_API_KEY` 并设置 `PERSONALIZATION_ENABLED=true` 后，活动页才允许提交生成任务。`PERSONALIZATION_PROVIDER` 支持 `openai` 与 `anthropic`，模型和 HTTPS 网关分别由 `PERSONALIZATION_MODEL`、`PERSONALIZATION_API_BASE_URL` 配置；Compose 兼容旧 `OPENAI_API_KEY` / `OPENAI_API_BASE_URL` 并优先使用非空通用变量，原生 Worker/Ray 进程请使用 `PERSONALIZATION_*`。OpenAI 使用 Responses API 严格 JSON Schema 且设置 `store=false`；Anthropic 使用 Messages API 的具名结构化工具输出，不执行任何发送工具。两者均校验正文、退订占位符和输出结构。公开作者/论文内容经过字段白名单；邮箱地址和 SMTP 凭据不会发送给模型。
+
+Anthropic 兼容网关示例：`PERSONALIZATION_PROVIDER=anthropic`、`PERSONALIZATION_MODEL=claude-opus-4-6`、`PERSONALIZATION_API_BASE_URL=https://your-provider/v1`。默认使用标准 `x-api-key`；要求 Bearer 鉴权的网关设置 `PERSONALIZATION_API_AUTH_SCHEME=bearer`。网关必须支持具名工具与结构化返回；拒绝、截断或其他工具调用会被拒收，不会触发工具执行或发信。密钥只放在被 Git 忽略的本机 `.env` 或受保护运行时 Secret 中；提供方的 API 计费独立于聊天产品订阅。
+
+SMTP 测试发送必须显式选择账户和测试收件人，公网账户会真实发信。IMAP 对声明 `ID` 能力的服务器发送仅含应用名/版本的标准客户端标识，以兼容要求客户端身份的邮箱服务；不发送用户信息。POP3、IMAP 和 SMTP 可能需要在邮箱服务商处分别开启，认证失败不能等同于网络或 TLS 失败。
 
 ## 快速启动
 

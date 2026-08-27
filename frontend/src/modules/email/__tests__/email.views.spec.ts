@@ -1,16 +1,18 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { createPinia } from 'pinia'
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import EmailTemplatesView from '@/modules/email/EmailTemplatesView.vue'
 import SmtpAccountsView from '@/modules/email/SmtpAccountsView.vue'
 import TemplateRichTextEditor from '@/modules/email/TemplateRichTextEditor.vue'
 import { emailApi } from '@/modules/email/email.api'
+import { useAuthStore } from '@/modules/auth/auth.store'
 
 vi.mock('@/modules/email/email.api', () => ({
   emailApi: {
     listTemplates: vi.fn(),
     listSmtpAccounts: vi.fn(),
+    sendSmtpDiagnostic: vi.fn(),
   },
   emailErrorMessage: (_error: unknown, fallback: string) => fallback,
 }))
@@ -63,5 +65,61 @@ describe('email administration views', () => {
 
     const updates = wrapper.emitted('update:modelValue') ?? []
     expect(updates.at(-1)?.[0]).toContain(`<img src="${signedUrl}"`)
+  })
+
+  it('requires a fresh recipient for each public SMTP diagnostic and reports acceptance only', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().acceptSession({
+      accessToken: 'token', tokenType: 'Bearer', expiresInSeconds: 600,
+      user: {
+        id: 'admin-id', username: 'admin', displayName: 'Admin', roles: ['ADMIN'],
+        permissions: ['smtp:read', 'smtp:manage'], mustChangePassword: false,
+      },
+    })
+    vi.mocked(emailApi.listSmtpAccounts).mockResolvedValue({
+      items: [{
+        id: 'smtp-public', name: 'Public test account', host: 'smtp.example.test', port: 465,
+        tlsMode: 'TLS_IMPLICIT', username: 'sender', passwordConfigured: true,
+        fromEmail: 'sender@example.test', defaultFromName: 'Research Team',
+        replyTo: 'sender@example.test', perMinuteLimit: 1, perHourLimit: 2,
+        perDayLimit: 10, perDomainHourLimit: 2, enabled: true, lastTestedAt: null,
+        lastTestStatus: null, lastTestError: null, lockVersion: 0,
+        createdAt: '2026-08-28T00:00:00Z', updatedAt: '2026-08-28T00:00:00Z',
+      }], page: 1, pageSize: 20, total: 1, totalPages: 1,
+    })
+    vi.mocked(emailApi.sendSmtpDiagnostic).mockResolvedValue({
+      status: 'SMTP_ACCEPTED', errorCategory: null, correlationId: 'test-correlation',
+    })
+    const wrapper = mount(SmtpAccountsView, {
+      global: {
+        plugins: [pinia],
+        stubs: {
+          DsModal: {
+            props: ['open', 'title', 'description'],
+            template: '<section v-if="open"><h2>{{ title }}</h2><p>{{ description }}</p><slot /><slot name="actions" /></section>',
+          },
+        },
+      },
+    })
+    const button = (label: string) => wrapper.findAll('button').find((item) => item.text() === label)!
+    await flushPromises()
+    await button('测试邮件').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('#smtp-test-recipient').element.value).toBe('')
+    expect(button('发送测试邮件').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('公网账户会真实发信')
+    await wrapper.get('#smtp-test-recipient').setValue('old@example.test')
+    await button('取消').trigger('click')
+    await button('测试邮件').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('#smtp-test-recipient').element.value).toBe('')
+    expect(button('发送测试邮件').attributes('disabled')).toBeDefined()
+    await wrapper.get('#smtp-test-recipient').setValue('receiver@example.test')
+    expect(button('发送测试邮件').attributes('disabled')).toBeUndefined()
+    await button('发送测试邮件').trigger('click')
+    await flushPromises()
+    expect(emailApi.sendSmtpDiagnostic).toHaveBeenCalledExactlyOnceWith('smtp-public', 'receiver@example.test')
+    expect(wrapper.text()).toContain('SMTP 已接受测试邮件')
+    expect(wrapper.text()).toContain('不代表最终投递')
+    wrapper.unmount()
   })
 })

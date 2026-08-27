@@ -165,10 +165,16 @@ test('Edge desktop completes template preview, autosave, versions and Mailpit te
   await page.getByRole('button', { name: '关闭' }).click()
 
   await page.getByRole('button', { name: '测试发送' }).click()
-  await expect(page.getByRole('heading', { name: '发送到本机 Mailpit' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '发送测试邮件', exact: true })).toBeVisible()
+  await expect(page.getByText(/公网账户会真实发信/)).toBeVisible()
+  await expect(page.getByLabel('SMTP 账户')).toHaveValue('')
+  await expect(page.getByLabel('测试收件地址')).toHaveValue('')
+  await expect(page.getByRole('button', { name: '发送测试', exact: true })).toBeDisabled()
   await page.getByLabel('SMTP 账户').selectOption(qaSmtpId)
+  await expect(page.getByRole('button', { name: '发送测试', exact: true })).toBeDisabled()
+  await page.getByLabel('测试收件地址').fill('qa@example.org')
   await page.getByRole('button', { name: '发送测试' }).click()
-  await expect(page.getByText(/Mailpit 已接受测试邮件/)).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(/SMTP 已接受测试邮件/)).toBeVisible({ timeout: 10_000 })
 
   await page.getByRole('button', { name: '复制' }).click()
   await page.getByLabel('副本名称').fill(qaCopiedTemplateName)

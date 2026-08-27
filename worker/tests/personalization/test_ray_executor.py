@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
 from app.config import PersonalizationSettings
+from app.personalization import ray_executor
 from app.personalization.contracts import GeneratedEmail
 from app.personalization.ray_executor import RayPersonalizationExecutor
 from personalization.helpers import command
@@ -78,3 +80,61 @@ async def test_disabled_provider_returns_failures_without_starting_ray() -> None
     assert initialized == []
     assert remote.calls == []
     assert {result.payload.error_code for result in results} == {"PROVIDER_DISABLED"}
+
+
+@pytest.mark.parametrize("auth_scheme", ["x-api-key", "bearer"])
+def test_remote_task_selects_anthropic_protocol_from_runtime_configuration(
+    monkeypatch: pytest.MonkeyPatch, auth_scheme: str,
+) -> None:
+    for key, value in {
+        "PERSONALIZATION_ENABLED": "true",
+        "PERSONALIZATION_PROVIDER": "anthropic",
+        "PERSONALIZATION_MODEL": "claude-opus-4-6",
+        "PERSONALIZATION_API_KEY": "test-only",
+        "PERSONALIZATION_API_BASE_URL": "https://gateway.example/v1",
+        "PERSONALIZATION_API_AUTH_SCHEME": auth_scheme,
+    }.items():
+        monkeypatch.setenv(key, value)
+    original_client = httpx.AsyncClient
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        if auth_scheme == "bearer":
+            assert request.headers["authorization"] == "Bearer test-only"
+            assert "x-api-key" not in request.headers
+        else:
+            assert request.headers["x-api-key"] == "test-only"
+        return httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "personalized_email",
+                        "input": {
+                            "subject": "A researched draft",
+                            "html": "<p>{{unsubscribe_url}}</p>",
+                            "text": "Unsubscribe: {{unsubscribe_url}}",
+                            "rationale": "Public paper context.",
+                        },
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(
+            transport=httpx.MockTransport(reply),
+            **kwargs,
+        ),
+    )
+    active = command(1)
+    output = ray_executor._generate_personalization(
+        active.model_dump_json(by_alias=True),
+        active.payload.targets[0].model_dump_json(by_alias=True),
+    )
+    assert output["subject"] == "A researched draft"

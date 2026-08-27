@@ -4,6 +4,7 @@ import os
 import socket
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,9 +27,7 @@ class Settings(BaseSettings):
     worker_version: str = "0.1.0"
     log_level: str = "INFO"
     kafka_bootstrap_servers: str = "localhost:9092"
-    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = (
-        "PLAINTEXT"
-    )
+    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = "PLAINTEXT"
     kafka_client_id: str = "camel-arxiv-worker"
     consumer_group: str = "camel-arxiv-workers-v1"
     redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
@@ -76,11 +75,10 @@ class PersonalizationSettings(BaseSettings):
     model: str = Field(default="gpt-5.6-luna", min_length=1, max_length=120)
     api_key: SecretStr | None = None
     api_base_url: str = "https://api.openai.com/v1"
+    api_auth_scheme: Literal["x-api-key", "bearer"] = "x-api-key"
     request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
     kafka_bootstrap_servers: str = "localhost:9092"
-    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = (
-        "PLAINTEXT"
-    )
+    kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = "PLAINTEXT"
     kafka_client_id: str = "camel-personalization-worker"
     consumer_group: str = "camel-personalization-workers-v1"
     ray_address: str = Field(default="auto", min_length=1, max_length=255)
@@ -95,10 +93,18 @@ class PersonalizationSettings(BaseSettings):
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:
-        if self.enabled and (
-            self.api_key is None or not self.api_key.get_secret_value().strip()
-        ):
+        if self.enabled and (self.api_key is None or not self.api_key.get_secret_value().strip()):
             raise ValueError("Enabled personalization requires PERSONALIZATION_API_KEY")
-        if self.provider != "openai":
-            raise ValueError("Only the openai personalization provider is supported")
+        if self.provider not in {"openai", "anthropic"}:
+            raise ValueError("Personalization provider must be openai or anthropic")
+        parsed = urlsplit(self.api_base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Personalization API URL must be HTTPS without credentials or query")
         return self

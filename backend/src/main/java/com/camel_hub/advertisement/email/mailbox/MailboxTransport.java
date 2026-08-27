@@ -11,6 +11,7 @@ import jakarta.mail.MessagingException;
 import jakarta.mail.Session;
 import jakarta.mail.Store;
 import jakarta.mail.internet.InternetAddress;
+import org.eclipse.angus.mail.imap.IMAPStore;
 
 import javax.net.ssl.SSLException;
 import java.net.ConnectException;
@@ -25,6 +26,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 
 public final class MailboxTransport {
@@ -80,6 +82,9 @@ public final class MailboxTransport {
 			passwordString = new String(password);
 			store = session.getStore(protocol);
 			store.connect(account.host(), account.port(), account.username(), passwordString);
+			if (store instanceof IMAPStore imap && imap.hasCapability("ID")) {
+				imap.id(Map.of("name", "CaMel Arxiv", "version", "0.1", "vendor", "CaMel"));
+			}
 			action.execute(store);
 		}
 		catch (MailboxTransportException exception) {

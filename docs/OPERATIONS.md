@@ -138,7 +138,7 @@ docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 curl -fsS http://localhost:8080/api/v1/system/runtime
 ```
 
-未设置 `OPENAI_API_KEY` 时应保持 `PERSONALIZATION_ENABLED=false`，运行状态返回 `generationReady=false`，活动生成请求返回 503 且不创建收件人。启用后先用一个不超过数人的受控分组验收结构化草稿、退订变量、脚本净化、失败分类和幂等，再提高批量上限。生成结束不会自动进入 SMTP 投递。
+未设置 `PERSONALIZATION_API_KEY` 时应保持 `PERSONALIZATION_ENABLED=false`，运行状态返回 `generationReady=false`，活动生成请求返回 503 且不创建收件人。Compose 也接受旧 `OPENAI_API_KEY` / `OPENAI_API_BASE_URL`；原生进程使用 `PERSONALIZATION_*`。`PERSONALIZATION_PROVIDER` 可选 `openai` 或 `anthropic`，后者默认 `x-api-key` 鉴权，部分网关需设置 `PERSONALIZATION_API_AUTH_SCHEME=bearer`。启用后先用一个不超过数人的受控分组验收结构化草稿、退订变量、脚本净化、失败分类和幂等，再提高批量上限。提供方拒绝、截断或返回非约定工具时应核对提供方能力与政策，不执行其返回的其他工具。生成结束不会自动进入 SMTP 投递。
 
 开发/CI 的发送验收只使用 Mailpit；IMAP/POP3 验收使用隔离的 GreenMail。以开发覆盖启动后，在 `/admin/mail-accounts` 创建 `mailpit:1025`、`PLAIN_LOCAL_ONLY` SMTP 账户，以及 `mail-test:3143` IMAP 或 `mail-test:3110` POP3 账户（登录用户 `researcher`，收件地址 `researcher@example.test`）。连接测试成功只表示握手/认证成功，测试邮件的 `SMTP_ACCEPTED` 只表示 Mailpit/SMTP 接受，不是最终投递。公网账户必须使用 STARTTLS 或隐式 TLS；不要用真实发送作为故障诊断手段。
 

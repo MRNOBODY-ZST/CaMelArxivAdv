@@ -10,7 +10,7 @@ cp .env.example .env
 
 首次部署通过运行平台 Secret 注入四个 `INITIAL_ADMIN_*` 值。引导账号创建后必须完成首次改密，并立即从 Secret 中移除 `INITIAL_ADMIN_PASSWORD`；引导逻辑不会覆盖已有账号。公网 SMTP/IMAP/POP3 由 `ALLOW_LIVE_SMTP` 与 `ALLOW_PUBLIC_MAILBOX` 控制，账户密码只能通过受权 API 写入加密存储，不能写入 Compose、镜像或日志。公网目标必须使用 TLS。
 
-个性化草稿默认使用 `PERSONALIZATION_ENABLED=false`。要启用时，必须由运行平台 Secret 注入 `OPENAI_API_KEY`，再设置 `PERSONALIZATION_ENABLED=true`；Key 为空时 Worker 会拒绝启动启用态。可配置 `PERSONALIZATION_MODEL`、并发和超时，但不要把 Key 写入 `.env.example`、Compose、镜像或前端。Ray head、Ray worker 和 personalization worker 只加入内部网络，10001/6379 不得发布到宿主机或公网。
+个性化草稿默认使用 `PERSONALIZATION_ENABLED=false`。启用时由运行平台 Secret 注入 `PERSONALIZATION_API_KEY`，再设置 `PERSONALIZATION_ENABLED=true`；Key 为空时 Worker 会拒绝启动启用态。通过 `PERSONALIZATION_PROVIDER=openai|anthropic`、`PERSONALIZATION_MODEL` 与 `PERSONALIZATION_API_BASE_URL` 指定模型和 HTTPS 网关。Anthropic 默认 `PERSONALIZATION_API_AUTH_SCHEME=x-api-key`，仅在网关要求时设为 `bearer`。Compose 兼容旧 `OPENAI_API_KEY` / `OPENAI_API_BASE_URL`（非空通用变量优先）；原生 Worker/Ray 必须使用 `PERSONALIZATION_*`。可配置并发和超时，但不要把 Key 写入 `.env.example`、Compose、镜像或前端。Ray head、Ray worker 和 personalization worker 只加入内部网络，10001/6379 不得发布到宿主机或公网。
 
 Phase 3 还要求设置受监控的 `ARXIV_CONTACT_EMAIL`。官方端点固定为 `https://export.arxiv.org/api/query` 与 `https://oaipmh.arxiv.org/oai`，允许主机固定为 `export.arxiv.org,oaipmh.arxiv.org,arxiv.org`；不要用环境变量指向任意第三方镜像。`ARXIV_MIN_REQUEST_INTERVAL` 只能保持 `PT3S` 或更慢，多个 API/Worker 副本必须共享同一 Redis 实例。
 

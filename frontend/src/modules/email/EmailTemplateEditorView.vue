@@ -50,7 +50,7 @@ const testSendOpen = ref(false)
 const copyOpen = ref(false)
 const archiveOpen = ref(false)
 const copyName = ref('')
-const testRecipient = ref('qa@example.org')
+const testRecipient = ref('')
 const selectedSmtpId = ref('')
 const activeScalar = ref<'subjectTemplate' | 'fromNameTemplate' | 'textContent'>('subjectTemplate')
 const richEditor = ref<InstanceType<typeof TemplateRichTextEditor> | null>(null)
@@ -260,12 +260,13 @@ async function uploadAsset(event: globalThis.Event): Promise<void> {
 
 async function openTestSend(): Promise<void> {
   if (isNew.value) {
-    errorMessage.value = '请先保存模板，再发送内部测试。'
+    errorMessage.value = '请先保存模板，再发送测试邮件。'
     return
   }
   try {
     smtpAccounts.value = (await emailApi.listSmtpAccounts()).items.filter((item) => item.enabled)
-    selectedSmtpId.value = smtpAccounts.value[0]?.id ?? ''
+    selectedSmtpId.value = ''
+    testRecipient.value = ''
     testSendOpen.value = true
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, 'SMTP 账户无法加载。')
@@ -273,12 +274,12 @@ async function openTestSend(): Promise<void> {
 }
 
 async function testSend(): Promise<void> {
-  if (!template.value || !selectedSmtpId.value) return
+  if (!template.value || !selectedSmtpId.value || !testRecipient.value.trim()) return
   saving.value = true
   try {
     const result = await emailApi.testSendTemplate(template.value.id, selectedSmtpId.value, testRecipient.value, { ...sampleValues })
     testSendOpen.value = false
-    successMessage.value = `Mailpit 已接受测试邮件（${result.correlationId}）；这不代表最终投递。`
+    successMessage.value = `SMTP 已接受测试邮件（${result.correlationId}）；这不代表最终投递。`
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, '测试邮件未被 SMTP 接受。')
   } finally {
@@ -712,8 +713,8 @@ function formatDate(value: string): string {
 
     <DsModal
       :open="testSendOpen"
-      title="发送到本机 Mailpit"
-      description="要求模板管理和 SMTP 管理权限；SMTP 接受不等于投递。"
+      title="发送测试邮件"
+      description="请确认账户与收件人。公网账户会真实发信；SMTP 接受不等于投递。"
       @close="testSendOpen = false"
     >
       <div class="space-y-4">
@@ -731,7 +732,7 @@ function formatDate(value: string): string {
         />
         <DsAlert
           tone="info"
-          title="仅内部诊断"
+          title="仅发送到指定测试地址"
         >
           <BeakerIcon class="mr-1 inline size-4" />将使用右侧样例值生成 HTML 与纯文本两个 MIME 部分。
         </DsAlert>
@@ -744,7 +745,7 @@ function formatDate(value: string): string {
           取消
         </DsButton><DsButton
           :busy="saving"
-          :disabled="!selectedSmtpId"
+          :disabled="!selectedSmtpId || !testRecipient.trim()"
           @click="testSend"
         >
           发送测试

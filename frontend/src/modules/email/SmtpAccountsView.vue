@@ -29,7 +29,7 @@ const errorMessage = ref('')
 const successMessage = ref('')
 const modalOpen = ref(false)
 const editing = ref<SmtpAccountView | null>(null)
-const testRecipient = ref('qa@example.org')
+const testRecipient = ref('')
 const testingAccount = ref<SmtpAccountView | null>(null)
 const deleteCandidate = ref<SmtpAccountView | null>(null)
 const form = reactive(createSmtpDraft())
@@ -119,16 +119,21 @@ async function testConnection(account: SmtpAccountView): Promise<void> {
   }
 }
 
+function openDiagnostic(account: SmtpAccountView): void {
+  testRecipient.value = ''
+  testingAccount.value = account
+}
+
 async function sendDiagnostic(): Promise<void> {
-  if (!testingAccount.value) return
+  if (!testingAccount.value || !testRecipient.value.trim()) return
   saving.value = true
   try {
-    const result = await emailApi.sendSmtpDiagnostic(testingAccount.value.id, testRecipient.value)
-    successMessage.value = `Mailpit 已接受内部测试邮件，关联 ID：${result.correlationId}`
+    const result = await emailApi.sendSmtpDiagnostic(testingAccount.value.id, testRecipient.value.trim())
+    successMessage.value = `SMTP 已接受测试邮件，不代表最终投递。关联 ID：${result.correlationId}`
     testingAccount.value = null
     await load()
   } catch (error) {
-    errorMessage.value = emailErrorMessage(error, '内部测试邮件未被 SMTP 接受。')
+    errorMessage.value = emailErrorMessage(error, '测试邮件未被 SMTP 接受。')
   } finally {
     saving.value = false
   }
@@ -319,7 +324,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
           <DsButton
             size="sm"
             variant="secondary"
-            @click="testingAccount = account"
+            @click="openDiagnostic(account)"
           >
             <BeakerIcon class="size-4" />测试邮件
           </DsButton>
@@ -456,10 +461,13 @@ function tlsLabel(mode: SmtpTlsMode): string {
 
     <DsModal
       :open="Boolean(testingAccount)"
-      title="发送内部测试邮件"
-      description="向显式地址发送一封诊断消息；SMTP 接受不代表最终投递。请优先使用本机 Mailpit。"
+      title="发送 SMTP 测试邮件"
+      description="公网账户会真实发信。请确认当前账户与收件人；SMTP 接受不代表最终投递。"
       @close="testingAccount = null"
     >
+      <p class="mb-4 text-sm text-slate-600">
+        账户：{{ testingAccount?.name }} · {{ testingAccount?.host }}:{{ testingAccount?.port }}
+      </p>
       <DsInput
         id="smtp-test-recipient"
         v-model="testRecipient"
@@ -474,6 +482,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
           取消
         </DsButton><DsButton
           :busy="saving"
+          :disabled="!testRecipient.trim()"
           @click="sendDiagnostic"
         >
           发送测试邮件

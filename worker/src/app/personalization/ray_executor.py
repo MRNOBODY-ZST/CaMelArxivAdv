@@ -12,6 +12,7 @@ import ray
 from ray import ObjectRef
 
 from app.config import PersonalizationSettings
+from app.personalization.anthropic_client import AnthropicEmailClient
 from app.personalization.contracts import (
     GeneratedEmail,
     PersonalizationCommand,
@@ -40,12 +41,14 @@ def _generate_personalization(command_json: str, target_json: str) -> dict[str, 
     async def generate() -> GeneratedEmail:
         timeout = httpx.Timeout(settings.request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as http:
-            client = OpenAIEmailClient(
-                http,
-                api_key,
-                settings.model,
-                settings.api_base_url,
-            )
+            client: AnthropicEmailClient | OpenAIEmailClient
+            if settings.provider == "anthropic":
+                client = AnthropicEmailClient(
+                    http, api_key, settings.model, settings.api_base_url,
+                    auth_scheme=settings.api_auth_scheme,
+                )
+            else:
+                client = OpenAIEmailClient(http, api_key, settings.model, settings.api_base_url)
             return await client.generate(command, target)
 
     try:
@@ -131,9 +134,7 @@ class RayPersonalizationExecutor:
                     "Generation was permanently rejected by the provider",
                 )
             generated = (
-                value
-                if isinstance(value, GeneratedEmail)
-                else GeneratedEmail.model_validate(value)
+                value if isinstance(value, GeneratedEmail) else GeneratedEmail.model_validate(value)
             )
             payload = PersonalizationResultPayload(
                 status="GENERATED",
