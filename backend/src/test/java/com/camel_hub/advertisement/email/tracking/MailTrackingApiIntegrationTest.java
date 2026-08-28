@@ -225,6 +225,49 @@ class MailTrackingApiIntegrationTest {
 		assertThat(record.path("status").asText()).isEqualTo("SMTP_ACCEPTED");
 	}
 
+	@ParameterizedTest
+	@EnumSource(MailTrackingModels.Source.class)
+	void recipientMaskOverflowIsRejectedBeforePersistenceOrSmtp(MailTrackingModels.Source source) {
+		String jamo = "\u1100\u1161\u11A8";
+		String domain = String.join(".", jamo.repeat(20), jamo.repeat(20), jamo.repeat(20),
+				jamo.repeat(20), jamo.repeat(20), jamo.repeat(4) + "a");
+		String recipient = "a@" + domain;
+		assertThat(recipient).hasSize(320);
+		WebTestClient.RequestHeadersSpec<?> request;
+		if (source == MailTrackingModels.Source.SMTP_DIAGNOSTIC) {
+			request = manager.post().uri("/api/v1/smtp-accounts/{id}/test-email", accountId)
+					.bodyValue(Map.of("recipient", recipient, "subject", "QA", "body", "body"));
+		}
+		else {
+			var command = new TemplateService.TemplateCommand("Recipient boundary", "QA", "DRAFT",
+					new TemplateModels.TemplateDraft("QA", "Research Team", "reply@example.invalid",
+							"<a href=\"{{unsubscribe_url}}\">Unsubscribe</a>", "Unsubscribe {{unsubscribe_url}}", false));
+			var template = templates.create(ACTOR, command, CONTEXT).block();
+			request = manager.post().uri("/api/v1/templates/{id}/test-send", template.id())
+					.bodyValue(Map.of("smtpAccountId", accountId, "recipient", recipient,
+							"variables", Map.of("unsubscribe_url", "https://example.invalid/unsubscribe")));
+		}
+		request.exchange().expectStatus().isBadRequest().expectBody()
+				.jsonPath("$.type").isEqualTo("invalid_mail_tracking")
+				.jsonPath("$.detail").value(detail -> assertThat(detail.toString()).doesNotContain(recipient, domain));
+		assertThat(outbound).isEmpty();
+		assertThat(count("mail_send_records")).isZero();
+		assertThat(count("mail_open_events")).isZero();
+	}
+
+	@Test
+	void recipientMaskAtStorageLimitPreservesTheActualRecipient() throws Exception {
+		String jamo = "\u1100\u1161\u11A8";
+		String domain = String.join(".", jamo.repeat(20), jamo.repeat(20), jamo.repeat(20),
+				jamo.repeat(20), jamo.repeat(20), jamo.repeat(3) + "a");
+		String recipient = "a@" + domain;
+		assertThat(recipient).hasSize(317);
+		JsonNode result = diagnostic(Map.of("recipient", recipient, "subject", "QA", "body", "body"));
+		assertThat(outbound.getFirst().recipient()).isEqualTo(recipient);
+		assertThat(detail(result.path("correlationId").asText()).at("/record/recipientMasked").asText())
+				.isEqualTo("a***@" + domain).hasSize(320).doesNotContain(recipient);
+	}
+
 	@Test
 	void anonymousInvalidTokenReturnsTheSamePrivateGifResponse() {
 		anonymous.get().uri("/t/o/invalid-token").exchange().expectStatus().isOk()

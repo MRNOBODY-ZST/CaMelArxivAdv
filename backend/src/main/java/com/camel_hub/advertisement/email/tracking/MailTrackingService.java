@@ -106,7 +106,11 @@ public final class MailTrackingService {
 		if (at < 1 || at == recipient.length() - 1 || recipient.length() > 320) {
 			throw new MailTrackingValidationException("Test recipient is invalid");
 		}
-		return recipient.substring(0, recipient.offsetByCodePoints(0, 1)) + "***" + recipient.substring(at);
+		String masked = recipient.substring(0, recipient.offsetByCodePoints(0, 1)) + "***" + recipient.substring(at);
+		if (masked.length() > 320) {
+			throw new MailTrackingValidationException("Test recipient is too long to mask");
+		}
+		return masked;
 	}
 
 	private Outcome outcome(Throwable error) {
