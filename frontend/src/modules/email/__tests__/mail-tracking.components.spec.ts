@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import MailSendRecordsPanel from '@/modules/email/MailSendRecordsPanel.vue'
 import MailTrackingOption from '@/modules/email/MailTrackingOption.vue'
@@ -33,6 +33,10 @@ interface RecordFixture {
   firstOpenAt: string | null
   lastOpenAt: string | null
 }
+
+const TEST_NOW = new Date('2026-08-28T12:00:00Z')
+const UNEXPIRED_TRACKING_EXPIRES_AT = '2026-08-29T10:00:00Z'
+const EXPIRED_TRACKING_EXPIRES_AT = '2026-08-27T10:00:00Z'
 
 const modalStub = {
   props: ['open', 'title', 'description'],
@@ -67,7 +71,7 @@ function record(overrides: Partial<RecordFixture> = {}): RecordFixture {
     trackingEnabled: true,
     createdAt: '2026-08-28T10:00:00Z',
     completedAt: '2026-08-28T10:00:01Z',
-    trackingExpiresAt: '2026-08-29T10:00:00Z',
+    trackingExpiresAt: UNEXPIRED_TRACKING_EXPIRES_AT,
     rawOpenCount: 0,
     automatedOpenCount: 0,
     firstOpenAt: null,
@@ -120,9 +124,13 @@ describe('mail tracking option', () => {
 
 describe('mail send records', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(TEST_NOW)
     vi.clearAllMocks()
     vi.mocked(mailTrackingApi.getStatus).mockResolvedValue(trackingStatus())
   })
+
+  afterEach(() => vi.useRealTimers())
 
   it('renders a masked recipient and changes only to a truthful image-load state after manual refresh', async () => {
     vi.mocked(mailTrackingApi.listSendRecords)
@@ -141,7 +149,7 @@ describe('mail send records', () => {
   it('keeps untracked, expired, failed, and unknown records distinct from a read claim', async () => {
     vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([
       record({ id: 'untracked', recipientMasked: 'u***@example.invalid', trackingEnabled: false }),
-      record({ id: 'expired', recipientMasked: 'e***@example.invalid', trackingExpiresAt: '2026-08-01T00:00:00Z' }),
+      record({ id: 'expired', recipientMasked: 'e***@example.invalid', trackingExpiresAt: EXPIRED_TRACKING_EXPIRES_AT }),
       record({ id: 'failed', recipientMasked: 'f***@example.invalid', status: 'FAILED', failureCategory: 'SMTP_REJECTED' }),
       record({ id: 'unknown', recipientMasked: 'n***@example.invalid', status: 'UNKNOWN' }),
     ]))
@@ -154,6 +162,50 @@ describe('mail send records', () => {
     expect(wrapper.text()).toContain('发送状态未知')
     expect(wrapper.text()).not.toContain('已阅读')
   })
+
+  it('keeps observed image loads alongside unknown, failed, and expired tracking conditions', async () => {
+    vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([
+      record({ id: 'unknown', recipientMasked: 'u***@example.invalid', status: 'UNKNOWN', rawOpenCount: 1 }),
+      record({ id: 'failed', recipientMasked: 'f***@example.invalid', status: 'FAILED', rawOpenCount: 2 }),
+      record({ id: 'expired', recipientMasked: 'e***@example.invalid', trackingExpiresAt: EXPIRED_TRACKING_EXPIRES_AT, rawOpenCount: 3 }),
+    ]))
+
+    const { wrapper } = await mountPanel('/email/deliveries')
+    const rows = wrapper.findAll('tbody tr')
+
+    expect(rows[0]?.findAll('td')[3]?.text()).toContain('检测到图片加载（1）')
+    expect(rows[0]?.findAll('td')[3]?.text()).toContain('发送状态未知')
+    expect(rows[1]?.findAll('td')[3]?.text()).toContain('检测到图片加载（2）')
+    expect(rows[1]?.findAll('td')[3]?.text()).toContain('发送失败，未确认检测')
+    expect(rows[2]?.findAll('td')[3]?.text()).toContain('检测到图片加载（3）')
+    expect(rows[2]?.findAll('td')[3]?.text()).toContain('检测期已过期')
+  })
+
+  for (const detailCase of [
+    { name: 'unknown', overrides: { status: 'UNKNOWN' as const, rawOpenCount: 1 }, condition: '发送状态未知' },
+    { name: 'failed', overrides: { status: 'FAILED' as const, rawOpenCount: 2 }, condition: '发送失败，未确认检测' },
+    { name: 'expired', overrides: { trackingExpiresAt: EXPIRED_TRACKING_EXPIRES_AT, rawOpenCount: 3 }, condition: '检测期已过期' },
+  ]) {
+    it(`keeps observed callbacks in the ${detailCase.name} detail state`, async () => {
+      const detail = record(detailCase.overrides)
+      const events = Array.from({ length: detail.rawOpenCount }, (_, index) => ({
+        id: index + 1,
+        occurredAt: `2026-08-28T10:0${index}:00Z`,
+        classification: 'UNCLASSIFIED' as const,
+        reason: `回传 ${index + 1}`,
+      }))
+      vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([detail]))
+      vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events })
+
+      const { wrapper } = await mountPanel('/email/deliveries?record=record-1')
+      const trackingState = definitionValue(wrapper, '检测状态')
+
+      expect(trackingState).toContain(`检测到图片加载（${detail.rawOpenCount}）`)
+      expect(trackingState).toContain(detailCase.condition)
+      expect(wrapper.text()).toContain(`${detail.rawOpenCount} 次`)
+      expect(wrapper.findAll('ol li')).toHaveLength(detail.rawOpenCount)
+    })
+  }
 
   it('opens a deep-linked detail, labels classified callbacks, and clears the query on close', async () => {
     const detail = record({ rawOpenCount: 4, automatedOpenCount: 3, firstOpenAt: '2026-08-28T10:05:00Z', lastOpenAt: '2026-08-28T10:08:00Z' })
@@ -280,4 +332,11 @@ async function mountPanel(path: string): Promise<{ router: ReturnType<typeof cre
   })
   await flushPromises()
   return { router, wrapper }
+}
+
+function definitionValue(wrapper: VueWrapper, label: string): string {
+  const term = wrapper.findAll('dt').find((item) => item.text() === label)
+  const value = term?.element.parentElement?.textContent
+  if (!value) throw new Error(`Definition value for ${label} was not rendered`)
+  return value
 }

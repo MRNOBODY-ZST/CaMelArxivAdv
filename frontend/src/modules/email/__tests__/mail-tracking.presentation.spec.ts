@@ -28,6 +28,12 @@ describe('mail tracking presentation', () => {
     expect(mailTrackingState(record({ status: 'FAILED' }))).toBe('发送失败，未确认检测')
   })
 
+  it('keeps observed image-load evidence when SMTP or collection status later becomes uncertain', () => {
+    expect(mailTrackingState(record({ status: 'UNKNOWN', rawOpenCount: 1 }))).toBe('检测到图片加载（1）')
+    expect(mailTrackingState(record({ status: 'FAILED', rawOpenCount: 2 }))).toBe('检测到图片加载（2）')
+    expect(mailTrackingState(record({ trackingExpiresAt: '2020-01-01T00:00:00Z', rawOpenCount: 3 }))).toBe('检测到图片加载（3）')
+  })
+
   it('handles nullable dates and expired tracking with the shared semantics', () => {
     expect(formatMailTrackingDate(null)).toBe('—')
     expect(isMailTrackingExpired(record({ trackingExpiresAt: '2020-01-01T00:00:00Z' }))).toBe(true)

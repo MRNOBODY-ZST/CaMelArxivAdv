@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { EnvelopeIcon } from '@heroicons/vue/24/outline'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import DsAlert from '@/components/design-skill/DsAlert.vue'
 import DsBadge from '@/components/design-skill/DsBadge.vue'
@@ -14,6 +15,7 @@ import type { DeliveryView } from '@/modules/campaigns/campaigns.types'
 import MailSendRecordsPanel from '@/modules/email/MailSendRecordsPanel.vue'
 
 const auth = useAuthStore()
+const route = useRoute()
 const loading = ref(true)
 const error = ref('')
 const deliveries = ref<DeliveryView[]>([])
@@ -21,10 +23,16 @@ const page = ref(1)
 const totalPages = ref(0)
 const canReadRecords = computed(() => auth.hasPermission('smtp:read'))
 const canReadCampaignDeliveries = computed(() => auth.hasPermission('campaign:read'))
+type DeliveryTab = 'records' | 'campaigns'
+const selectedTab = ref<DeliveryTab>(canReadRecords.value ? 'records' : 'campaigns')
 const tabs = computed(() => [
   ...(canReadRecords.value ? [{ label: '测试邮件记录', value: 'records' }] : []),
   ...(canReadCampaignDeliveries.value ? [{ label: '活动发送记录', value: 'campaigns' }] : []),
 ])
+
+watch(() => route.query.record, (record) => {
+  if (typeof record === 'string' && canReadRecords.value) selectedTab.value = 'records'
+})
 
 async function load(target = page.value): Promise<void> {
   loading.value = true
@@ -73,6 +81,7 @@ onMounted(() => {
     </header>
     <DsTabs
       v-if="tabs.length"
+      v-model:selected="selectedTab"
       :tabs="tabs"
     >
       <template

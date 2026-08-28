@@ -15,6 +15,7 @@ import { mailTrackingApi, mailTrackingErrorMessage } from '@/modules/email/mail-
 import {
   formatMailTrackingDate,
   isMailTrackingExpired,
+  mailTrackingCondition,
   mailSendSourceLabel,
   mailSendStatusLabel,
   mailTrackingState,
@@ -99,9 +100,10 @@ function sendStatusTone(value: MailSendRecord): 'neutral' | 'positive' | 'warnin
 
 function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning' | 'danger' | 'info' {
   if (!value.trackingEnabled) return 'neutral'
+  if (value.rawOpenCount > 0) return 'info'
   if (value.status === 'FAILED') return 'danger'
   if (value.status === 'UNKNOWN' || isMailTrackingExpired(value)) return 'warning'
-  return value.rawOpenCount > 0 ? 'info' : 'neutral'
+  return 'neutral'
 }
 </script>
 
@@ -199,7 +201,7 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
             <th class="hidden px-5 py-3 lg:table-cell">
               完成时间
             </th>
-            <th class="px-5 py-3">
+            <th class="relative px-5 py-3">
               <span class="sr-only">查看详情</span>
             </th>
           </tr>
@@ -241,6 +243,12 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
               <DsBadge :tone="trackingTone(item)">
                 {{ mailTrackingState(item) }}
               </DsBadge>
+              <p
+                v-if="mailTrackingCondition(item)"
+                class="mt-1 text-xs text-slate-500"
+              >
+                {{ mailTrackingCondition(item) }}
+              </p>
               <p
                 v-if="item.trackingEnabled && item.automatedOpenCount"
                 class="mt-1 text-xs text-slate-500"

@@ -7,6 +7,7 @@ import DeliveriesView from '@/modules/campaigns/DeliveriesView.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { Permission } from '@/modules/auth/auth.types'
 import { campaignsApi } from '@/modules/campaigns/campaigns.api'
+import MailSendRecordDialog from '@/modules/email/MailSendRecordDialog.vue'
 import { mailTrackingApi } from '@/modules/email/mail-tracking.api'
 
 vi.mock('@/modules/campaigns/campaigns.api', () => ({
@@ -58,7 +59,7 @@ describe('deliveries permission-gated tabs', () => {
   })
 
   it('defaults SMTP readers to records and preserves the campaign view in its own tab', async () => {
-    const wrapper = await mountDeliveries(['smtp:read', 'campaign:read'])
+    const { wrapper } = await mountDeliveries(['smtp:read', 'campaign:read'])
 
     expect(wrapper.text()).toContain('测试邮件记录')
     expect(wrapper.text()).toContain('q***@example.invalid')
@@ -67,8 +68,36 @@ describe('deliveries permission-gated tabs', () => {
     expect(wrapper.text()).toContain('AI 邀约')
   })
 
+  it('switches back to records when a same-route record query arrives after selecting campaigns', async () => {
+    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: mailRecord(), events: [] })
+    const { router, wrapper } = await mountDeliveries(['smtp:read', 'campaign:read'])
+
+    await button(wrapper, '活动发送记录').trigger('click')
+    await flushPromises()
+    expect(button(wrapper, '活动发送记录').attributes('aria-selected')).toBe('true')
+
+    await router.push('/email/deliveries?record=record-1')
+    await flushPromises()
+
+    expect(button(wrapper, '测试邮件记录').attributes('aria-selected')).toBe('true')
+    expect(wrapper.findComponent(MailSendRecordDialog).props('recordId')).toBe('record-1')
+    expect(mailTrackingApi.getSendRecord).toHaveBeenCalledWith('record-1')
+  })
+
+  it('does not fetch SMTP-protected data when a record query arrives for a campaign-only reader', async () => {
+    const { router, wrapper } = await mountDeliveries(['campaign:read'])
+
+    await router.push('/email/deliveries?record=record-1')
+    await flushPromises()
+
+    expect(button(wrapper, '活动发送记录').attributes('aria-selected')).toBe('true')
+    expect(mailTrackingApi.getStatus).not.toHaveBeenCalled()
+    expect(mailTrackingApi.listSendRecords).not.toHaveBeenCalled()
+    expect(mailTrackingApi.getSendRecord).not.toHaveBeenCalled()
+  })
+
   it('does not fetch SMTP-protected records for campaign-only readers', async () => {
-    const wrapper = await mountDeliveries(['campaign:read'])
+    const { wrapper } = await mountDeliveries(['campaign:read'])
 
     expect(wrapper.text()).toContain('活动发送记录')
     expect(wrapper.text()).toContain('AI 邀约')
@@ -77,7 +106,7 @@ describe('deliveries permission-gated tabs', () => {
   })
 
   it('does not load campaign deliveries for SMTP-only readers', async () => {
-    const wrapper = await mountDeliveries(['smtp:read'])
+    const { wrapper } = await mountDeliveries(['smtp:read'])
 
     expect(wrapper.text()).toContain('q***@example.invalid')
     expect(wrapper.text()).not.toContain('活动发送记录')
@@ -88,7 +117,7 @@ describe('deliveries permission-gated tabs', () => {
     vi.mocked(campaignsApi.listDeliveries)
       .mockResolvedValueOnce({ items: [delivery()], page: 1, pageSize: 20, total: 21, totalPages: 2 })
       .mockResolvedValueOnce({ items: [delivery({ id: 'delivery-2', campaignName: '第二个活动' })], page: 2, pageSize: 20, total: 21, totalPages: 2 })
-    const wrapper = await mountDeliveries(['smtp:read', 'campaign:read'])
+    const { wrapper } = await mountDeliveries(['smtp:read', 'campaign:read'])
 
     await button(wrapper, '活动发送记录').trigger('click')
     await flushPromises()
@@ -103,13 +132,13 @@ describe('deliveries permission-gated tabs', () => {
 
   it('retains campaign load errors in the separate campaign tab', async () => {
     vi.mocked(campaignsApi.listDeliveries).mockRejectedValue(new Error('offline'))
-    const wrapper = await mountDeliveries(['campaign:read'])
+    const { wrapper } = await mountDeliveries(['campaign:read'])
 
     expect(wrapper.text()).toContain('发送记录加载失败。')
   })
 })
 
-async function mountDeliveries(permissions: Permission[]): Promise<VueWrapper> {
+async function mountDeliveries(permissions: Permission[]): Promise<{ router: ReturnType<typeof createRouter>; wrapper: VueWrapper }> {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/email/deliveries', component: DeliveriesView }],
@@ -118,7 +147,7 @@ async function mountDeliveries(permissions: Permission[]): Promise<VueWrapper> {
   await router.isReady()
   const wrapper = mount(DeliveriesView, { global: { plugins: [installPermissions(permissions), router] } })
   await flushPromises()
-  return wrapper
+  return { router, wrapper }
 }
 
 function button(wrapper: VueWrapper, label: string): DOMWrapper<HTMLButtonElement> {

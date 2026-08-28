@@ -9,6 +9,7 @@ import DsSkeleton from '@/components/design-skill/DsSkeleton.vue'
 import { mailTrackingApi, mailTrackingErrorMessage } from '@/modules/email/mail-tracking.api'
 import {
   formatMailTrackingDate,
+  mailTrackingCondition,
   mailSendSourceLabel,
   mailSendStatusLabel,
   mailTrackingState,
@@ -141,6 +142,12 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
             </dt>
             <dd class="mt-1 text-slate-800">
               {{ mailTrackingState(record) }}
+              <span
+                v-if="mailTrackingCondition(record)"
+                class="mt-1 block text-xs text-slate-500"
+              >
+                {{ mailTrackingCondition(record) }}
+              </span>
             </dd>
           </div>
           <div>
