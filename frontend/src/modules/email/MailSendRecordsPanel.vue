@@ -12,6 +12,13 @@ import DsPagination from '@/components/design-skill/DsPagination.vue'
 import DsSkeleton from '@/components/design-skill/DsSkeleton.vue'
 import DsTable from '@/components/design-skill/DsTable.vue'
 import { mailTrackingApi, mailTrackingErrorMessage } from '@/modules/email/mail-tracking.api'
+import {
+  formatMailTrackingDate,
+  isMailTrackingExpired,
+  mailSendSourceLabel,
+  mailSendStatusLabel,
+  mailTrackingState,
+} from '@/modules/email/mail-tracking.presentation'
 import type { MailSendRecord, MailTrackingStatus } from '@/modules/email/mail-tracking.types'
 import MailSendRecordDialog from '@/modules/email/MailSendRecordDialog.vue'
 
@@ -83,16 +90,6 @@ function callbackOrigin(value: string): string {
   }
 }
 
-function sourceLabel(value: MailSendRecord): string {
-  return value.source === 'SMTP_DIAGNOSTIC' ? 'SMTP 诊断' : '模板测试'
-}
-
-function sendStatusLabel(value: MailSendRecord): string {
-  return {
-    SENDING: '发送中', SMTP_ACCEPTED: 'SMTP 已接受', FAILED: '发送失败', UNKNOWN: '发送状态未知',
-  }[value.status]
-}
-
 function sendStatusTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning' | 'danger' | 'info' {
   if (value.status === 'SMTP_ACCEPTED') return 'positive'
   if (value.status === 'FAILED') return 'danger'
@@ -100,28 +97,11 @@ function sendStatusTone(value: MailSendRecord): 'neutral' | 'positive' | 'warnin
   return 'warning'
 }
 
-function isExpired(value: MailSendRecord): boolean {
-  return Boolean(value.trackingExpiresAt && new Date(value.trackingExpiresAt).getTime() < Date.now())
-}
-
-function trackingState(value: MailSendRecord): string {
-  if (!value.trackingEnabled) return '未启用检测'
-  if (value.status === 'FAILED') return '发送失败，未确认检测'
-  if (value.status === 'UNKNOWN') return '发送状态未知'
-  if (isExpired(value)) return '检测期已过期'
-  if (value.rawOpenCount === 0) return '尚无回传'
-  return `检测到图片加载（${value.rawOpenCount}）`
-}
-
 function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning' | 'danger' | 'info' {
   if (!value.trackingEnabled) return 'neutral'
   if (value.status === 'FAILED') return 'danger'
-  if (value.status === 'UNKNOWN' || isExpired(value)) return 'warning'
+  if (value.status === 'UNKNOWN' || isMailTrackingExpired(value)) return 'warning'
   return value.rawOpenCount > 0 ? 'info' : 'neutral'
-}
-
-function formatDate(value: string | null): string {
-  return value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—'
 }
 </script>
 
@@ -181,13 +161,6 @@ function formatDate(value: string | null): string {
       回传来源：{{ callbackOrigin(status.callbackBaseUrl) }}。这是配置值，尚未验证公网可达性或邮件客户端行为。
     </DsAlert>
 
-    <DsAlert
-      v-if="error"
-      tone="danger"
-      title="测试邮件记录不可用"
-    >
-      {{ error }}
-    </DsAlert>
     <div
       v-if="loading"
       class="space-y-3"
@@ -197,6 +170,13 @@ function formatDate(value: string | null): string {
       <DsSkeleton class="h-16" />
       <DsSkeleton class="h-16" />
     </div>
+    <DsAlert
+      v-else-if="error"
+      tone="danger"
+      title="测试邮件记录不可用"
+    >
+      {{ error }}
+    </DsAlert>
     <DsCard
       v-else-if="records.length"
       padding="none"
@@ -237,18 +217,18 @@ function formatDate(value: string | null): string {
                 {{ item.subject }}
               </p>
               <p class="mt-1 text-xs text-slate-400 md:hidden">
-                {{ sourceLabel(item) }} · {{ item.smtpAccountName ?? '—' }}
+                {{ mailSendSourceLabel(item) }} · {{ item.smtpAccountName ?? '—' }}
               </p>
             </td>
             <td class="hidden px-5 py-4 text-sm text-slate-600 md:table-cell">
-              <p>{{ sourceLabel(item) }}</p>
+              <p>{{ mailSendSourceLabel(item) }}</p>
               <p class="mt-1 text-xs text-slate-500">
                 {{ item.smtpAccountName ?? '—' }}
               </p>
             </td>
             <td class="px-5 py-4">
               <DsBadge :tone="sendStatusTone(item)">
-                {{ sendStatusLabel(item) }}
+                {{ mailSendStatusLabel(item) }}
               </DsBadge>
               <p
                 v-if="item.failureCategory"
@@ -259,7 +239,7 @@ function formatDate(value: string | null): string {
             </td>
             <td class="px-5 py-4">
               <DsBadge :tone="trackingTone(item)">
-                {{ trackingState(item) }}
+                {{ mailTrackingState(item) }}
               </DsBadge>
               <p
                 v-if="item.trackingEnabled && item.automatedOpenCount"
@@ -269,7 +249,7 @@ function formatDate(value: string | null): string {
               </p>
             </td>
             <td class="hidden whitespace-nowrap px-5 py-4 text-sm text-slate-500 lg:table-cell">
-              {{ formatDate(item.completedAt) }}
+              {{ formatMailTrackingDate(item.completedAt) }}
             </td>
             <td class="px-5 py-4 text-right">
               <button
@@ -301,7 +281,7 @@ function formatDate(value: string | null): string {
     >
       <DsEmptyState
         title="暂无测试邮件记录"
-        description="SMTP 诊断和模板测试发送后会在这里单独显示，不会混入活动投递。"
+        description="SMTP 诊断和模板测试发送后会在这里单独显示，不会混入活动投递。功能启用前发送的旧邮件无法补加图片加载检测。"
       >
         <template #icon>
           <EnvelopeIcon class="size-9 text-slate-400" />

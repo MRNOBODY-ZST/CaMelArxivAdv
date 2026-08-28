@@ -7,6 +7,12 @@ import DsButton from '@/components/design-skill/DsButton.vue'
 import DsModal from '@/components/design-skill/DsModal.vue'
 import DsSkeleton from '@/components/design-skill/DsSkeleton.vue'
 import { mailTrackingApi, mailTrackingErrorMessage } from '@/modules/email/mail-tracking.api'
+import {
+  formatMailTrackingDate,
+  mailSendSourceLabel,
+  mailSendStatusLabel,
+  mailTrackingState,
+} from '@/modules/email/mail-tracking.presentation'
 import type { MailOpenClassification, MailOpenEvent, MailSendRecord } from '@/modules/email/mail-tracking.types'
 
 const props = defineProps<{ recordId: string | null }>()
@@ -18,7 +24,7 @@ const record = ref<MailSendRecord | null>(null)
 const events = ref<MailOpenEvent[]>([])
 const latestEvents = computed(() => [...events.value]
   .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime())
-  .slice(0, 10))
+  .slice(0, 50))
 
 watch(() => props.recordId, (id) => {
   record.value = null
@@ -41,33 +47,6 @@ async function load(id = props.recordId): Promise<void> {
   } finally {
     if (props.recordId === id) loading.value = false
   }
-}
-
-function formatDate(value: string | null): string {
-  return value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—'
-}
-
-function statusLabel(value: MailSendRecord): string {
-  return {
-    SENDING: '发送中', SMTP_ACCEPTED: 'SMTP 已接受', FAILED: '发送失败', UNKNOWN: '发送状态未知',
-  }[value.status]
-}
-
-function sourceLabel(value: MailSendRecord): string {
-  return value.source === 'SMTP_DIAGNOSTIC' ? 'SMTP 诊断' : '模板测试'
-}
-
-function isExpired(value: MailSendRecord): boolean {
-  return Boolean(value.trackingExpiresAt && new Date(value.trackingExpiresAt).getTime() < Date.now())
-}
-
-function trackingState(value: MailSendRecord): string {
-  if (!value.trackingEnabled) return '未启用检测'
-  if (value.status === 'FAILED') return '发送失败，未确认检测'
-  if (value.status === 'UNKNOWN') return '发送状态未知'
-  if (isExpired(value)) return '检测期已过期'
-  if (value.rawOpenCount === 0) return '尚无回传'
-  return `检测到图片加载（${value.rawOpenCount}）`
 }
 
 function classificationLabel(value: MailOpenClassification): string {
@@ -129,7 +108,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               来源
             </dt>
             <dd class="mt-1 text-slate-800">
-              {{ sourceLabel(record) }}
+              {{ mailSendSourceLabel(record) }}
             </dd>
           </div>
           <div class="sm:col-span-2">
@@ -153,7 +132,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               发送结果
             </dt>
             <dd class="mt-1 text-slate-800">
-              {{ statusLabel(record) }}
+              {{ mailSendStatusLabel(record) }}
             </dd>
           </div>
           <div>
@@ -161,7 +140,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               检测状态
             </dt>
             <dd class="mt-1 text-slate-800">
-              {{ trackingState(record) }}
+              {{ mailTrackingState(record) }}
             </dd>
           </div>
           <div>
@@ -169,7 +148,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               检测到期时间
             </dt>
             <dd class="mt-1 text-slate-800">
-              {{ formatDate(record.trackingExpiresAt) }}
+              {{ formatMailTrackingDate(record.trackingExpiresAt) }}
             </dd>
           </div>
           <div>
@@ -193,7 +172,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               首次 / 最近回传
             </dt>
             <dd class="mt-1 text-slate-800">
-              {{ formatDate(record.firstOpenAt) }} / {{ formatDate(record.lastOpenAt) }}
+              {{ formatMailTrackingDate(record.firstOpenAt) }} / {{ formatMailTrackingDate(record.lastOpenAt) }}
             </dd>
           </div>
           <div v-if="record.failureCategory">
@@ -214,7 +193,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
             >
               最近分类回传
             </h3>
-            <span class="text-xs text-slate-500">最多显示 10 条</span>
+            <span class="text-xs text-slate-500">最多显示 50 条</span>
           </div>
           <p
             v-if="latestEvents.length === 0"
@@ -235,7 +214,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
                 <DsBadge :tone="classificationTone(event.classification)">
                   {{ classificationLabel(event.classification) }}
                 </DsBadge>
-                <time class="text-xs text-slate-500">{{ formatDate(event.occurredAt) }}</time>
+                <time class="text-xs text-slate-500">{{ formatMailTrackingDate(event.occurredAt) }}</time>
               </div>
               <p class="mt-2 break-words text-xs/5 text-slate-600">
                 {{ event.reason }}

@@ -190,6 +190,29 @@ describe('mail send records', () => {
     expect(wrapper.text()).not.toContain('已阅读')
   })
 
+  it('renders up to fifty newest classified callbacks in the record detail', async () => {
+    const detail = record({ rawOpenCount: 51, automatedOpenCount: 0 })
+    const events = Array.from({ length: 50 }, (_, index) => ({
+      id: index + 2,
+      occurredAt: new Date(Date.UTC(2026, 7, 28, 10, 0, index + 2)).toISOString(),
+      classification: 'UNCLASSIFIED' as const,
+      reason: `回传 ${index + 2}`,
+    }))
+    vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([detail]))
+    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events })
+
+    const { wrapper } = await mountPanel('/email/deliveries?record=record-1')
+    const callbackItems = wrapper.findAll('ol li')
+
+    expect(wrapper.text()).toContain('最多显示 50 条')
+    expect(callbackItems).toHaveLength(50)
+    const newest = callbackItems[0]
+    const oldest = callbackItems[49]
+    if (!newest || !oldest) throw new Error('Expected fifty rendered callback events')
+    expect(newest.text()).toContain('回传 51')
+    expect(oldest.text()).toContain('回传 2')
+  })
+
   it('refreshes an open detail with newly received image callbacks', async () => {
     const initial = record()
     const refreshed = record({ rawOpenCount: 1, firstOpenAt: '2026-08-28T10:05:00Z', lastOpenAt: '2026-08-28T10:05:00Z' })
@@ -224,6 +247,24 @@ describe('mail send records', () => {
 
     expect(wrapper.text()).toContain('z***@example.invalid')
     expect(wrapper.text()).not.toContain('q***@example.invalid')
+  })
+
+  it('shows a list error without presenting unknown records as an empty list', async () => {
+    vi.mocked(mailTrackingApi.listSendRecords).mockRejectedValue(new Error('offline'))
+
+    const { wrapper } = await mountPanel('/email/deliveries')
+
+    expect(wrapper.text()).toContain('测试邮件记录加载失败。')
+    expect(wrapper.text()).not.toContain('暂无测试邮件记录')
+  })
+
+  it('shows the historical limitation only after a successful empty record response', async () => {
+    vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([]))
+
+    const { wrapper } = await mountPanel('/email/deliveries')
+
+    expect(wrapper.text()).toContain('暂无测试邮件记录')
+    expect(wrapper.text()).toContain('功能启用前发送的旧邮件无法补加图片加载检测。')
   })
 })
 
