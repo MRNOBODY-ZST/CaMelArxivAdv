@@ -122,6 +122,11 @@ app:
       signing-key-base64: ${TEMPLATE_ASSET_SIGNING_KEY_BASE64:}
       public-base-url: ${PUBLIC_BASE_URL:http://localhost:8080}
       max-bytes: ${TEMPLATE_ASSET_MAX_BYTES:5242880}
+  mail-tracking:
+    enabled: ${TRACKING_ENABLED:false}
+    public-base-url: ${TRACKING_PUBLIC_BASE_URL:${PUBLIC_BASE_URL:http://localhost:8080}}
+    signing-key-base64: ${TRACKING_SIGNING_KEY_BASE64:}
+    token-ttl: ${TRACKING_TOKEN_TTL:PT720H}
   smtp:
     live-allowed: ${ALLOW_LIVE_SMTP:false}
     local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}

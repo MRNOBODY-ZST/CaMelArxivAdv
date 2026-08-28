@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.common.security;
 
 import com.camel_hub.advertisement.common.api.ApiError;
+import com.camel_hub.advertisement.common.api.RequestContextSupport;
 import com.camel_hub.advertisement.common.observability.TraceIdWebFilter;
 import com.camel_hub.advertisement.audit.AuditEvent;
 import com.camel_hub.advertisement.audit.AuditResult;
@@ -58,6 +59,7 @@ public final class SecurityErrorResponseWriter {
 	}
 
 	private Mono<Void> auditAccessDenied(ServerWebExchange exchange) {
+		if (RequestContextSupport.isCapabilityRequest(exchange)) return Mono.empty();
 		AuditService auditService = auditServiceProvider.getIfAvailable();
 		SensitiveValueHasher hasher = hasherProvider.getIfAvailable();
 		if (auditService == null || hasher == null) {
@@ -69,7 +71,7 @@ public final class SecurityErrorResponseWriter {
 					String userAgent = exchange.getRequest().getHeaders().getFirst("User-Agent");
 					String summary = userAgent == null ? "unknown" : userAgent.substring(0, Math.min(255, userAgent.length()));
 					String resource = exchange.getRequest().getMethod().name() + " "
-							+ exchange.getRequest().getPath().value();
+							+ RequestContextSupport.safePath(exchange);
 					return auditService.record(new AuditEvent(
 							user.id(), "AUTHORIZATION_DENIED", "HTTP_ENDPOINT", resource,
 							hasher.hash(ipAddress), summary, TraceIdWebFilter.traceId(exchange),
@@ -109,7 +111,7 @@ public final class SecurityErrorResponseWriter {
 				title,
 				status.value(),
 				detail,
-				exchange.getRequest().getPath().value(),
+				RequestContextSupport.safePath(exchange),
 				TraceIdWebFilter.traceId(exchange),
 				Map.of());
 		try {

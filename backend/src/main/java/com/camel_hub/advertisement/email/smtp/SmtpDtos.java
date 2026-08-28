@@ -1,5 +1,7 @@
 package com.camel_hub.advertisement.email.smtp;
 
+import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.annotation.Nulls;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.Max;
@@ -41,6 +43,7 @@ public final class SmtpDtos {
 	public record TestEmailRequest(
 			@NotBlank @Email @Size(max = 320) String recipient,
 			@NotBlank @Size(max = 200) String subject,
-			@Size(max = 5_000) String body
+			@Size(max = 5_000) String body,
+			@JsonSetter(nulls = Nulls.AS_EMPTY) boolean trackOpens
 	) { }
 }

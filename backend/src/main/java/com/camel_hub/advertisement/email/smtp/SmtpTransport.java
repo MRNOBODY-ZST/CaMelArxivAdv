@@ -9,6 +9,8 @@ import jakarta.mail.internet.InternetAddress;
 import jakarta.mail.internet.MimeBodyPart;
 import jakarta.mail.internet.MimeMessage;
 import jakarta.mail.internet.MimeMultipart;
+import org.eclipse.angus.mail.smtp.SMTPAddressFailedException;
+import org.eclipse.angus.mail.smtp.SMTPSendFailedException;
 
 import javax.net.ssl.SSLException;
 import java.io.UnsupportedEncodingException;
@@ -43,7 +45,7 @@ public final class SmtpTransport {
 				transport.sendMessage(mime, mime.getAllRecipients());
 			}
 			catch (MessagingException | UnsupportedEncodingException exception) {
-				throw failure(exception);
+				throw failure(exception, true);
 			}
 		});
 	}
@@ -54,6 +56,7 @@ public final class SmtpTransport {
 		Session session = Session.getInstance(configuration);
 		char[] password = null;
 		String passwordString = null;
+		boolean actionCompleted = false;
 		try (Transport transport = session.getTransport("smtp")) {
 			if (account.passwordCiphertext() != null) {
 				password = crypto.decrypt(new SmtpSecretCrypto.EncryptedSecret(
@@ -62,12 +65,14 @@ public final class SmtpTransport {
 			}
 			transport.connect(account.host(), account.port(), account.username(), passwordString);
 			action.execute(transport, session);
+			actionCompleted = true;
 		}
 		catch (SmtpTransportException exception) {
 			throw exception;
 		}
 		catch (MessagingException exception) {
-			throw failure(exception);
+			// A failed QUIT/close cannot undo an already successful DATA or connection operation.
+			if (!actionCompleted) throw failure(exception, false);
 		}
 		finally {
 			if (password != null) Arrays.fill(password, '\0');
@@ -114,8 +119,9 @@ public final class SmtpTransport {
 		return message;
 	}
 
-	private SmtpTransportException failure(Throwable error) {
+	private SmtpTransportException failure(Throwable error, boolean duringSend) {
 		Throwable current = error;
+		boolean explicitRejection = false;
 		while (current != null) {
 			if (current instanceof AuthenticationFailedException) {
 				return new SmtpTransportException(SmtpTransportException.FailureCategory.AUTHENTICATION_FAILED);
@@ -127,14 +133,18 @@ public final class SmtpTransport {
 				return new SmtpTransportException(SmtpTransportException.FailureCategory.DNS_FAILURE);
 			}
 			if (current instanceof SSLException || current instanceof CertificateException) {
-				return new SmtpTransportException(SmtpTransportException.FailureCategory.TLS_FAILURE);
+				return new SmtpTransportException(duringSend ? SmtpTransportException.FailureCategory.UNEXPECTED_FAILURE
+						: SmtpTransportException.FailureCategory.TLS_FAILURE);
 			}
 			if (current instanceof ConnectException) {
 				return new SmtpTransportException(SmtpTransportException.FailureCategory.CONNECTION_REJECTED);
 			}
+			int responseCode = current instanceof SMTPSendFailedException send ? send.getReturnCode()
+					: current instanceof SMTPAddressFailedException address ? address.getReturnCode() : 0;
+			if (responseCode >= 400 && responseCode <= 599) explicitRejection = true;
 			current = current.getCause();
 		}
-		return new SmtpTransportException(error instanceof MessagingException
+		return new SmtpTransportException(explicitRejection
 				? SmtpTransportException.FailureCategory.SMTP_REJECTED
 				: SmtpTransportException.FailureCategory.UNEXPECTED_FAILURE);
 	}

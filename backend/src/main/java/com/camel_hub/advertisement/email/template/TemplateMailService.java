@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.email.template;
 
 import com.camel_hub.advertisement.email.smtp.SmtpService;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
+import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import jakarta.mail.internet.AddressException;
 import jakarta.mail.internet.InternetAddress;
@@ -29,7 +30,7 @@ public final class TemplateMailService {
 
 	public Mono<SmtpService.TestResult> sendTest(
 			UUID actorId, UUID templateId, UUID smtpAccountId, String recipient,
-			Map<String, String> variables, AuthenticationRequestContext context
+			Map<String, String> variables, boolean trackOpens, AuthenticationRequestContext context
 	) {
 		String safeRecipient = email(recipient);
 		return Mono.zip(
@@ -46,7 +47,7 @@ public final class TemplateMailService {
 					return smtp.send(tuple.getT2(), new SmtpTransport.OutboundMessage(
 							safeRecipient, rendered.subject(), rendered.fromName(), rendered.replyTo(),
 							assetSigner.absolutizeHtml(rendered.html()), rendered.text(), correlationId), actorId, context,
-							"TEMPLATE_TEST_SEND");
+							MailTrackingModels.Source.TEMPLATE_TEST, trackOpens);
 				});
 	}
 

@@ -1,5 +1,7 @@
 package com.camel_hub.advertisement.email.template;
 
+import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.annotation.Nulls;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.Max;
@@ -53,6 +55,7 @@ public final class TemplateDtos {
 	public record TestSendRequest(
 			@NotNull UUID smtpAccountId,
 			@NotBlank @Email @Size(max = 320) String recipient,
-			@NotNull Map<@Pattern(regexp = "[a-z_]+") String, @Size(max = 2_048) String> variables
+			@NotNull Map<@Pattern(regexp = "[a-z_]+") String, @Size(max = 2_048) String> variables,
+			@JsonSetter(nulls = Nulls.AS_EMPTY) boolean trackOpens
 	) { }
 }

@@ -24,6 +24,7 @@ import com.camel_hub.advertisement.email.template.TemplateMailService;
 import com.camel_hub.advertisement.email.template.TemplateProperties;
 import com.camel_hub.advertisement.email.template.TemplateRepository;
 import com.camel_hub.advertisement.email.template.TemplateService;
+import com.camel_hub.advertisement.email.tracking.MailTrackingService;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -138,9 +139,9 @@ public class EmailConfiguration {
 	SmtpService smtpService(
 			SmtpRepository repository, SmtpSecretCrypto crypto, SmtpPolicy policy,
 			AuditService auditService, SensitiveValueHasher hasher, TransactionalOperator transactions,
-			SmtpTransport transport
+			SmtpTransport transport, MailTrackingService tracking
 	) {
-		return new SmtpService(repository, crypto, policy, auditService, hasher, transactions, transport);
+		return new SmtpService(repository, crypto, policy, auditService, hasher, transactions, transport, tracking);
 	}
 
 	@Bean

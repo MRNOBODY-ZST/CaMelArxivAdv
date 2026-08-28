@@ -1,0 +1,33 @@
+package com.camel_hub.advertisement.email.tracking;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+public final class MailTrackingModels {
+	private MailTrackingModels() { }
+
+	public enum Source { SMTP_DIAGNOSTIC, TEMPLATE_TEST }
+	public enum Status { SENDING, SMTP_ACCEPTED, FAILED, UNKNOWN }
+	public enum Classification { UNCLASSIFIED, PREFETCH, IMAGE_PROXY, BOT }
+	public enum CallbackScope { LOCAL_ONLY, PUBLIC_HTTPS_UNVERIFIED }
+
+	public record TrackingStatus(
+			boolean enabled, String callbackBaseUrl, CallbackScope callbackScope, long tokenTtlSeconds
+	) { }
+
+	public record MailSendRecord(
+			UUID id, Source source, String recipientMasked, String subject, String smtpAccountName,
+			Status status, String failureCategory, boolean trackingEnabled, Instant createdAt,
+			Instant completedAt, Instant trackingExpiresAt, long rawOpenCount, long automatedOpenCount,
+			Instant firstOpenAt, Instant lastOpenAt
+	) { }
+
+	public record MailOpenEvent(long id, Instant occurredAt, Classification classification, String reason) { }
+
+	public record Detail(MailSendRecord record, List<MailOpenEvent> events) {
+		public Detail {
+			events = List.copyOf(events);
+		}
+	}
+}

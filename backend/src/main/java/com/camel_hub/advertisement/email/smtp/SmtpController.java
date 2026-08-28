@@ -88,7 +88,7 @@ public class SmtpController {
 			Principal principal, ServerWebExchange exchange
 	) {
 		return service.sendDiagnostic(RequestContextSupport.actorId(principal), id,
-				request.recipient(), request.subject(), request.body(), RequestContextSupport.context(exchange));
+				request.recipient(), request.subject(), request.body(), request.trackOpens(), RequestContextSupport.context(exchange));
 	}
 
 	@DeleteMapping("/{id}")

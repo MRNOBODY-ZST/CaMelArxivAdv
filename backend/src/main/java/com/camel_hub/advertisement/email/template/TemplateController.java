@@ -116,7 +116,7 @@ public class TemplateController {
 			Principal principal, ServerWebExchange exchange
 	) {
 		return mailService.sendTest(RequestContextSupport.actorId(principal), id, request.smtpAccountId(),
-				request.recipient(), request.variables(), RequestContextSupport.context(exchange));
+				request.recipient(), request.variables(), request.trackOpens(), RequestContextSupport.context(exchange));
 	}
 
 	@DeleteMapping("/{id}")

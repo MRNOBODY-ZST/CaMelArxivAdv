@@ -93,6 +93,19 @@ if [[ $(jq -r '.services["backend-api"].environment.TEMPLATE_ASSET_BUCKET' <<<"$
   exit 1
 fi
 
+if [[ $(jq -r '.services["backend-api"].environment.TRACKING_ENABLED' <<<"$compose_json") != "false" ]] \
+  || [[ $(jq -r '.services["backend-api"].environment.TRACKING_TOKEN_TTL' <<<"$compose_json") != "PT720H" ]]; then
+  echo "Test-mail tracking must default disabled with a 30-day token TTL" >&2
+  exit 1
+fi
+
+if [[ $(jq -r '.services["backend-api"].environment.TRACKING_PUBLIC_BASE_URL' <<<"$compose_json") != \
+      $(jq -r '.services["backend-api"].environment.PUBLIC_BASE_URL' <<<"$compose_json") ]] \
+  || ! jq -e '.services["backend-api"].environment | has("TRACKING_SIGNING_KEY_BASE64")' <<<"$compose_json" >/dev/null; then
+  echo "Tracking must receive its independent optional key and existing public-origin fallback" >&2
+  exit 1
+fi
+
 if [[ $(jq -r '.services["backend-api"].environment.SMTP_LOCAL_ALLOWED_HOSTS' <<<"$compose_json") != *"mailpit"* ]]; then
   echo "backend-api local SMTP allowlist must include Mailpit" >&2
   exit 1

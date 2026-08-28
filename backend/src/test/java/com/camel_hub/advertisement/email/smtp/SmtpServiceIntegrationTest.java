@@ -1,6 +1,10 @@
 package com.camel_hub.advertisement.email.smtp;
 
 import com.camel_hub.advertisement.audit.AuditService;
+import com.camel_hub.advertisement.email.tracking.MailOpenClassifier;
+import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.camel_hub.advertisement.email.tracking.MailTrackingRepository;
+import com.camel_hub.advertisement.email.tracking.MailTrackingService;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import io.r2dbc.spi.ConnectionFactories;
@@ -17,6 +21,7 @@ import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Clock;
 import java.util.Base64;
 import java.util.Set;
 import java.util.UUID;
@@ -68,7 +73,9 @@ class SmtpServiceIntegrationTest {
 		repository = new SmtpRepository(databaseClient);
 		service = new SmtpService(repository, new SmtpSecretCrypto(key), new SmtpPolicy(properties),
 				audit, hasher, TransactionalOperator.create(new R2dbcTransactionManager(connectionFactory)),
-				mock(SmtpTransport.class));
+				mock(SmtpTransport.class), new MailTrackingService(new MailTrackingRepository(databaseClient),
+						new MailTrackingProperties(false, "http://localhost:8080", "", Duration.ofDays(30)),
+						null, new MailOpenClassifier(), Clock.systemUTC()));
 	}
 
 	@Test

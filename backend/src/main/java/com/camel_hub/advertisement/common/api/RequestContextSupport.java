@@ -26,6 +26,15 @@ public final class RequestContextSupport {
 		}
 	}
 
+	public static boolean isCapabilityRequest(ServerWebExchange exchange) {
+		String path = exchange.getRequest().getPath().pathWithinApplication().value();
+		return path.equals("/t") || path.startsWith("/t/");
+	}
+
+	public static String safePath(ServerWebExchange exchange) {
+		return isCapabilityRequest(exchange) ? "/t/[redacted]" : exchange.getRequest().getPath().value();
+	}
+
 	public static AuthenticationRequestContext context(ServerWebExchange exchange) {
 		String ipAddress = ClientAddressResolver.resolve(exchange.getRequest());
 		String rawUserAgent = exchange.getRequest().getHeaders().getFirst(HttpHeaders.USER_AGENT);

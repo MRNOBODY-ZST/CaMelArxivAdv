@@ -62,6 +62,8 @@ class FlywayMigrationTest {
 				"template_assets",
 				"campaigns",
 				"tracking_events",
+				"mail_send_records",
+				"mail_open_events",
 				"audit_logs");
 			assertThat(constraintNames()).contains(
 				"uk_papers_arxiv_id",
@@ -136,7 +138,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-				assertThat(latest.migrate().migrationsExecuted).isEqualTo(5);
+				assertThat(latest.migrate().migrationsExecuted).isEqualTo(6);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);

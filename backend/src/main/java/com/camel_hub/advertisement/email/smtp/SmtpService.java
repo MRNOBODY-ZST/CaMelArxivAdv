@@ -4,10 +4,14 @@ import com.camel_hub.advertisement.audit.AuditEvent;
 import com.camel_hub.advertisement.audit.AuditResult;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.common.api.PageResponse;
+import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
+import com.camel_hub.advertisement.email.tracking.MailTrackingService;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import jakarta.mail.internet.AddressException;
 import jakarta.mail.internet.InternetAddress;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
@@ -20,6 +24,7 @@ import java.util.Map;
 import java.util.UUID;
 
 public final class SmtpService {
+	private static final Logger LOGGER = LoggerFactory.getLogger(SmtpService.class);
 
 	private final SmtpRepository repository;
 	private final SmtpSecretCrypto crypto;
@@ -28,11 +33,12 @@ public final class SmtpService {
 	private final SensitiveValueHasher hasher;
 	private final TransactionalOperator transactions;
 	private final SmtpTransport transport;
+	private final MailTrackingService tracking;
 
 	public SmtpService(
 			SmtpRepository repository, SmtpSecretCrypto crypto, SmtpPolicy policy,
 			AuditService auditService, SensitiveValueHasher hasher, TransactionalOperator transactions,
-			SmtpTransport transport
+			SmtpTransport transport, MailTrackingService tracking
 	) {
 		this.repository = repository;
 		this.crypto = crypto;
@@ -41,6 +47,7 @@ public final class SmtpService {
 		this.hasher = hasher;
 		this.transactions = transactions;
 		this.transport = transport;
+		this.tracking = tracking;
 	}
 
 	public Mono<PageResponse<SmtpAccountView>> list(int page, int pageSize) {
@@ -109,7 +116,7 @@ public final class SmtpService {
 
 	public Mono<TestResult> sendDiagnostic(
 			UUID actorId, UUID id, String recipient, String subject, String body,
-			AuthenticationRequestContext context
+			boolean trackOpens, AuthenticationRequestContext context
 	) {
 		String safeRecipient = email(recipient, "Test recipient");
 		String safeSubject = safeText(subject, 200, "Test subject");
@@ -119,22 +126,30 @@ public final class SmtpService {
 				.flatMap(account -> send(account, new SmtpTransport.OutboundMessage(
 						safeRecipient, safeSubject, account.defaultFromName(), account.replyTo(),
 						"<p>" + org.jsoup.nodes.Entities.escape(safeBody) + "</p>", safeBody,
-						UUID.randomUUID().toString()), actorId, context, "SMTP_TEST_EMAIL"));
+						UUID.randomUUID().toString()), actorId, context, MailTrackingModels.Source.SMTP_DIAGNOSTIC, trackOpens));
 	}
 
 	public Mono<TestResult> send(
 			SmtpRepository.SmtpAccountRecord account, SmtpTransport.OutboundMessage message,
-			UUID actorId, AuthenticationRequestContext context, String auditPrefix
+			UUID actorId, AuthenticationRequestContext context, MailTrackingModels.Source source, boolean trackOpens
 	) {
-		return Mono.fromRunnable(() -> transport.send(account, message)).subscribeOn(Schedulers.boundedElastic())
-				.then(repository.recordTest(account.id(), true, null))
-				.then(audit(auditPrefix + "_ACCEPTED", account, actorId, context))
-				.thenReturn(new TestResult("SMTP_ACCEPTED", null, message.correlationId()))
-				.onErrorResume(SmtpTransportException.class, failure -> repository
+		policy.validateDestination(account.host(), account.port(), account.tlsMode());
+		String auditPrefix = source == MailTrackingModels.Source.SMTP_DIAGNOSTIC ? "SMTP_TEST_EMAIL" : "TEMPLATE_TEST_SEND";
+		return tracking.send(actorId, account.id(), source, message, trackOpens, outbound -> transport.send(account, outbound))
+				.then(Mono.defer(() -> repository.recordTest(account.id(), true, null)
+						.then(audit(auditPrefix + "_ACCEPTED", account, actorId, context)))
+						.onErrorResume(error -> postSendMetadataUnavailable(message.correlationId()))
+						.thenReturn(new TestResult("SMTP_ACCEPTED", null, message.correlationId())))
+				.onErrorResume(SmtpTransportException.class, failure -> Mono.defer(() -> repository
 						.recordTest(account.id(), false, failure.category().name())
-						.then(auditFailure(auditPrefix + "_FAILED", account, actorId, context,
-								failure.category().name()))
+						.then(auditFailure(auditPrefix + "_FAILED", account, actorId, context, failure.category().name())))
+						.onErrorResume(error -> postSendMetadataUnavailable(message.correlationId()))
 						.then(Mono.error(failure)));
+	}
+
+	private Mono<Void> postSendMetadataUnavailable(String correlationId) {
+		LOGGER.warn("Mail send account/audit metadata unavailable recordId={}", correlationId);
+		return Mono.empty();
 	}
 
 	public Mono<SmtpRepository.SmtpAccountRecord> account(UUID id) {

@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.email.template;
 import com.camel_hub.advertisement.email.smtp.SmtpRepository;
 import com.camel_hub.advertisement.email.smtp.SmtpService;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
+import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -45,18 +46,18 @@ class TemplateMailServiceTest {
 		SmtpRepository.SmtpAccountRecord account = mock(SmtpRepository.SmtpAccountRecord.class);
 		when(templates.find(templateId)).thenReturn(Mono.just(template));
 		when(smtp.account(smtpId)).thenReturn(Mono.just(account));
-		when(smtp.send(eq(account), any(), eq(actorId), any(), eq("TEMPLATE_TEST_SEND")))
+		when(smtp.send(eq(account), any(), eq(actorId), any(), eq(MailTrackingModels.Source.TEMPLATE_TEST), eq(false)))
 				.thenReturn(Mono.just(new SmtpService.TestResult("SMTP_ACCEPTED", null, "correlation")));
 		TemplateMailService service = new TemplateMailService(
 				templates, new TemplateEngine(102_400), smtp, signer);
 
 		service.sendTest(actorId, templateId, smtpId, "qa@example.org",
 				Map.of("unsubscribe_url", "https://example.org/unsubscribe/1"),
-				new AuthenticationRequestContext("127.0.0.1", "JUnit", "mail-asset")).block();
+				false, new AuthenticationRequestContext("127.0.0.1", "JUnit", "mail-asset")).block();
 
 		ArgumentCaptor<SmtpTransport.OutboundMessage> message =
 				ArgumentCaptor.forClass(SmtpTransport.OutboundMessage.class);
-		verify(smtp).send(eq(account), message.capture(), eq(actorId), any(), eq("TEMPLATE_TEST_SEND"));
+		verify(smtp).send(eq(account), message.capture(), eq(actorId), any(), eq(MailTrackingModels.Source.TEMPLATE_TEST), eq(false));
 		assertThat(message.getValue().html())
 				.contains("src=\"http://localhost:8080/api/v1/template-assets/")
 				.doesNotContain("src=\"/api/v1/template-assets/");

@@ -3,6 +3,8 @@ package com.camel_hub.advertisement.common.security;
 import com.camel_hub.advertisement.identity.config.AuthProperties;
 import com.camel_hub.advertisement.identity.persistence.IdentityRepository;
 import com.camel_hub.advertisement.identity.security.LiveUserJwtAuthenticationConverter;
+import com.camel_hub.advertisement.common.api.RequestContextSupport;
+import org.springframework.security.oauth2.server.resource.web.server.authentication.ServerBearerTokenAuthenticationConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -61,6 +63,7 @@ public class SecurityConfiguration {
 			Converter<Jwt, Mono<UsernamePasswordAuthenticationToken>> jwtAuthenticationConverter,
 			SecurityErrorResponseWriter errorWriter
 	) {
+		var bearerTokens = new ServerBearerTokenAuthenticationConverter();
 		return http
 				.csrf(ServerHttpSecurity.CsrfSpec::disable)
 				.httpBasic(ServerHttpSecurity.HttpBasicSpec::disable)
@@ -99,6 +102,8 @@ public class SecurityConfiguration {
 						.authenticationEntryPoint((exchange, exception) -> errorWriter.authenticationRequired(exchange))
 						.accessDeniedHandler((exchange, exception) -> errorWriter.accessDenied(exchange)))
 				.oauth2ResourceServer(resourceServer -> resourceServer
+						.bearerTokenConverter(exchange -> RequestContextSupport.isCapabilityRequest(exchange)
+								? Mono.empty() : bearerTokens.convert(exchange))
 						.authenticationEntryPoint(
 								(exchange, exception) -> errorWriter.authenticationRequired(exchange))
 						.accessDeniedHandler((exchange, exception) -> errorWriter.accessDenied(exchange))

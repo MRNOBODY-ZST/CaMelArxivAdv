@@ -34,6 +34,8 @@ import com.camel_hub.advertisement.email.smtp.SmtpValidationException;
 import com.camel_hub.advertisement.email.template.TemplateConflictException;
 import com.camel_hub.advertisement.email.template.TemplateNotFoundException;
 import com.camel_hub.advertisement.email.template.TemplateValidationException;
+import com.camel_hub.advertisement.email.tracking.MailTrackingNotFoundException;
+import com.camel_hub.advertisement.email.tracking.MailTrackingValidationException;
 import com.camel_hub.advertisement.identity.domain.AuthenticatedUser;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import org.slf4j.Logger;
@@ -119,7 +121,7 @@ public class GlobalExceptionHandler {
 	}
 
 	private Mono<Void> auditAccessDenied(ServerWebExchange exchange) {
-		if (auditServiceProvider == null || hasherProvider == null) {
+		if (RequestContextSupport.isCapabilityRequest(exchange) || auditServiceProvider == null || hasherProvider == null) {
 			return Mono.empty();
 		}
 		AuditService auditService = auditServiceProvider.getIfAvailable();
@@ -135,7 +137,7 @@ public class GlobalExceptionHandler {
 							? "unknown"
 							: userAgent.substring(0, Math.min(255, userAgent.length()));
 					String resource = exchange.getRequest().getMethod().name() + " "
-							+ exchange.getRequest().getPath().value();
+							+ RequestContextSupport.safePath(exchange);
 					return auditService.record(new AuditEvent(
 							user.id(), "AUTHORIZATION_DENIED", "HTTP_ENDPOINT", resource,
 							hasher.hash(ipAddress), summary, TraceIdWebFilter.traceId(exchange),
@@ -436,6 +438,18 @@ public class GlobalExceptionHandler {
 				"SMTP operation failed", "SMTP failure category: " + exception.category().name(), Map.of());
 	}
 
+	@ExceptionHandler(MailTrackingValidationException.class)
+	ResponseEntity<ApiError> handleMailTrackingValidation(MailTrackingValidationException exception, ServerWebExchange exchange) {
+		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_mail_tracking", "Mail tracking request rejected",
+				exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(MailTrackingNotFoundException.class)
+	ResponseEntity<ApiError> handleMailTrackingNotFound(MailTrackingNotFoundException exception, ServerWebExchange exchange) {
+		return response(exchange, HttpStatus.NOT_FOUND, "mail_send_record_not_found", "Mail send record not found",
+				exception.getMessage(), Map.of());
+	}
+
 	@ExceptionHandler(MailboxValidationException.class)
 	ResponseEntity<ApiError> handleMailboxValidation(
 			MailboxValidationException exception, ServerWebExchange exchange
@@ -480,8 +494,14 @@ public class GlobalExceptionHandler {
 
 	@ExceptionHandler(Exception.class)
 	ResponseEntity<ApiError> handleUnexpected(Exception exception, ServerWebExchange exchange) {
-		LOGGER.error("Unhandled API exception traceId={} path={}", TraceIdWebFilter.traceId(exchange),
-				exchange.getRequest().getPath().value(), exception);
+		if (RequestContextSupport.isCapabilityRequest(exchange)) {
+			// Exception messages and reactive checkpoints can contain the capability URL.
+			LOGGER.error("Unhandled callback exception traceId={}", TraceIdWebFilter.traceId(exchange));
+		}
+		else {
+			LOGGER.error("Unhandled API exception traceId={} path={}", TraceIdWebFilter.traceId(exchange),
+					RequestContextSupport.safePath(exchange), exception);
+		}
 		return response(exchange, HttpStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error",
 				"The request could not be completed", Map.of());
 	}
@@ -499,8 +519,8 @@ public class GlobalExceptionHandler {
 				type,
 				title,
 				status.value(),
-				detail,
-				exchange.getRequest().getPath().value(),
+				RequestContextSupport.isCapabilityRequest(exchange) ? status.getReasonPhrase() : detail,
+				RequestContextSupport.safePath(exchange),
 				traceId,
 				fieldErrors);
 		return ResponseEntity.status(status).body(error);
