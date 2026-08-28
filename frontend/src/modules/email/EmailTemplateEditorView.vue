@@ -18,6 +18,7 @@ import DsSwitch from '@/components/design-skill/DsSwitch.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { emailApi, emailErrorMessage } from '@/modules/email/email.api'
 import { createSampleValues, createTemplateDraft, insertPlaceholder, previewWidthClass } from '@/modules/email/email.editor'
+import MailTrackingOption from '@/modules/email/MailTrackingOption.vue'
 import type {
   PreviewDevice, SmtpAccountView, TemplateAsset, TemplatePreview, TemplateSampleValues,
   TemplateUpsertRequest, TemplateVariable, TemplateVersionView, TemplateView,
@@ -52,6 +53,8 @@ const archiveOpen = ref(false)
 const copyName = ref('')
 const testRecipient = ref('')
 const selectedSmtpId = ref('')
+const trackOpens = ref(false)
+const lastTestRecordId = ref<string | null>(null)
 const activeScalar = ref<'subjectTemplate' | 'fromNameTemplate' | 'textContent'>('subjectTemplate')
 const richEditor = ref<InstanceType<typeof TemplateRichTextEditor> | null>(null)
 const uploadInput = ref<globalThis.HTMLInputElement | null>(null)
@@ -160,7 +163,10 @@ async function save(showMessage = true): Promise<void> {
       : await emailApi.updateTemplate(routeId.value, template.value?.lockVersion ?? 0, draft)
     applyTemplate(saved)
     saveState.value = 'saved'
-    if (showMessage) successMessage.value = `已保存为版本 ${saved.currentVersion}`
+    if (showMessage) {
+      lastTestRecordId.value = null
+      successMessage.value = `已保存为版本 ${saved.currentVersion}`
+    }
     if (isNew.value) await router.replace(`/email/templates/${saved.id}`)
     await Promise.all([loadVersions(), refreshPreview(false)])
   } catch (error) {
@@ -196,6 +202,7 @@ async function restore(version: number): Promise<void> {
     const restored = await emailApi.restoreTemplate(template.value.id, version, template.value.lockVersion)
     applyTemplate(restored)
     versionsOpen.value = false
+    lastTestRecordId.value = null
     successMessage.value = `版本 ${version} 已恢复为新版本 ${restored.currentVersion}`
     await Promise.all([loadVersions(), refreshPreview(false)])
   } catch (error) {
@@ -250,6 +257,7 @@ async function uploadAsset(event: globalThis.Event): Promise<void> {
     const asset = await emailApi.uploadAsset(routeId.value, file)
     assets.value = [asset, ...assets.value]
     richEditor.value?.insertImage(asset.objectUrl, asset.originalFilename)
+    lastTestRecordId.value = null
     successMessage.value = '图片已上传到私有资产库并插入正文。'
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, '图片上传失败；仅支持 5 MB 内的 PNG/JPEG/GIF/WebP。')
@@ -267,18 +275,30 @@ async function openTestSend(): Promise<void> {
     smtpAccounts.value = (await emailApi.listSmtpAccounts()).items.filter((item) => item.enabled)
     selectedSmtpId.value = ''
     testRecipient.value = ''
+    trackOpens.value = false
+    lastTestRecordId.value = null
     testSendOpen.value = true
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, 'SMTP 账户无法加载。')
   }
 }
 
+function closeTestSend(): void {
+  selectedSmtpId.value = ''
+  testRecipient.value = ''
+  trackOpens.value = false
+  testSendOpen.value = false
+}
+
 async function testSend(): Promise<void> {
   if (!template.value || !selectedSmtpId.value || !testRecipient.value.trim()) return
   saving.value = true
   try {
-    const result = await emailApi.testSendTemplate(template.value.id, selectedSmtpId.value, testRecipient.value, { ...sampleValues })
-    testSendOpen.value = false
+    const result = await emailApi.testSendTemplate(
+      template.value.id, selectedSmtpId.value, testRecipient.value, { ...sampleValues }, trackOpens.value,
+    )
+    lastTestRecordId.value = result.correlationId
+    closeTestSend()
     successMessage.value = `SMTP 已接受测试邮件（${result.correlationId}）；这不代表最终投递。`
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, '测试邮件未被 SMTP 接受。')
@@ -367,7 +387,14 @@ function formatDate(value: string): string {
       tone="success"
       title="操作完成"
     >
-      {{ successMessage }}
+      <p>{{ successMessage }}</p>
+      <a
+        v-if="lastTestRecordId"
+        :href="`/email/deliveries?record=${lastTestRecordId}`"
+        class="mt-2 inline-flex min-h-11 items-center font-semibold underline underline-offset-2"
+      >
+        查看测试邮件记录
+      </a>
     </DsAlert>
     <DsAlert
       v-if="!hasUnsubscribe"
@@ -715,7 +742,7 @@ function formatDate(value: string): string {
       :open="testSendOpen"
       title="发送测试邮件"
       description="请确认账户与收件人。公网账户会真实发信；SMTP 接受不等于投递。"
-      @close="testSendOpen = false"
+      @close="closeTestSend"
     >
       <div class="space-y-4">
         <DsSelect
@@ -730,6 +757,10 @@ function formatDate(value: string): string {
           type="email"
           label="测试收件地址"
         />
+        <MailTrackingOption
+          id="template-test-track-opens"
+          v-model="trackOpens"
+        />
         <DsAlert
           tone="info"
           title="仅发送到指定测试地址"
@@ -740,7 +771,7 @@ function formatDate(value: string): string {
       <template #actions>
         <DsButton
           variant="secondary"
-          @click="testSendOpen = false"
+          @click="closeTestSend"
         >
           取消
         </DsButton><DsButton

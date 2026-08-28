@@ -79,7 +79,7 @@ const navigation: readonly NavigationSection[] = [
     { label: '邮件模板', href: '/email/templates', icon: DocumentTextIcon, permission: 'template:read' },
     { label: '收件人分组', href: '/email/segments', icon: FolderIcon, permission: 'campaign:read' },
     { label: '邮件活动', href: '/email/campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },
-    { label: '发送记录', href: '/email/deliveries', icon: EnvelopeIcon, permission: 'campaign:read' },
+    { label: '发送记录', href: '/email/deliveries', icon: EnvelopeIcon, anyPermissions: ['campaign:read', 'smtp:read'] },
   ] },
   { id: 'insights', label: '分析洞察', items: [
     { label: '采集分析', href: '/analytics/ingestion', icon: ChartBarIcon, permission: 'analytics:read' },

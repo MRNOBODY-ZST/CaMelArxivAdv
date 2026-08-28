@@ -34,6 +34,14 @@ describe('AppShell', () => {
     expect(wrapper.text()).not.toContain('邮件账户')
   })
 
+  it('keeps the shared delivery navigation visible to SMTP readers without campaign access', async () => {
+    const wrapper = mountShell(['smtp:read'])
+    await disclosure(wrapper, '邮件触达').trigger('click')
+
+    expect(wrapper.text()).toContain('发送记录')
+    expect(wrapper.text()).not.toContain('邮件活动')
+  })
+
   it('exposes the dedicated author relationship analytics route', async () => {
     const wrapper = mountShell(['analytics:read'])
     await disclosure(wrapper, '分析洞察').trigger('click')

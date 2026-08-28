@@ -6,6 +6,7 @@ import EmailTemplatesView from '@/modules/email/EmailTemplatesView.vue'
 import SmtpAccountsView from '@/modules/email/SmtpAccountsView.vue'
 import TemplateRichTextEditor from '@/modules/email/TemplateRichTextEditor.vue'
 import { emailApi } from '@/modules/email/email.api'
+import { mailTrackingApi } from '@/modules/email/mail-tracking.api'
 import { useAuthStore } from '@/modules/auth/auth.store'
 
 vi.mock('@/modules/email/email.api', () => ({
@@ -16,9 +17,18 @@ vi.mock('@/modules/email/email.api', () => ({
   },
   emailErrorMessage: (_error: unknown, fallback: string) => fallback,
 }))
+vi.mock('@/modules/email/mail-tracking.api', () => ({
+  mailTrackingApi: { getStatus: vi.fn(), listSendRecords: vi.fn(), getSendRecord: vi.fn() },
+  mailTrackingErrorMessage: (_error: unknown, fallback: string) => fallback,
+}))
 
 describe('email administration views', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(mailTrackingApi.getStatus).mockResolvedValue({
+      enabled: true, callbackBaseUrl: 'http://127.0.0.1:8080', callbackScope: 'LOCAL_ONLY', tokenTtlSeconds: 86_400,
+    })
+  })
 
   it('shows the template empty state after loading', async () => {
     vi.mocked(emailApi.listTemplates).mockResolvedValue({
@@ -117,7 +127,7 @@ describe('email administration views', () => {
     expect(button('发送测试邮件').attributes('disabled')).toBeUndefined()
     await button('发送测试邮件').trigger('click')
     await flushPromises()
-    expect(emailApi.sendSmtpDiagnostic).toHaveBeenCalledExactlyOnceWith('smtp-public', 'receiver@example.test')
+    expect(emailApi.sendSmtpDiagnostic).toHaveBeenCalledExactlyOnceWith('smtp-public', 'receiver@example.test', false)
     expect(wrapper.text()).toContain('SMTP 已接受测试邮件')
     expect(wrapper.text()).toContain('不代表最终投递')
     wrapper.unmount()

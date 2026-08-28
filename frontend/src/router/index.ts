@@ -79,7 +79,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/email/deliveries', name: 'email-deliveries', component: () => import('@/modules/campaigns/DeliveriesView.vue'),
-    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '发送记录', pageSection: '邮件运营' },
+    meta: { requiresAuth: true, anyPermissions: ['campaign:read', 'smtp:read'], pageTitle: '发送记录', pageSection: '邮件运营' },
   },
   {
     path: '/analytics/ingestion', name: 'ingestion-analytics',

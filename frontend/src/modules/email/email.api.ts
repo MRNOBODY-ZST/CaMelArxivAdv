@@ -47,8 +47,12 @@ export const emailApi = {
   async archiveTemplate(id: string, expectedLockVersion: number): Promise<void> {
     await apiClient.delete(`/templates/${id}`, { params: { expectedLockVersion } })
   },
-  async testSendTemplate(id: string, smtpAccountId: string, recipient: string, variables: TemplateSampleValues): Promise<SmtpTestResult> {
-    return (await apiClient.post<SmtpTestResult>(`/templates/${id}/test-send`, { smtpAccountId, recipient, variables })).data
+  async testSendTemplate(
+    id: string, smtpAccountId: string, recipient: string, variables: TemplateSampleValues, trackOpens = false,
+  ): Promise<SmtpTestResult> {
+    return (await apiClient.post<SmtpTestResult>(`/templates/${id}/test-send`, {
+      smtpAccountId, recipient, variables, trackOpens,
+    })).data
   },
   async listAssets(templateId: string): Promise<TemplateAsset[]> {
     return (await apiClient.get<TemplateAsset[]>(`/templates/${templateId}/assets`)).data
@@ -73,9 +77,9 @@ export const emailApi = {
   async testSmtpConnection(id: string): Promise<SmtpTestResult> {
     return (await apiClient.post<SmtpTestResult>(`/smtp-accounts/${id}/test-connection`)).data
   },
-  async sendSmtpDiagnostic(id: string, recipient: string): Promise<SmtpTestResult> {
+  async sendSmtpDiagnostic(id: string, recipient: string, trackOpens = false): Promise<SmtpTestResult> {
     return (await apiClient.post<SmtpTestResult>(`/smtp-accounts/${id}/test-email`, {
-      recipient, subject: 'CaMel arXiv SMTP 内部测试', body: '本消息只用于验证本机 SMTP 接收链路。',
+      recipient, subject: 'CaMel arXiv SMTP 内部测试', body: '本消息只用于验证本机 SMTP 接收链路。', trackOpens,
     })).data
   },
   async deleteSmtpAccount(id: string, expectedLockVersion: number): Promise<void> {

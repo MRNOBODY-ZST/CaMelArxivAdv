@@ -1,4 +1,5 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -16,6 +17,7 @@ import type {
   SegmentView,
 } from '@/modules/campaigns/campaigns.types'
 import SystemSettingsView from '@/modules/admin/SystemSettingsView.vue'
+import { useAuthStore } from '@/modules/auth/auth.store'
 import { emailApi } from '@/modules/email/email.api'
 
 vi.mock('@/modules/campaigns/campaigns.api', () => ({
@@ -75,7 +77,7 @@ describe('campaign workspace views', () => {
 
   it('renders truthful reporting empty states and non-secret runtime status', async () => {
     const deliveries = await mountView(DeliveriesView, '/email/deliveries')
-    expect(deliveries.text()).toContain('暂无发送记录')
+    expect(deliveries.text()).toContain('暂无活动发送记录')
     const campaigns = await mountView(CampaignAnalyticsView, '/analytics/campaigns')
     expect(campaigns.text()).toContain('暂无活动指标')
     const links = await mountView(LinkAnalyticsView, '/analytics/links')
@@ -89,6 +91,15 @@ describe('campaign workspace views', () => {
 })
 
 async function mountView(component: Parameters<typeof mount>[0], path: string): Promise<VueWrapper> {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  useAuthStore().acceptSession({
+    accessToken: 'token', tokenType: 'Bearer', expiresInSeconds: 600,
+    user: {
+      id: 'campaign-reader', username: 'campaign-reader', displayName: 'Campaign reader', roles: ['CAMPAIGN_READER'],
+      permissions: ['campaign:read'], mustChangePassword: false,
+    },
+  })
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -106,7 +117,7 @@ async function mountView(component: Parameters<typeof mount>[0], path: string): 
   await router.isReady()
   const wrapper = mount(component, {
     global: {
-      plugins: [router],
+      plugins: [pinia, router],
       stubs: {
         DsModal: { props: ['open'], template: '<section v-if="open"><slot /><slot name="actions" /></section>' },
       },

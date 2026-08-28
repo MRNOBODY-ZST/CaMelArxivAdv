@@ -17,6 +17,7 @@ import DsSwitch from '@/components/design-skill/DsSwitch.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { emailApi, emailErrorMessage } from '@/modules/email/email.api'
 import { createSmtpDraft, maskEmailAddress, passwordForUpdate } from '@/modules/email/email.editor'
+import MailTrackingOption from '@/modules/email/MailTrackingOption.vue'
 import type { SmtpAccountRequest, SmtpAccountView, SmtpTlsMode } from '@/modules/email/email.types'
 
 withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
@@ -30,8 +31,10 @@ const successMessage = ref('')
 const modalOpen = ref(false)
 const editing = ref<SmtpAccountView | null>(null)
 const testRecipient = ref('')
+const trackOpens = ref(false)
 const testingAccount = ref<SmtpAccountView | null>(null)
 const deleteCandidate = ref<SmtpAccountView | null>(null)
+const lastTestRecordId = ref<string | null>(null)
 const form = reactive(createSmtpDraft())
 const passwordInput = ref('')
 
@@ -96,6 +99,7 @@ async function save(): Promise<void> {
     if (editing.value) await emailApi.updateSmtpAccount(editing.value.id, editing.value.lockVersion, request)
     else await emailApi.createSmtpAccount(request)
     modalOpen.value = false
+    lastTestRecordId.value = null
     successMessage.value = editing.value ? 'SMTP 账户已更新，未填写密码时原密钥保持不变。' : 'SMTP 账户已创建。'
     await load()
   } catch (error) {
@@ -108,6 +112,7 @@ async function save(): Promise<void> {
 async function testConnection(account: SmtpAccountView): Promise<void> {
   saving.value = true
   successMessage.value = ''
+  lastTestRecordId.value = null
   try {
     const result = await emailApi.testSmtpConnection(account.id)
     successMessage.value = `连接测试成功（${result.status}）。这不代表邮件已投递。`
@@ -121,16 +126,25 @@ async function testConnection(account: SmtpAccountView): Promise<void> {
 
 function openDiagnostic(account: SmtpAccountView): void {
   testRecipient.value = ''
+  trackOpens.value = false
+  lastTestRecordId.value = null
   testingAccount.value = account
+}
+
+function closeDiagnostic(): void {
+  testRecipient.value = ''
+  trackOpens.value = false
+  testingAccount.value = null
 }
 
 async function sendDiagnostic(): Promise<void> {
   if (!testingAccount.value || !testRecipient.value.trim()) return
   saving.value = true
   try {
-    const result = await emailApi.sendSmtpDiagnostic(testingAccount.value.id, testRecipient.value.trim())
+    const result = await emailApi.sendSmtpDiagnostic(testingAccount.value.id, testRecipient.value.trim(), trackOpens.value)
+    lastTestRecordId.value = result.correlationId
     successMessage.value = `SMTP 已接受测试邮件，不代表最终投递。关联 ID：${result.correlationId}`
-    testingAccount.value = null
+    closeDiagnostic()
     await load()
   } catch (error) {
     errorMessage.value = emailErrorMessage(error, '测试邮件未被 SMTP 接受。')
@@ -145,6 +159,7 @@ async function removeAccount(): Promise<void> {
   try {
     await emailApi.deleteSmtpAccount(deleteCandidate.value.id, deleteCandidate.value.lockVersion)
     deleteCandidate.value = null
+    lastTestRecordId.value = null
     successMessage.value = 'SMTP 账户已删除。'
     await load()
   } catch (error) {
@@ -212,7 +227,14 @@ function tlsLabel(mode: SmtpTlsMode): string {
       tone="success"
       title="操作完成"
     >
-      {{ successMessage }}
+      <p>{{ successMessage }}</p>
+      <a
+        v-if="lastTestRecordId"
+        :href="`/email/deliveries?record=${lastTestRecordId}`"
+        class="mt-2 inline-flex min-h-11 items-center font-semibold underline underline-offset-2"
+      >
+        查看测试邮件记录
+      </a>
     </DsAlert>
 
     <div
@@ -463,7 +485,7 @@ function tlsLabel(mode: SmtpTlsMode): string {
       :open="Boolean(testingAccount)"
       title="发送 SMTP 测试邮件"
       description="公网账户会真实发信。请确认当前账户与收件人；SMTP 接受不代表最终投递。"
-      @close="testingAccount = null"
+      @close="closeDiagnostic"
     >
       <p class="mb-4 text-sm text-slate-600">
         账户：{{ testingAccount?.name }} · {{ testingAccount?.host }}:{{ testingAccount?.port }}
@@ -474,10 +496,16 @@ function tlsLabel(mode: SmtpTlsMode): string {
         type="email"
         label="测试收件地址"
       />
+      <div class="mt-4">
+        <MailTrackingOption
+          id="smtp-diagnostic-track-opens"
+          v-model="trackOpens"
+        />
+      </div>
       <template #actions>
         <DsButton
           variant="secondary"
-          @click="testingAccount = null"
+          @click="closeDiagnostic"
         >
           取消
         </DsButton><DsButton

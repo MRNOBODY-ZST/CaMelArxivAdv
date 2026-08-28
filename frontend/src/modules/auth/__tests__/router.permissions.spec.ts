@@ -37,11 +37,17 @@ describe('router permissions', () => {
     expect(route?.meta?.anyPermissions).toEqual(['smtp:read', 'mailbox:read'])
   })
 
+  it('allows either campaign or SMTP readers on the shared delivery route', () => {
+    const route = routes.find((candidate) => candidate.path === '/email/deliveries')
+
+    expect(route?.meta?.requiresAuth).toBe(true)
+    expect(route?.meta?.anyPermissions).toEqual(['campaign:read', 'smtp:read'])
+  })
+
   it.each([
     ['/email/segments', 'campaign:read'],
     ['/email/campaigns', 'campaign:read'],
     ['/email/campaigns/:id', 'campaign:read'],
-    ['/email/deliveries', 'campaign:read'],
     ['/analytics/campaigns', 'analytics:read'],
     ['/analytics/links', 'analytics:read'],
     ['/admin/settings', 'system:manage'],

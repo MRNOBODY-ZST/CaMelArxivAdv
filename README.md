@@ -10,6 +10,8 @@ Anthropic 兼容网关示例：`PERSONALIZATION_PROVIDER=anthropic`、`PERSONALI
 
 SMTP 测试发送必须显式选择账户和测试收件人，公网账户会真实发信。IMAP 对声明 `ID` 能力的服务器发送仅含应用名/版本的标准客户端标识，以兼容要求客户端身份的邮箱服务；不发送用户信息。POP3、IMAP 和 SMTP 可能需要在邮箱服务商处分别开启，认证失败不能等同于网络或 TLS 失败。
 
+SMTP 诊断和模板测试可在每一封测试邮件中选择“检测图片加载（可选）”，默认不勾选。发送成功后可从结果链接打开单独的测试邮件记录；“检测到图片加载”只是图片回传的估算，不表示人工阅读。详情、权限和本机回传限制见[测试邮件与图片回传](docs/EMAIL_TRACKING.md)。
+
 ## 快速启动
 
 要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为五个当前必填密钥分别生成独立的 32 字节 Base64 值：
@@ -44,6 +46,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 - 邮件账户（SMTP/IMAP/POP3）：[http://localhost:8080/admin/mail-accounts](http://localhost:8080/admin/mail-accounts)
 - 收件人分组：[http://localhost:8080/email/segments](http://localhost:8080/email/segments)
 - 邮件活动：[http://localhost:8080/email/campaigns](http://localhost:8080/email/campaigns)
+- 发送记录（测试邮件与活动投递）：[http://localhost:8080/email/deliveries](http://localhost:8080/email/deliveries)
 - 系统运行状态：[http://localhost:8080/admin/settings](http://localhost:8080/admin/settings)
 
 首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
@@ -100,6 +103,7 @@ Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 - [TeX Source 提取](docs/TEX_EXTRACTION.md)
 - [数据统计口径与看板](docs/ANALYTICS.md)
 - [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
+- [测试邮件与图片回传](docs/EMAIL_TRACKING.md)
 - [部署](docs/DEPLOYMENT.md)
 - [运维](docs/OPERATIONS.md)
 - [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)
