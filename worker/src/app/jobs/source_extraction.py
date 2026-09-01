@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from app.arxiv.source_downloader import (
     DownloadedSource,
@@ -86,6 +87,14 @@ class SourceExtractionRunner:
                     "FAILED",
                     "TEX_DISCOVERY_FAILED",
                     "No bounded TeX document graph could be analyzed",
+                )
+            except ValidationError:
+                result = self._failure(
+                    target,
+                    started,
+                    "FAILED",
+                    "SOURCE_CONTENT_INVALID",
+                    "Source metadata exceeded supported parsing boundaries",
                 )
             except TimeoutError:
                 result = self._failure(
