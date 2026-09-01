@@ -91,6 +91,20 @@ public final class MailTrackingRepository {
 				.bind("bucket", Math.floorDiv(occurredAt.getEpochSecond(), 60)).fetch().rowsUpdated().then();
 	}
 
+	public Mono<ResolvedClick> resolveClick(MailTrackingSigner.VerifiedClickToken token, Instant occurredAt) {
+		return database.sql("""
+				SELECT record.id AS record_id, link.id AS link_id, link.target_url
+				FROM mail_click_links link
+				JOIN mail_send_records record ON record.id = link.record_id
+				WHERE record.id = :record AND link.id = :link AND link.token_hash = :hash
+				  AND link.expires_at = :expires AND link.expires_at > :occurred
+				  AND record.tracking_enabled = true AND record.status <> 'FAILED'
+				""").bind("record", token.recordId()).bind("link", token.linkId()).bind("hash", token.digest())
+				.bind("expires", token.expiresAt()).bind("occurred", occurredAt)
+				.map((row, metadata) -> new ResolvedClick(row.get("record_id", UUID.class),
+						row.get("link_id", UUID.class), row.get("target_url", String.class))).one();
+	}
+
 	public Flux<MailSendRecord> list(int offset, int limit) {
 		return database.sql(selectSql("""
 				(SELECT * FROM mail_send_records ORDER BY created_at DESC, id DESC OFFSET :offset LIMIT :limit)

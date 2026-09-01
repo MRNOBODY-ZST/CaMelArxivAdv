@@ -13,6 +13,7 @@ class MailTrackingSignerTest {
 	private static final String KEY = "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=";
 	private static final Instant NOW = Instant.parse("2026-08-28T10:00:00Z");
 	private static final UUID ID = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+	private static final UUID LINK_ID = UUID.fromString("abcdefab-cdef-cdef-cdef-abcdefabcdef");
 	private final MailTrackingSigner signer = new MailTrackingSigner(KEY);
 
 	@Test
@@ -48,6 +49,27 @@ class MailTrackingSignerTest {
 		int last = alphabet.indexOf(token.charAt(token.length() - 1));
 		String altered = token.substring(0, token.length() - 1) + alphabet.charAt(last + 1);
 		assertThat(signer.verify(altered, NOW)).isEmpty();
+	}
+
+	@Test
+	void clickTokensBindTheRecordLinkAndExpiryInASeparateSignatureDomain() {
+		String token = signer.issueClick(ID, LINK_ID, NOW.plusSeconds(60));
+		MailTrackingSigner.VerifiedClickToken verified = signer.verifyClick(token, NOW).orElseThrow();
+		assertThat(verified.recordId()).isEqualTo(ID);
+		assertThat(verified.linkId()).isEqualTo(LINK_ID);
+		assertThat(verified.expiresAt()).isEqualTo(NOW.plusSeconds(60));
+		assertThat(signer.verify(token, NOW)).isEmpty();
+		assertThat(signer.verifyClick(signer.issue(ID, NOW.plusSeconds(60)), NOW)).isEmpty();
+	}
+
+	@Test
+	void changedExpiredAndNonCanonicalClickTokensAreRejected() {
+		String token = signer.issueClick(ID, LINK_ID, NOW.plusSeconds(60));
+		assertThat(signer.verifyClick(token.replace(LINK_ID.toString(), UUID.randomUUID().toString()), NOW)).isEmpty();
+		assertThat(signer.verifyClick(token.replace(ID.toString(), UUID.randomUUID().toString()), NOW)).isEmpty();
+		assertThat(signer.verifyClick(token, NOW.plusSeconds(60))).isEmpty();
+		assertThat(signer.verifyClick(token + ".extra", NOW)).isEmpty();
+		assertThat(signer.verifyClick("", NOW)).isEmpty();
 	}
 
 	@Test

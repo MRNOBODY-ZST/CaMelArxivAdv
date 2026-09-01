@@ -24,6 +24,7 @@ public final class MailTrackingService {
 	private final MailTrackingProperties properties;
 	private final MailTrackingSigner signer;
 	private final MailOpenClassifier classifier;
+	private final MailLinkRewriter linkRewriter;
 	private final Clock clock;
 
 	public MailTrackingService(
@@ -34,6 +35,7 @@ public final class MailTrackingService {
 		this.properties = properties;
 		this.signer = signer;
 		this.classifier = classifier;
+		this.linkRewriter = signer == null ? null : new MailLinkRewriter(signer, properties.publicBaseUrl());
 		this.clock = clock;
 	}
 
@@ -70,9 +72,13 @@ public final class MailTrackingService {
 			Instant createdAt = clock.instant();
 			Instant expiresAt = trackOpens ? createdAt.plus(properties.tokenTtl()).truncatedTo(ChronoUnit.SECONDS) : null;
 			String token = trackOpens ? signer.issue(id, expiresAt) : null;
-			SmtpTransport.OutboundMessage outbound = trackOpens ? withPixel(message, token) : message;
+			MailLinkRewriter.RewriteResult rewrite = trackOpens ? linkRewriter.rewrite(message.html(), id, expiresAt)
+					: new MailLinkRewriter.RewriteResult(message.html(), java.util.List.of());
+			SmtpTransport.OutboundMessage rewritten = withHtml(message, rewrite.html());
+			SmtpTransport.OutboundMessage outbound = trackOpens ? withPixel(rewritten, token) : message;
 			return repository.insert(id, actorId, accountId, source, mask(message.recipient()), message.subject(),
 					createdAt, expiresAt, token == null ? null : MailTrackingSigner.digest(token))
+					.then(repository.insertLinks(id, rewrite.links(), createdAt))
 					.then(Mono.fromRunnable(() -> smtpAttempt.accept(outbound)).subscribeOn(Schedulers.boundedElastic())
 							.thenReturn(new Outcome(Status.SMTP_ACCEPTED, null))
 							.onErrorResume(error -> Mono.just(outcome(error))))
@@ -85,6 +91,18 @@ public final class MailTrackingService {
 							})
 							.then(outcome.failure() == null ? Mono.empty() : Mono.error(outcome.failure())));
 		});
+	}
+
+	public Mono<ResolvedClick> click(String token, HttpHeaders headers, boolean observe) {
+		return Mono.defer(() -> {
+			if (!properties.enabled()) return Mono.empty();
+			Instant now = clock.instant();
+			return signer.verifyClick(token, now).map(verified -> repository.resolveClick(verified, now)
+					.flatMap(resolved -> (observe
+							? repository.observeClick(resolved.linkId(), classifier.classify(headers), now)
+									.onErrorResume(ignored -> Mono.empty())
+							: Mono.<Void>empty()).thenReturn(resolved))).orElseGet(Mono::empty);
+		}).timeout(Duration.ofSeconds(2)).onErrorResume(ignored -> Mono.empty());
 	}
 
 	public Mono<Void> observe(String token, HttpHeaders headers) {
@@ -101,6 +119,11 @@ public final class MailTrackingService {
 				+ "\" width=\"1\" height=\"1\" alt=\"\" style=\"width:1px;height:1px;border:0\" referrerpolicy=\"no-referrer\">";
 		return new SmtpTransport.OutboundMessage(message.recipient(), message.subject(), message.fromName(), message.replyTo(),
 				message.html() + pixel, message.text(), message.correlationId());
+	}
+
+	private SmtpTransport.OutboundMessage withHtml(SmtpTransport.OutboundMessage message, String html) {
+		return new SmtpTransport.OutboundMessage(message.recipient(), message.subject(), message.fromName(), message.replyTo(),
+				html, message.text(), message.correlationId());
 	}
 
 	private String mask(String recipient) {

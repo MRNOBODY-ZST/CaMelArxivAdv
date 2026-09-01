@@ -48,6 +48,8 @@ public final class MailTrackingModels {
 			long id, UUID linkId, Instant occurredAt, Classification classification, String reason
 	) { }
 
+	public record ResolvedClick(UUID recordId, UUID linkId, String targetUrl) { }
+
 	public record Detail(
 			MailSendRecord record, List<MailOpenEvent> events, List<MailClickLink> links, List<MailClickEvent> clickEvents
 	) {

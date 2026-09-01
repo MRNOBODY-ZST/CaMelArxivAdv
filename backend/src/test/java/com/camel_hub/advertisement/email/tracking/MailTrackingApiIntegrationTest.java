@@ -216,6 +216,111 @@ class MailTrackingApiIntegrationTest {
 	}
 
 	@Test
+	void trackedSendRewritesEligibleLinksAndRedirectsWithoutTrustingARequestTarget() throws Exception {
+		String target = "https://example.invalid/paper?id=42";
+		String html = "<p><a href=\"" + target + "\">Paper details</a>"
+				+ "<a href=\"" + target + "\">Repeated target</a>"
+				+ "<a href=\"mailto:author@example.invalid\">Mail author</a>"
+				+ "<a href=\"/relative\">Relative</a>"
+				+ "<a href=\"https://user:secret@example.invalid/private\">Unsafe</a></p>";
+		String correlationId = UUID.randomUUID().toString();
+		tracking.send(ACTOR, accountId, MailTrackingModels.Source.TEMPLATE_TEST,
+				new SmtpTransport.OutboundMessage("qa@example.invalid", "Tracked links", "Research Team",
+						"reply@example.invalid", html, "Plain text unchanged", correlationId), true, outbound::add).block();
+
+		var links = org.jsoup.Jsoup.parseBodyFragment(outbound.getFirst().html()).select("a[href]");
+		assertThat(links).hasSize(5);
+		assertThat(links.get(0).attr("href")).startsWith("http://localhost:8080/t/c/")
+				.isEqualTo(links.get(1).attr("href"));
+		assertThat(links.get(2).attr("href")).isEqualTo("mailto:author@example.invalid");
+		assertThat(links.get(3).attr("href")).isEqualTo("/relative");
+		assertThat(links.get(4).attr("href")).isEqualTo("https://user:secret@example.invalid/private");
+		assertThat(outbound.getFirst().text()).isEqualTo("Plain text unchanged");
+
+		String clickPath = URI.create(links.getFirst().attr("href")).getPath();
+		anonymous.head().uri(clickPath).exchange().expectStatus().isFound()
+				.expectHeader().valueEquals("Location", target).expectBody().isEmpty();
+		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isZero();
+		anonymous.get().uri(uriBuilder -> uriBuilder.path(clickPath)
+				.queryParam("url", "https://attacker.example.invalid").build()).exchange().expectStatus().isFound()
+				.expectHeader().valueEquals("Location", target)
+				.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
+				.expectHeader().valueEquals("Referrer-Policy", "no-referrer");
+		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isEqualTo(1);
+		anonymous.post().uri(clickPath).exchange().expectStatus().isEqualTo(405).expectHeader().valueEquals("Allow", "GET,HEAD");
+		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isEqualTo(1);
+
+		String altered = clickPath.substring(0, clickPath.length() - 1)
+				+ (clickPath.endsWith("A") ? "B" : "A");
+		String body = anonymous.get().uri(altered).exchange().expectStatus().isNotFound()
+				.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
+				.expectBody(String.class).returnResult().getResponseBody();
+		assertThat(body).isNullOrEmpty();
+	}
+
+	@Test
+	void clickCallbacksDeduplicateAndKeepAutomationClassifications() throws Exception {
+		String correlationId = UUID.randomUUID().toString();
+		String clickPath = trackedClickPath(correlationId, "https://example.invalid/paper/42");
+		String token = clickPath.substring("/t/c/".length());
+		HttpHeaders unknown = new HttpHeaders();
+		unknown.set(HttpHeaders.USER_AGENT, "Unknown click client");
+		reactor.core.publisher.Flux.range(0, 24)
+				.flatMap(ignored -> tracking.click(token, unknown, true), 24).blockLast();
+		anonymous.get().uri(clickPath).header("User-Agent", "Unknown click client")
+				.header("Sec-Purpose", "prefetch").exchange().expectStatus().isFound();
+		anonymous.get().uri(clickPath).header("User-Agent", "GoogleImageProxy")
+				.exchange().expectStatus().isFound();
+		anonymous.get().uri(clickPath).header("User-Agent", "Proofpoint Scanner")
+				.exchange().expectStatus().isFound();
+
+		JsonNode detail = detail(correlationId);
+		assertThat(detail.at("/record/rawClickCount").asLong()).isEqualTo(4);
+		assertThat(detail.at("/record/automatedClickCount").asLong()).isEqualTo(3);
+		assertThat(detail.path("clickEvents").findValuesAsText("classification"))
+				.containsExactlyInAnyOrder("UNCLASSIFIED", "PREFETCH", "IMAGE_PROXY", "BOT");
+		String rows = database.sql("SELECT jsonb_agg(to_jsonb(event))::text AS value FROM mail_click_events event")
+				.map((row, metadata) -> row.get("value", String.class)).one().block();
+		assertThat(rows).doesNotContain("Unknown click client", "GoogleImageProxy", "Proofpoint Scanner", "127.0.0.1");
+	}
+
+	@Test
+	void invalidExpiredUnknownAndFailedClickTokensNeverRedirect() throws Exception {
+		String correlationId = UUID.randomUUID().toString();
+		String clickPath = trackedClickPath(correlationId, "https://example.invalid/paper/42");
+		String token = clickPath.substring("/t/c/".length());
+		MailTrackingSigner signer = new MailTrackingSigner(TRACKING_KEY);
+		Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+		List<String> invalid = List.of(
+				"/t/c",
+				clickPath + "/extra",
+				"/t/c/" + token.substring(0, token.length() - 1) + (token.endsWith("A") ? "B" : "A"),
+				"/t/c/" + signer.issueClick(UUID.randomUUID(), UUID.randomUUID(), now.minusSeconds(1)),
+				"/t/c/" + signer.issueClick(UUID.randomUUID(), UUID.randomUUID(), now.plusSeconds(3600)));
+		for (String path : invalid) {
+			anonymous.get().uri(path).exchange().expectStatus().isNotFound()
+					.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
+					.expectHeader().valueEquals("Referrer-Policy", "no-referrer");
+		}
+		database.sql("""
+				UPDATE mail_send_records SET status = 'FAILED', failure_category = 'SMTP_REJECTED', completed_at = now()
+				WHERE id = :id
+				""").bind("id", UUID.fromString(correlationId)).fetch().rowsUpdated().block();
+		anonymous.get().uri(clickPath).exchange().expectStatus().isNotFound();
+		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isZero();
+	}
+
+	@Test
+	void clickObservationStorageFailureDoesNotBreakAResolvedRedirect() throws Exception {
+		String correlationId = UUID.randomUUID().toString();
+		String target = "https://example.invalid/paper/42";
+		String clickPath = trackedClickPath(correlationId, target);
+		withRejectedWrites("mail_click_events", "INSERT", () -> anonymous.get().uri(clickPath).exchange()
+				.expectStatus().isFound().expectHeader().valueEquals("Location", target));
+		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isZero();
+	}
+
+	@Test
 	void omittedOptInStillCreatesAnUntrackedRecordWithoutChangingTheOutboundMessage() throws Exception {
 		JsonNode result = diagnostic(Map.of("recipient", "qa@example.invalid", "subject", "QA", "body", "body"));
 		assertThat(outbound.getFirst().html()).isEqualTo("<p>body</p>");
@@ -697,6 +802,19 @@ class MailTrackingApiIntegrationTest {
 		var image = org.jsoup.Jsoup.parseBodyFragment(html).selectFirst("img[src*='/t/o/']");
 		assertThat(image).as("transmitted open pixel").isNotNull();
 		URI uri = URI.create(image.attr("src"));
+		assertThat(uri.getScheme()).isEqualTo("http");
+		assertThat(uri.getAuthority()).isEqualTo("localhost:8080");
+		return uri.getPath();
+	}
+
+	private String trackedClickPath(String correlationId, String target) {
+		tracking.send(ACTOR, accountId, MailTrackingModels.Source.TEMPLATE_TEST,
+				new SmtpTransport.OutboundMessage("qa@example.invalid", "Tracked click", "Research Team",
+						"reply@example.invalid", "<a href=\"" + target + "\">Paper details</a>",
+						"Paper details " + target, correlationId), true, outbound::add).block();
+		var anchor = org.jsoup.Jsoup.parseBodyFragment(outbound.getLast().html()).selectFirst("a[href*='/t/c/']");
+		assertThat(anchor).as("transmitted tracked link").isNotNull();
+		URI uri = URI.create(anchor.attr("href"));
 		assertThat(uri.getScheme()).isEqualTo("http");
 		assertThat(uri.getAuthority()).isEqualTo("localhost:8080");
 		return uri.getPath();
