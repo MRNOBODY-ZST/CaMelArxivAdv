@@ -22,6 +22,10 @@ _EMAIL = re.compile(
 _AUTHOR_NAMES = {"author", "authors"}
 _EMAIL_COMMANDS = {"email", "ead"}
 _AFFILIATION_COMMANDS = {"affiliation", "affil", "address", "institute"}
+_AUTHOR_METADATA_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {
+    "thanks",
+    "corref",
+}
 _STOP_MARKERS = (
     "\\begin{abstract}",
     "\\section",
@@ -249,16 +253,35 @@ def _commands(text: str) -> tuple[_Command, ...]:
 
 
 def _author_names(argument: str) -> tuple[str, ...]:
-    cleaned = re.sub(
-        r"\\(?:email|ead|thanks|affiliation|affil|address|institute|corref)\s*"
-        r"(?:\[[^\]]*\])?\{.*?\}",
-        "",
-        argument,
-        flags=re.I | re.S,
-    )
+    cleaned = _without_commands(argument, _AUTHOR_METADATA_COMMANDS)
     pieces = re.split(r"\\and\b|\\\\|;", cleaned)
-    names = tuple(name for piece in pieces if (name := _plain_tex(piece)))
-    return names
+    names: list[str] = []
+    for piece in pieces:
+        name = _plain_tex(piece)
+        if not name:
+            continue
+        if name.count(",") >= 2 and re.search(r",\s*and\s+", name, re.I):
+            names.extend(
+                item
+                for raw in re.split(r"\s*,\s*(?:and\s+)?", name, flags=re.I)
+                if (item := raw.strip(" ,"))
+            )
+        else:
+            names.append(name)
+    return tuple(names)
+
+
+def _without_commands(value: str, names: set[str]) -> str:
+    spans: list[tuple[int, int]] = []
+    for command in _commands(value):
+        if command.name.lower() not in names:
+            continue
+        if spans and command.start >= spans[-1][0] and command.end <= spans[-1][1]:
+            continue
+        spans.append((command.start, command.end))
+    for start, end in reversed(spans):
+        value = value[:start] + value[end:]
+    return value
 
 
 def _plain_tex(value: str) -> str:

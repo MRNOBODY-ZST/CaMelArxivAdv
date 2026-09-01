@@ -102,6 +102,33 @@ Copenhagen, Denmark\\ mm@di.ku.dk}}
     assert [contact.author_order for contact in result.contacts] == [1, 2]
 
 
+def test_nested_thanks_does_not_turn_ieee_affiliations_into_an_author(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{IEEEtran}
+\author{Xinlei Wang, Mingtian Tan, Jing Qiu, Junhua Zhao, and Jinjin Gu\thanks{
+Xinlei Wang and Jing Qiu are with the \textit{University of Sydney, Australia}.
+Mingtian Tan is with the \textit{Hong Kong University of Science and Technology,
+Hong Kong, China}. Junhua Zhao is with the \textit{Chinese University of Hong
+Kong, Shenzhen, and the Shenzhen Institute of Artificial Intelligence and
+Robotics for Society, Shenzhen, China}. Jinjin Gu is with the \textit{Institute
+for Computer Science, Artificial Intelligence and Technology, Sofia, Bulgaria}.}}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [author.name for author in result.authors] == [
+        "Xinlei Wang",
+        "Mingtian Tan",
+        "Jing Qiu",
+        "Junhua Zhao",
+        "Jinjin Gu",
+    ]
+    assert all("University" not in author.name for author in result.authors)
+
+
 def test_body_and_bibliography_addresses_are_not_promoted_to_contacts(tmp_path: Path) -> None:
     result = extract(
         tmp_path,
