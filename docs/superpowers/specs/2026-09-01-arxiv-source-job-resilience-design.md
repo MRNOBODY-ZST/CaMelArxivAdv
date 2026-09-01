@@ -64,7 +64,7 @@ When a completion arrives with pending items, the backend keeps the job nontermi
 
 A scheduled reconciler selects stale deferred completions with `FOR UPDATE SKIP LOCKED`, including defensive zero-item records, updates at most a bounded batch, and records `ARXIV_JOB_FAILED` with `SOURCE_RESULTS_INCOMPLETE`. The grace period is configurable and bounded from five minutes to one day. A single-flight guard prevents overlap in one process; row locks make multiple backend instances safe. Explicit worker failure and user cancellation still take precedence immediately, and late nonterminal messages cannot change a terminal job.
 
-Source retry creation copies target identities from the original stored parameters into new `PENDING job_items` before publishing the retry outbox record. Target count mismatches fail the transaction. Both API cancellation and worker cancellation close open items and replace displayed counters with exact succeeded, skipped, failed, attempted, and total counts; canceled items are terminal but are not reported as attempted work.
+Source retry creation derives the new total from the original stored `parameters.targets`, copies those identities into new `PENDING job_items`, and verifies the inserted batch against that stored target count before publishing the retry outbox record. It never trusts a terminal job counter that earlier reconciliation may have corrected to zero. Both API cancellation and worker cancellation close open items and replace displayed counters with exact succeeded, skipped, failed, attempted, and total counts; canceled items are terminal but are not reported as attempted work.
 
 ## Production recovery
 

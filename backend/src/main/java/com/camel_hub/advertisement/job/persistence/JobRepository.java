@@ -89,7 +89,9 @@ public class JobRepository {
 				    id, type, status, created_by, parameters, idempotency_key, total_count,
 				    current_stage, retry_count, parent_job_id, root_job_id, checkpoint
 				)
-				SELECT :newId, type, 'PENDING', :actorUserId, parameters, :idempotencyKey, total_count,
+				SELECT :newId, type, 'PENDING', :actorUserId, parameters, :idempotencyKey,
+				       CASE WHEN type IN ('ARXIV_FETCH_AND_PARSE_SOURCE', 'ARXIV_REEXTRACT_CONTACTS')
+				            THEN jsonb_array_length(parameters->'targets') ELSE total_count END,
 				       'WAITING_FOR_WORKER', retry_count + 1, id, :rootId, checkpoint
 				FROM jobs WHERE id = :originalId
 				""")
@@ -116,10 +118,15 @@ public class JobRepository {
 				WHERE source.id = :originalJobId
 				""").bind("newJobId", newJobId).bind("originalJobId", original.id())
 				.fetch().rowsUpdated()
-				.flatMap(rows -> rows == original.totalCount()
-						? Mono.empty()
-						: Mono.error(new IllegalStateException(
-								"Source retry targets do not match the original item count")));
+				.flatMap(rows -> databaseClient.sql("""
+						SELECT total_count FROM jobs WHERE id = :jobId
+						""").bind("jobId", newJobId)
+						.map((row, metadata) -> row.get("total_count", Long.class)).one()
+						.flatMap(expected -> expected != null && expected >= 1 && expected <= 100
+								&& rows == expected
+								? Mono.empty()
+								: Mono.error(new IllegalStateException(
+										"Source retry targets are outside the supported batch"))));
 	}
 
 	private Mono<Void> insertRetryOutbox(

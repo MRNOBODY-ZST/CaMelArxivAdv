@@ -64,7 +64,7 @@
 - [x] Add a single-flight, multi-instance-safe reconciler using `FOR UPDATE SKIP LOCKED` to fail stale incomplete completions after a bounded grace.
 - [x] Ignore cumulative progress after a deferred completion and refresh exact database totals after every late extraction result.
 - [x] Include zero-item historical anomalies in timeout reconciliation.
-- [x] Rebuild new `PENDING job_items` from stored Source targets when retrying failed or canceled jobs.
+- [x] Derive retry totals and new `PENDING job_items` from stored Source targets rather than corrected terminal counters.
 - [x] Close open Source items and synchronize exact counters for both API and worker cancellation paths.
 - [x] Pass grace/reconcile settings through Compose and document defaults.
 - [x] Test completion-before-item, inflated late progress, zero-item timeout, retry, duplicate, explicit failure, cancellation, and late-message paths.

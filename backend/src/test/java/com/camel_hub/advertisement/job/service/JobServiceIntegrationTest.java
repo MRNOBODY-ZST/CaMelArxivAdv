@@ -7,6 +7,7 @@ import com.camel_hub.advertisement.job.domain.JobAction;
 import com.camel_hub.advertisement.job.domain.JobStateMachine;
 import com.camel_hub.advertisement.job.domain.JobStatus;
 import com.camel_hub.advertisement.job.persistence.JobRepository;
+import com.camel_hub.advertisement.messaging.ArxivResultRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.spi.ConnectionFactories;
 import org.flywaydb.core.Flyway;
@@ -22,6 +23,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -187,6 +189,50 @@ class JobServiceIntegrationTest {
 				.map((row, metadata) -> List.of(row.get("keys", String[].class))).one().block())
 				.containsExactlyElementsOf(original.paperIds().stream()
 						.map(UUID::toString).sorted().toList());
+	}
+
+	@Test
+	void sourceRetryUsesStoredTargetsAfterZeroItemWatchdogFailure() {
+		SourceJob original = insertSourceJob(JobStatus.FAILED);
+		Instant now = Instant.parse("2026-09-02T09:00:00Z");
+		databaseClient.sql("DELETE FROM job_items WHERE job_id = :jobId")
+				.bind("jobId", original.jobId()).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				UPDATE jobs SET status = 'RUNNING', ended_at = NULL,
+				  current_stage = 'AWAITING_ITEM_RESULTS',
+				  last_message_at = :lastMessage, updated_at = :lastMessage
+				WHERE id = :jobId
+				""").bind("lastMessage", now.minus(Duration.ofMinutes(16)))
+				.bind("jobId", original.jobId()).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO job_events (job_id, event_type, stage, message)
+				VALUES (:jobId, 'ARXIV_JOB_COMPLETION_DEFERRED',
+				        'AWAITING_ITEM_RESULTS', 'Waiting for item results')
+				""").bind("jobId", original.jobId()).fetch().rowsUpdated().block();
+
+		assertThat(new ArxivResultRepository(databaseClient)
+				.reconcileStaleDeferredSourceCompletions(
+						now.minus(Duration.ofMinutes(15)), now).block()).isEqualTo(1);
+		assertThat(service.get(original.jobId()).block().status()).isEqualTo(JobStatus.FAILED);
+		assertThat(service.get(original.jobId()).block().totalCount()).isZero();
+
+		JobService.JobView retry = service.control(
+				original.jobId(), JobAction.RETRY, ACTOR_ID, context()).block();
+
+		assertThat(retry.status()).isEqualTo(JobStatus.PENDING);
+		assertThat(retry.totalCount()).isEqualTo(2);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM job_items
+				WHERE job_id = :jobId AND status = 'PENDING'
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get("total", Long.class)).one().block())
+				.isEqualTo(2);
+		assertThat(databaseClient.sql("""
+				SELECT jsonb_array_length(payload->'payload'->'targets') AS total
+				FROM outbox_messages WHERE aggregate_id = :jobId
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get("total", Integer.class)).one().block())
+				.isEqualTo(2);
 	}
 
 	@ParameterizedTest
