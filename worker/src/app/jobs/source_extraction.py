@@ -30,6 +30,10 @@ class Downloader(Protocol):
     async def download(self, arxiv_id: str, destination: Path) -> DownloadedSource: ...
 
 
+class SourceContentValidationError(Exception):
+    """Source-derived metadata violates a bounded extraction model."""
+
+
 class SourceExtractionRunner:
     def __init__(
         self,
@@ -88,7 +92,7 @@ class SourceExtractionRunner:
                     "TEX_DISCOVERY_FAILED",
                     "No bounded TeX document graph could be analyzed",
                 )
-            except ValidationError:
+            except SourceContentValidationError:
                 result = self._failure(
                     target,
                     started,
@@ -128,13 +132,16 @@ class SourceExtractionRunner:
         report = await asyncio.to_thread(
             extract_source, downloaded.path, extracted_dir, self._limits
         )
-        corpus = await asyncio.to_thread(
-            discover_tex,
-            extracted_dir,
-            maximum_include_depth=self._maximum_include_depth,
-            maximum_files=self._limits.maximum_file_count,
-        )
-        document = await asyncio.to_thread(extract_contacts, corpus)
+        try:
+            corpus = await asyncio.to_thread(
+                discover_tex,
+                extracted_dir,
+                maximum_include_depth=self._maximum_include_depth,
+                maximum_files=self._limits.maximum_file_count,
+            )
+            document = await asyncio.to_thread(extract_contacts, corpus)
+        except ValidationError as exception:
+            raise SourceContentValidationError from exception
         authors = tuple(
             SourceAuthor(
                 order=item.order,

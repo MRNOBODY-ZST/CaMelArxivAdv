@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.arxiv.source_downloader import (
     DownloadedSource,
@@ -13,6 +14,12 @@ from app.arxiv.source_downloader import (
     SourceUnavailableError,
 )
 from app.extraction.archive_guard import ArchiveLimits
+from app.extraction.models import (
+    Confidence,
+    ExtractedContact,
+    ExtractionDocument,
+    ExtractionEvidence,
+)
 from app.jobs.source_extraction import SourceExtractionRunner
 from app.messaging.contracts import SourceTarget
 
@@ -149,4 +156,52 @@ async def test_invalid_source_metadata_fails_only_that_item_without_leaking_cont
     assert result.error_summary == "Source metadata exceeded supported parsing boundaries"
     assert "A" * 20 not in (result.error_summary or "")
     assert result.cleanup_confirmed is True
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_outbound_contract_is_not_misclassified_as_source_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def document_with_unsafe_outbound_evidence(_corpus: object) -> ExtractionDocument:
+        return ExtractionDocument(
+            document_class="article",
+            files_inspected=1,
+            contacts=(
+                ExtractedContact(
+                    normalized_email="alice@uni.edu",
+                    display_email="alice@uni.edu",
+                    domain="uni.edu",
+                    syntax_valid=True,
+                    confidence=Confidence.LOW,
+                    evidence=(
+                        ExtractionEvidence(
+                            source_relative_path="../outside.tex",
+                            rule_name="PAPER_LEVEL_FRONT_MATTER_EMAIL",
+                            line_number=1,
+                            logical_location="AUTHOR_FRONT_MATTER",
+                            masked_context="al***@uni.edu",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.jobs.source_extraction.extract_contacts",
+        document_with_unsafe_outbound_evidence,
+    )
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+
+    with pytest.raises(ValidationError, match="Source evidence path is unsafe"):
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+
     assert list(tmp_path.iterdir()) == []
