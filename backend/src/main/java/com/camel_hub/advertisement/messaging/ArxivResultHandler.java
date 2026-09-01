@@ -101,6 +101,13 @@ public class ArxivResultHandler {
 	) {
 		ArxivResultMessage.Payload payload = message.payload();
 		String details = details(payload);
+		if (Set.of("ARXIV_JOB_COMPLETED", "ARXIV_JOB_FAILED").contains(message.type())) {
+			if (isTerminalStatus(job.status())) {
+				return isCanceledExtractionCompletion(message, job)
+						? repository.cancelOpenExtractionItems(job.id()) : Mono.empty();
+			}
+			return applyTerminalForJob(message, job, details);
+		}
 		Mono<Void> mutation = switch (message.type()) {
 			case "ARXIV_JOB_STARTED" -> repository.applyStarted(job.id(), payload);
 			case "ARXIV_JOB_BATCH" -> papers.upsertBatch(
@@ -112,21 +119,56 @@ public class ArxivResultHandler {
 			case "ARXIV_JOB_PROGRESS" -> "ARXIV_SYNC_OAI".equals(job.type())
 					? applyOaiProgress(job.id(), payload)
 					: repository.applyProgress(job.id(), payload, checkpoint(payload.checkpoint()));
-			case "ARXIV_JOB_COMPLETED" -> "ARXIV_SYNC_TAXONOMY".equals(job.type())
-					? applyTaxonomySnapshot(message, job)
-						.then(repository.applyTerminal(job.id(), payload))
-					: (isExtractionJob(job.type())
-							? repository.assertExtractionItemsTerminal(job.id(), payload)
-								.then(repository.applyTerminal(job.id(), payload))
-							: repository.applyTerminal(job.id(), payload))
-						.then("ARXIV_SYNC_OAI".equals(job.type())
-								? repository.markSyncComplete(job.id()) : Mono.empty());
-			case "ARXIV_JOB_FAILED" -> repository.applyTerminal(job.id(), payload)
-					.then("ARXIV_SYNC_OAI".equals(job.type())
-							? repository.markSyncComplete(job.id()) : Mono.empty());
 			default -> Mono.error(new IllegalArgumentException("Result message type is unsupported"));
 		};
 		return mutation.then(repository.appendEvent(job.id(), message.type(), payload, details));
+	}
+
+	private Mono<Void> applyTerminalForJob(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job,
+			String details
+	) {
+		ArxivResultMessage.Payload payload = message.payload();
+		Mono<Void> preparation = Mono.empty();
+		if ("ARXIV_JOB_COMPLETED".equals(message.type())) {
+			if ("ARXIV_SYNC_TAXONOMY".equals(job.type())) {
+				preparation = applyTaxonomySnapshot(message, job);
+			}
+			else if (isExtractionJob(job.type())) {
+				if ("SUCCEEDED".equals(payload.status())
+						|| "PARTIALLY_SUCCEEDED".equals(payload.status())) {
+					preparation = repository.assertExtractionItemsTerminal(job.id(), payload);
+				}
+				else if ("CANCELED".equals(payload.status())) {
+					preparation = repository.cancelOpenExtractionItems(job.id());
+				}
+			}
+		}
+		return preparation.then(repository.applyTerminal(job.id(), payload))
+				.flatMap(applied -> {
+					if (!applied) {
+						return Mono.empty();
+					}
+					Mono<Void> completion = "ARXIV_SYNC_OAI".equals(job.type())
+							? repository.markSyncComplete(job.id()) : Mono.empty();
+					return completion.then(repository.appendEvent(
+							job.id(), message.type(), payload, details));
+				});
+	}
+
+	private boolean isCanceledExtractionCompletion(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job
+	) {
+		return "ARXIV_JOB_COMPLETED".equals(message.type())
+				&& "CANCELED".equals(message.payload().status())
+				&& isExtractionJob(job.type());
+	}
+
+	private boolean isTerminalStatus(String status) {
+		return Set.of("SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED", "CANCELED")
+				.contains(status);
 	}
 
 	private boolean isExtractionJob(String jobType) {
@@ -276,6 +318,8 @@ public class ArxivResultHandler {
 				|| payload.skippedCount() < 0 || payload.failedCount() < 0 || payload.totalCount() < 0
 				|| payload.progressPercent() < 0 || payload.progressPercent() > 100
 				|| (payload.papers() != null && payload.papers().size() > 100)
+				|| (payload.errorCode() != null
+						&& !payload.errorCode().matches("[A-Z0-9_]{1,80}"))
 				|| (payload.errorSummary() != null && payload.errorSummary().length() > 500)) {
 			throw new IllegalArgumentException("Result payload is invalid");
 		}
@@ -439,13 +483,17 @@ public class ArxivResultHandler {
 
 	private String details(ArxivResultMessage.Payload payload) {
 		try {
-			return objectMapper.writeValueAsString(java.util.Map.of(
-					"processedCount", payload.processedCount(),
-					"successCount", payload.successCount(),
-					"skippedCount", payload.skippedCount(),
-					"failedCount", payload.failedCount(),
-					"totalCount", payload.totalCount(),
-					"progressPercent", payload.progressPercent()));
+			java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+			details.put("processedCount", payload.processedCount());
+			details.put("successCount", payload.successCount());
+			details.put("skippedCount", payload.skippedCount());
+			details.put("failedCount", payload.failedCount());
+			details.put("totalCount", payload.totalCount());
+			details.put("progressPercent", payload.progressPercent());
+			if (payload.errorCode() != null) {
+				details.put("errorCode", payload.errorCode());
+			}
+			return objectMapper.writeValueAsString(details);
 		}
 		catch (JsonProcessingException exception) {
 			throw new IllegalArgumentException("Result details could not be serialized", exception);

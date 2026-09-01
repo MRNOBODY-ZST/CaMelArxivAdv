@@ -205,3 +205,30 @@ async def test_invalid_outbound_contract_is_not_misclassified_as_source_content(
         await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_unexpected_extractor_error_propagates_after_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_unexpectedly(_corpus: object) -> ExtractionDocument:
+        raise RuntimeError("parser invariant failed")
+
+    monkeypatch.setattr(
+        "app.jobs.source_extraction.extract_contacts",
+        fail_unexpectedly,
+    )
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+
+    with pytest.raises(RuntimeError, match="parser invariant failed"):
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+
+    assert list(tmp_path.iterdir()) == []

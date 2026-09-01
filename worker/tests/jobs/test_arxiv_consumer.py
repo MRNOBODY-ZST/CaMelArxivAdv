@@ -10,6 +10,7 @@ from app.arxiv.models import ArxivAuthor, ArxivMetadata, OaiRecordPage
 from app.arxiv.oai_client import OaiProtocolError
 from app.arxiv.taxonomy import TaxonomyCategory
 from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
+from app.jobs.job_control import SourceProgress
 from app.messaging.contracts import MessageEnvelope, MessageType, ResultPayload
 
 
@@ -90,6 +91,7 @@ class FakeStore:
         self.control = control
         self.marked: list[str] = []
         self.cursor: str | None = None
+        self.source_progress: SourceProgress | None = None
 
     async def is_processed(self, key: str) -> bool:
         return self.duplicate
@@ -108,6 +110,17 @@ class FakeStore:
 
     async def clear_cursor(self, idempotency_key: str) -> None:
         self.cursor = None
+
+    async def source_progress_for(self, idempotency_key: str) -> SourceProgress | None:
+        return self.source_progress
+
+    async def save_source_progress(
+        self, idempotency_key: str, progress: SourceProgress
+    ) -> None:
+        self.source_progress = progress
+
+    async def clear_source_progress(self, idempotency_key: str) -> None:
+        self.source_progress = None
 
 
 class SequenceControlStore(FakeStore):
@@ -159,7 +172,7 @@ async def test_pause_requeues_before_the_next_external_call() -> None:
         legacy, FakeOaiClient(), publisher, FakeStore(control="PAUSE"), batch_size=50
     )
 
-    assert await processor.process(command_body()) is CommandOutcome.REQUEUE
+    assert await processor.process(command_body()) is CommandOutcome.DEFER
     assert legacy.calls == []
     assert publisher.messages[-1].payload.status == "PAUSED"
 
@@ -212,7 +225,7 @@ async def test_malformed_list_sets_is_settled_as_a_retryable_outcome() -> None:
         FakeLegacyClient(), InvalidTaxonomyClient(), publisher, FakeStore(), batch_size=50
     )
 
-    assert await processor.process(taxonomy_command_body()) is CommandOutcome.REQUEUE
+    assert await processor.process(taxonomy_command_body()) is CommandOutcome.RETRY
     assert publisher.messages[-1].payload.stage == "RETRYING_UPSTREAM"
 
 
@@ -225,9 +238,49 @@ async def test_oai_pause_persists_and_reuses_the_opaque_cursor() -> None:
         FakeLegacyClient(), oai, FakePublisher(), store, batch_size=50
     )
 
-    assert await processor.process(oai_command_body()) is CommandOutcome.REQUEUE
+    assert await processor.process(oai_command_body()) is CommandOutcome.DEFER
     assert oai.resumed_from == "resume-token"
     assert store.cursor == "next-token"
+
+
+@pytest.mark.asyncio
+async def test_mid_loop_cancel_is_acked_without_fetching_or_retrying() -> None:
+    legacy = FakeLegacyClient()
+    publisher = FakePublisher()
+    store = SequenceControlStore(["RUN", "CANCEL"])
+    processor = ArxivCommandProcessor(
+        legacy, FakeOaiClient(), publisher, store, batch_size=50
+    )
+
+    assert await processor.process(command_body()) is CommandOutcome.ACK
+    assert legacy.calls == []
+    assert store.marked == ["import:test"]
+    assert publisher.messages[-1].type is MessageType.ARXIV_JOB_COMPLETED
+    assert publisher.messages[-1].payload.status == "CANCELED"
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_failure_is_deterministic_and_bounded() -> None:
+    publisher = FakePublisher()
+    processor = ArxivCommandProcessor(
+        FakeLegacyClient(), FakeOaiClient(), publisher, FakeStore(), batch_size=50
+    )
+    body = command_body()
+
+    await processor.publish_retry_exhausted_failure(body)
+    await processor.publish_retry_exhausted_failure(body)
+
+    first, second = publisher.messages
+    assert first.type is MessageType.ARXIV_JOB_FAILED
+    assert first.idempotency_key == second.idempotency_key
+    assert first.payload.status == "FAILED"
+    assert first.payload.stage == "FAILED"
+    assert first.payload.error_code == "WORKER_RETRY_EXHAUSTED"
+    assert (
+        first.payload.error_summary
+        == "Worker exhausted retries after an unexpected processing failure"
+    )
+    assert "2510.13029" not in first.model_dump_json(by_alias=True)
 
 
 def command_body() -> bytes:

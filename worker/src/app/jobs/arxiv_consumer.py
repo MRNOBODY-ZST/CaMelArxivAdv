@@ -83,7 +83,8 @@ class JobStore(Protocol):
 
 class CommandOutcome(StrEnum):
     ACK = "ACK"
-    REQUEUE = "REQUEUE"
+    DEFER = "DEFER"
+    RETRY = "RETRY"
     DEAD = "DEAD"
 
 
@@ -150,7 +151,7 @@ class ArxivCommandProcessor:
                 ResultPayload(status="PAUSED", stage="PAUSED_BY_USER"),
                 0,
             )
-            return CommandOutcome.REQUEUE
+            return CommandOutcome.DEFER
         if control == "CANCEL":
             await self._publish(
                 envelope,
@@ -159,6 +160,8 @@ class ArxivCommandProcessor:
                 0,
             )
             await self._store.mark_processed(envelope.idempotency_key)
+            if isinstance(command, SourceExtractionCommand):
+                await self._store.clear_source_progress(envelope.idempotency_key)
             return CommandOutcome.ACK
         try:
             starting_stage = (
@@ -174,17 +177,23 @@ class ArxivCommandProcessor:
                 ResultPayload(status="RUNNING", stage=starting_stage),
                 0,
             )
+            summary: _SourceSummary | None = None
+            result: int | _SourceSummary | CommandOutcome
             if isinstance(command, ImportMetadataCommand):
-                processed = await self._process_import(envelope, command)
+                result = await self._process_import(envelope, command)
             elif isinstance(command, OaiSyncCommand):
-                processed = await self._process_oai(envelope, command)
+                result = await self._process_oai(envelope, command)
             elif isinstance(command, SourceExtractionCommand):
-                summary = await self._process_source(envelope, command)
-                processed = None if summary is None else summary.processed
+                result = await self._process_source(envelope, command)
             else:
-                processed = await self._process_taxonomy(envelope)
-            if processed is None:
-                return CommandOutcome.REQUEUE
+                result = await self._process_taxonomy(envelope)
+            if isinstance(result, CommandOutcome):
+                return result
+            if isinstance(result, _SourceSummary):
+                summary = result
+                processed = result.processed
+            else:
+                processed = result
             if not isinstance(command, TaxonomySyncCommand):
                 if isinstance(command, SourceExtractionCommand):
                     if summary is None:
@@ -215,11 +224,11 @@ class ArxivCommandProcessor:
                     ),
                     processed + 2,
                 )
-                if isinstance(command, SourceExtractionCommand):
-                    await self._store.clear_source_progress(envelope.idempotency_key)
+            await self._store.mark_processed(envelope.idempotency_key)
+            if isinstance(command, SourceExtractionCommand):
+                await self._store.clear_source_progress(envelope.idempotency_key)
             if isinstance(command, OaiSyncCommand):
                 await self._store.clear_cursor(envelope.idempotency_key)
-            await self._store.mark_processed(envelope.idempotency_key)
             return CommandOutcome.ACK
         except OaiTokenExpiredError:
             await self._store.clear_cursor(envelope.idempotency_key)
@@ -234,7 +243,7 @@ class ArxivCommandProcessor:
                 ),
                 999_998,
             )
-            return CommandOutcome.REQUEUE
+            return CommandOutcome.RETRY
         except (httpx.HTTPError, OaiProtocolError, TimeoutError, ConnectionError):
             await self._publish(
                 envelope,
@@ -247,17 +256,49 @@ class ArxivCommandProcessor:
                 ),
                 999_999,
             )
-            return CommandOutcome.REQUEUE
+            return CommandOutcome.RETRY
+
+    async def publish_retry_exhausted_failure(self, body: bytes) -> None:
+        try:
+            envelope = MessageEnvelope[dict[str, object]].model_validate_json(body)
+        except (ValidationError, UnicodeDecodeError, ValueError):
+            return
+        if envelope.job_id is None or envelope.type not in {
+            MessageType.ARXIV_IMPORT_METADATA,
+            MessageType.ARXIV_SYNC_OAI,
+            MessageType.ARXIV_SYNC_TAXONOMY,
+            MessageType.ARXIV_FETCH_AND_PARSE_SOURCE,
+            MessageType.ARXIV_REEXTRACT_CONTACTS,
+        }:
+            return
+        await self._publish(
+            envelope,
+            MessageType.ARXIV_JOB_FAILED,
+            ResultPayload(
+                status="FAILED",
+                stage="FAILED",
+                error_code="WORKER_RETRY_EXHAUSTED",
+                error_summary=(
+                    "Worker exhausted retries after an unexpected processing failure"
+                ),
+            ),
+            999_997,
+        )
 
     async def _process_source(
         self,
         envelope: MessageEnvelope[dict[str, object]],
         command: SourceExtractionCommand,
-    ) -> _SourceSummary | None:
+    ) -> _SourceSummary | CommandOutcome:
         if self._source_runner is None:
             raise RuntimeError("Source extraction runner is not configured")
         checkpoint = await self._store.source_progress_for(envelope.idempotency_key)
-        if checkpoint is not None and checkpoint.next_index <= len(command.targets):
+        if (
+            checkpoint is not None
+            and checkpoint.next_index <= len(command.targets)
+            and checkpoint.success + checkpoint.skipped + checkpoint.failed
+            == checkpoint.next_index
+        ):
             start_index = checkpoint.next_index
             success = checkpoint.success
             skipped = checkpoint.skipped
@@ -268,8 +309,11 @@ class ArxivCommandProcessor:
             if checkpoint is not None:
                 await self._store.clear_source_progress(envelope.idempotency_key)
         for index in range(start_index, len(command.targets)):
-            if await self._pause_or_cancel(envelope, index):
-                return None
+            control = await self._pause_or_cancel(
+                envelope, index, clear_source_progress=True
+            )
+            if control is not None:
+                return control
             target = command.targets[index]
             result = await self._source_runner.run(target)
             if result.status in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}:
@@ -320,7 +364,7 @@ class ArxivCommandProcessor:
         self,
         envelope: MessageEnvelope[dict[str, object]],
         command: ImportMetadataCommand,
-    ) -> int | None:
+    ) -> int | CommandOutcome:
         if command.mode == "SELECTED":
             if not command.arxiv_ids or command.criteria is not None:
                 raise ValidationError.from_exception_data("ImportMetadataCommand", [])
@@ -330,8 +374,9 @@ class ArxivCommandProcessor:
         query, sort_by, sort_order = _legacy_query(command.criteria)
         processed = 0
         while processed < command.max_papers:
-            if await self._pause_or_cancel(envelope, processed):
-                return None
+            control = await self._pause_or_cancel(envelope, processed)
+            if control is not None:
+                return control
             size = min(self._batch_size, command.max_papers - processed)
             papers = await self._legacy.search_page(query, processed, size, sort_by, sort_order)
             if not papers:
@@ -345,11 +390,12 @@ class ArxivCommandProcessor:
 
     async def _selected(
         self, envelope: MessageEnvelope[dict[str, object]], arxiv_ids: tuple[str, ...]
-    ) -> int | None:
+    ) -> int | CommandOutcome:
         processed = 0
         for start in range(0, len(arxiv_ids), self._batch_size):
-            if await self._pause_or_cancel(envelope, processed):
-                return None
+            control = await self._pause_or_cancel(envelope, processed)
+            if control is not None:
+                return control
             identifiers = arxiv_ids[start : start + self._batch_size]
             papers = await self._legacy.fetch_ids(identifiers)
             await self._publish_batch(envelope, papers, start)
@@ -359,15 +405,16 @@ class ArxivCommandProcessor:
 
     async def _process_oai(
         self, envelope: MessageEnvelope[dict[str, object]], command: OaiSyncCommand
-    ) -> int | None:
+    ) -> int | CommandOutcome:
         processed = 0
         from_date = date.fromisoformat(command.from_date) if command.from_date else None
         cursor = await self._store.cursor_for(envelope.idempotency_key)
         async for page in self._oai.iter_record_pages(
             command.set_spec, from_date, resumption_token=cursor
         ):
-            if await self._pause_or_cancel(envelope, processed):
-                return None
+            control = await self._pause_or_cancel(envelope, processed)
+            if control is not None:
+                return control
             papers = tuple(
                 record.metadata for record in page.records if record.metadata is not None
             )
@@ -395,15 +442,17 @@ class ArxivCommandProcessor:
                 await self._store.save_cursor(
                     envelope.idempotency_key, page.resumption_token
                 )
-            if await self._pause_or_cancel(envelope, processed):
-                return None
+            control = await self._pause_or_cancel(envelope, processed)
+            if control is not None:
+                return control
         return processed
 
     async def _process_taxonomy(
         self, envelope: MessageEnvelope[dict[str, object]]
-    ) -> int | None:
-        if await self._pause_or_cancel(envelope, 0):
-            return None
+    ) -> int | CommandOutcome:
+        control = await self._pause_or_cancel(envelope, 0)
+        if control is not None:
+            return control
         categories = await self._oai.fetch_taxonomy()
         if not categories:
             raise OaiProtocolError("OAI ListSets returned no arXiv categories")
@@ -430,13 +479,17 @@ class ArxivCommandProcessor:
         return len(categories)
 
     async def _pause_or_cancel(
-        self, envelope: MessageEnvelope[dict[str, object]], processed: int
-    ) -> bool:
+        self,
+        envelope: MessageEnvelope[dict[str, object]],
+        processed: int,
+        *,
+        clear_source_progress: bool = False,
+    ) -> CommandOutcome | None:
         if envelope.job_id is None:
-            return True
+            return CommandOutcome.DEAD
         control = await self._store.control_for(envelope.job_id)
         if control == "RUN":
-            return False
+            return None
         status: Literal["PAUSED", "CANCELED"] = (
             "PAUSED" if control == "PAUSE" else "CANCELED"
         )
@@ -453,7 +506,10 @@ class ArxivCommandProcessor:
         )
         if status == "CANCELED":
             await self._store.mark_processed(envelope.idempotency_key)
-        return True
+            if clear_source_progress:
+                await self._store.clear_source_progress(envelope.idempotency_key)
+            return CommandOutcome.ACK
+        return CommandOutcome.DEFER
 
     async def _publish_batch(
         self,

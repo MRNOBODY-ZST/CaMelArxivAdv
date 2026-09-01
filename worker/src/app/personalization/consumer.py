@@ -41,4 +41,4 @@ class PersonalizationCommandProcessor:
                 await self._publisher.publish(result)
             return CommandOutcome.ACK
         except Exception:
-            return CommandOutcome.REQUEUE
+            return CommandOutcome.RETRY

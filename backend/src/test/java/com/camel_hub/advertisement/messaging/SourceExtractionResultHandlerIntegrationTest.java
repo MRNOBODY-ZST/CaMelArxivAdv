@@ -145,6 +145,91 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void terminalFailureClosesAPartiallyProcessedSourceJobAndDeduplicatesReplay() {
+		seedPartiallyProcessedItems();
+		UUID messageId = UUID.randomUUID();
+		String failure = failureMessage(messageId);
+
+		var first = handler.handle(failure).block();
+		var replay = handler.handle(failure).block();
+
+		assertThat(first.duplicate()).isFalse();
+		assertThat(replay.duplicate()).isTrue();
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(text("SELECT error_summary FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("Worker stopped before the source batch completed");
+		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id = '" + jobId + "'"))
+				.isTrue();
+		assertThat(number("SELECT count(*) FROM job_items WHERE job_id = '" + jobId
+				+ "' AND status = 'PENDING'"))
+				.isEqualTo(48);
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isEqualTo(1);
+		assertThat(text("SELECT details->>'errorCode' FROM job_events WHERE job_id = '"
+				+ jobId + "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isEqualTo("WORKER_RETRY_EXHAUSTED");
+	}
+
+	@Test
+	void rejectsAnUnsafeFailureCodeBeforePersistingItInEventDetails() {
+		String invalid = failureMessage(UUID.randomUUID())
+				.replace("WORKER_RETRY_EXHAUSTED", "unsafe failure code");
+
+		assertThatThrownBy(() -> handler.handle(invalid).block())
+				.isInstanceOf(IllegalArgumentException.class);
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(count("processed_messages")).isZero();
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isZero();
+	}
+
+	@Test
+	void lateFailureCannotOverwriteACanceledJob() {
+		databaseClient.sql("""
+				UPDATE jobs SET status = 'CANCELED', current_stage = 'CANCELED_BY_USER',
+				  error_summary = 'Canceled by the owner', ended_at = now(),
+				  processed_count = 7, success_count = 7, total_count = 100,
+				  progress_percent = 7
+				WHERE id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
+
+		handler.handle(failureMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED_BY_USER");
+		assertThat(text("SELECT error_summary FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("Canceled by the owner");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(7);
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isZero();
+	}
+
+	@Test
+	void canceledSourceCompletionDoesNotRequireSuccessfulItemResults() {
+		handler.handle(canceledCompletionMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id = '" + jobId + "'"))
+				.isTrue();
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+	}
+
+	@Test
 	void reconcilesSourceAuthorByNameBeforeFallingBackToMetadataOrder() {
 		String sourceAuthors = """
 				"authors":[
@@ -274,6 +359,49 @@ class SourceExtractionResultHandlerIntegrationTest {
 				""".formatted(messageId, jobId, messageId);
 	}
 
+	private String canceledCompletionMessage(UUID messageId) {
+		return """
+				{"version":1,"messageId":"%s","type":"ARXIV_JOB_COMPLETED","jobId":"%s",
+				 "idempotencyKey":"source-canceled:%s","traceId":"0123456789abcdef",
+				 "occurredAt":"2026-08-06T01:00:01Z","payload":{
+				 "status":"CANCELED","stage":"CANCELED","processedCount":0,
+				 "successCount":0,"skippedCount":0,"failedCount":0,"totalCount":1,
+				 "progressPercent":0,"checkpoint":{},"papers":[],"extractions":[]}}
+				""".formatted(messageId, jobId, messageId);
+	}
+
+	private String failureMessage(UUID messageId) {
+		return """
+				{"version":1,"messageId":"%s","type":"ARXIV_JOB_FAILED","jobId":"%s",
+				 "idempotencyKey":"source-failed:%s","traceId":"0123456789abcdef",
+				 "occurredAt":"2026-08-06T01:00:01Z","payload":{
+				 "status":"FAILED","stage":"FAILED","processedCount":52,
+				 "successCount":52,"skippedCount":0,"failedCount":0,"totalCount":100,
+				 "progressPercent":52,"checkpoint":{},"papers":[],"extractions":[],
+				 "errorCode":"WORKER_RETRY_EXHAUSTED",
+				 "errorSummary":"Worker\\u0001stopped before the source batch completed"}}
+				""".formatted(messageId, jobId, messageId);
+	}
+
+	private void seedPartiallyProcessedItems() {
+		databaseClient.sql("""
+				UPDATE job_items SET status = 'SUCCEEDED', completed_at = now()
+				WHERE job_id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO job_items (job_id, external_key, status, completed_at)
+				SELECT :jobId, 'checkpoint-item-' || value,
+				       CASE WHEN value <= 51 THEN 'SUCCEEDED' ELSE 'PENDING' END,
+				       CASE WHEN value <= 51 THEN now() ELSE NULL END
+				FROM generate_series(1, 99) AS value
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				UPDATE jobs SET processed_count = 52, success_count = 52, total_count = 100,
+				  progress_percent = 52, current_stage = 'EXTRACTING_CONTACTS'
+				WHERE id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
+	}
+
 	private void clear() {
 		databaseClient.sql("DELETE FROM processed_messages").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM worker_heartbeats").fetch().rowsUpdated().block();
@@ -356,6 +484,14 @@ class SourceExtractionResultHandlerIntegrationTest {
 
 	private String text(String sql) {
 		return databaseClient.sql(sql).map((row, metadata) -> row.get(0, String.class)).one().block();
+	}
+
+	private long number(String sql) {
+		return databaseClient.sql(sql).map((row, metadata) -> row.get(0, Long.class)).one().block();
+	}
+
+	private boolean flag(String sql) {
+		return databaseClient.sql(sql).map((row, metadata) -> row.get(0, Boolean.class)).one().block();
 	}
 
 	private byte[] bytes(String column) {

@@ -42,10 +42,11 @@ class KafkaResultPublisher:
         self._topic = topic
 
     async def publish(self, message: MessageEnvelope[ResultPayload]) -> None:
+        partition_key = message.job_id or message.message_id
         await self._producer.send_and_wait(
             self._topic,
             value=message.model_dump_json(by_alias=True).encode("utf-8"),
-            key=str(message.message_id).encode("ascii"),
+            key=str(partition_key).encode("ascii"),
             headers=contract_headers(message.type.value, message.version),
         )
 
@@ -67,24 +68,36 @@ async def settle_delivery(
     dead_letter_topic: str,
     now_epoch_ms: int | None = None,
     retry_delay_ms: int = 30_000,
+    on_retry_exhausted: Callable[[], Awaitable[object]] | None = None,
 ) -> None:
     if outcome is CommandOutcome.ACK:
         await _commit(consumer, incoming)
         return
     headers = _headers(incoming.headers)
     retry_count = _retry_count(headers)
-    if outcome is CommandOutcome.DEAD or retry_count >= 5:
-        failure = b"PERMANENT_FAILURE" if outcome is CommandOutcome.DEAD else b"RETRY_EXHAUSTED"
+    if outcome is CommandOutcome.DEAD:
         await producer.send_and_wait(
             dead_letter_topic,
             value=incoming.value,
             key=incoming.key,
-            headers=[*headers.items(), ("failureCategory", failure)],
+            headers=[*headers.items(), ("failureCategory", b"PERMANENT_FAILURE")],
         )
         await _commit(consumer, incoming)
         return
+    if outcome is CommandOutcome.RETRY and retry_count >= 5:
+        await producer.send_and_wait(
+            dead_letter_topic,
+            value=incoming.value,
+            key=incoming.key,
+            headers=[*headers.items(), ("failureCategory", b"RETRY_EXHAUSTED")],
+        )
+        if on_retry_exhausted is not None:
+            await on_retry_exhausted()
+        await _commit(consumer, incoming)
+        return
     current_ms = int(time.time() * 1_000) if now_epoch_ms is None else now_epoch_ms
-    headers["camelRetryCount"] = str(retry_count + 1).encode("ascii")
+    if outcome is CommandOutcome.RETRY:
+        headers["camelRetryCount"] = str(retry_count + 1).encode("ascii")
     headers["camelNotBeforeEpochMs"] = str(current_ms + retry_delay_ms).encode("ascii")
     headers["camelOriginalTopic"] = incoming.topic.encode("utf-8")
     await producer.send_and_wait(

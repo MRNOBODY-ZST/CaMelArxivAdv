@@ -54,3 +54,19 @@ async def test_publishes_every_result_before_acknowledging_command() -> None:
     assert outcome is CommandOutcome.ACK
     assert executor.calls == 1
     assert publisher.published == results
+
+
+async def test_executor_failure_requests_counted_retry() -> None:
+    class FailingExecutor(FakeExecutor):
+        async def execute(self, value: object) -> list[PersonalizationResult]:
+            raise RuntimeError("provider unavailable")
+
+    active = command(1)
+    processor = PersonalizationCommandProcessor(
+        FailingExecutor([]), FakePublisher(), maximum_command_bytes=1024 * 1024
+    )
+
+    assert (
+        await processor.process(active.model_dump_json(by_alias=True).encode())
+        is CommandOutcome.RETRY
+    )

@@ -11,6 +11,7 @@ import pytest
 from app.arxiv.models import ArxivMetadata, OaiRecordPage
 from app.arxiv.taxonomy import TaxonomyCategory
 from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
+from app.jobs.job_control import SourceProgress
 from app.messaging.contracts import (
     MessageEnvelope,
     MessageType,
@@ -51,25 +52,35 @@ class UnusedOai:
 
 
 class Publisher:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.messages: list[MessageEnvelope[ResultPayload]] = []
+        self.events = events
 
     async def publish(self, message: MessageEnvelope[ResultPayload]) -> None:
         self.messages.append(message)
+        if self.events is not None:
+            self.events.append(f"publish:{message.type.value}")
 
 
 class Store:
-    def __init__(self, source_progress: Checkpoint | None = None) -> None:
+    def __init__(
+        self,
+        source_progress: SourceProgress | None = None,
+        events: list[str] | None = None,
+    ) -> None:
         self.marked: list[str] = []
         self.source_progress = source_progress
-        self.saved_source_progress: list[object] = []
+        self.saved_source_progress: list[SourceProgress] = []
         self.cleared_source_progress: list[str] = []
+        self.events = events
 
     async def is_processed(self, key: str) -> bool:
-        return False
+        return key in self.marked
 
     async def mark_processed(self, key: str) -> None:
         self.marked.append(key)
+        if self.events is not None:
+            self.events.append("mark-processed")
 
     async def control_for(self, job_id: UUID) -> str:
         return "RUN"
@@ -83,22 +94,26 @@ class Store:
     async def clear_cursor(self, idempotency_key: str) -> None:
         pass
 
-    async def source_progress_for(self, idempotency_key: str) -> Checkpoint | None:
+    async def source_progress_for(self, idempotency_key: str) -> SourceProgress | None:
         return self.source_progress
 
     async def save_source_progress(
-        self, idempotency_key: str, progress: object
+        self, idempotency_key: str, progress: SourceProgress
     ) -> None:
         self.saved_source_progress.append(progress)
-        self.source_progress = progress  # type: ignore[assignment]
+        self.source_progress = progress
+        if self.events is not None:
+            self.events.append("save-checkpoint")
 
     async def clear_source_progress(self, idempotency_key: str) -> None:
         self.cleared_source_progress.append(idempotency_key)
         self.source_progress = None
+        if self.events is not None:
+            self.events.append("clear-checkpoint")
 
 
 @dataclass(frozen=True)
-class Checkpoint:
+class UnsafeCheckpoint:
     next_index: int
     success: int
     skipped: int
@@ -138,6 +153,8 @@ class Runner:
                 if status == "SUCCEEDED"
                 else "SOURCE_UNAVAILABLE"
                 if status == "SOURCE_UNAVAILABLE"
+                else "SOURCE_CONTENT_INVALID"
+                if status == "FAILED"
                 else "SOURCE_SECURITY_REJECTED"
             ),
         )
@@ -218,9 +235,45 @@ async def test_mixed_success_and_security_failure_finishes_partially_succeeded()
 
 
 @pytest.mark.asyncio
+async def test_content_failure_does_not_prevent_the_next_target_from_succeeding() -> None:
+    publisher = Publisher()
+    store = Store()
+    runner = Runner(("FAILED", "SUCCEEDED"))
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), publisher, store, batch_size=50, source_runner=runner
+    )
+    first = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001")
+    second = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00002")
+
+    outcome = await processor.process(
+        command(
+            [
+                {"paperId": str(first.paper_id), "arxivId": first.arxiv_id},
+                {"paperId": str(second.paper_id), "arxivId": second.arxiv_id},
+            ],
+            "source:content-failure",
+        )
+    )
+
+    assert outcome is CommandOutcome.ACK
+    assert runner.targets == [first, second]
+    extractions = [
+        message.payload.extractions[0]
+        for message in publisher.messages
+        if message.type is MessageType.ARXIV_EXTRACTION_RESULT
+    ]
+    assert [item.status for item in extractions] == ["FAILED", "SUCCEEDED"]
+    assert extractions[0].error_code == "SOURCE_CONTENT_INVALID"
+    terminal = publisher.messages[-1].payload
+    assert terminal.status == "PARTIALLY_SUCCEEDED"
+    assert (terminal.success_count, terminal.failed_count) == (1, 1)
+    assert store.marked == ["source:content-failure"]
+
+
+@pytest.mark.asyncio
 async def test_source_command_resumes_after_the_last_durably_published_item() -> None:
     publisher = Publisher()
-    store = Store(Checkpoint(next_index=1, success=1, skipped=0, failed=0))
+    store = Store(SourceProgress(next_index=1, success=1, skipped=0, failed=0))
     runner = Runner(("SUCCEEDED", "SUCCEEDED"))
     processor = ArxivCommandProcessor(
         UnusedLegacy(), UnusedOai(), publisher, store, batch_size=50, source_runner=runner
@@ -247,3 +300,250 @@ async def test_source_command_resumes_after_the_last_durably_published_item() ->
         for item in store.saved_source_progress
     ] == [(2, 2, 0, 0)]
     assert store.cleared_source_progress == ["source:resume"]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_is_saved_after_both_item_messages_and_before_terminal_marker() -> None:
+    events: list[str] = []
+    publisher = Publisher(events)
+    store = Store(events=events)
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(),
+        UnusedOai(),
+        publisher,
+        store,
+        batch_size=50,
+        source_runner=Runner(),
+    )
+
+    await processor.process(
+        command(
+            [{"paperId": str(uuid4()), "arxivId": "2608.00001"}],
+            "source:ordering",
+        )
+    )
+
+    assert events == [
+        "publish:ARXIV_JOB_STARTED",
+        "publish:ARXIV_EXTRACTION_RESULT",
+        "publish:ARXIV_JOB_PROGRESS",
+        "save-checkpoint",
+        "publish:ARXIV_JOB_COMPLETED",
+        "mark-processed",
+        "clear-checkpoint",
+    ]
+
+
+class FailingPublisher(Publisher):
+    def __init__(self, fail_type: MessageType) -> None:
+        super().__init__()
+        self.fail_type = fail_type
+
+    async def publish(self, message: MessageEnvelope[ResultPayload]) -> None:
+        if message.type is self.fail_type:
+            raise RuntimeError(f"failed to publish {message.type.value}")
+        await super().publish(message)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fail_type",
+    [MessageType.ARXIV_EXTRACTION_RESULT, MessageType.ARXIV_JOB_PROGRESS],
+)
+async def test_item_publish_failure_does_not_advance_checkpoint(
+    fail_type: MessageType,
+) -> None:
+    first = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001")
+    second = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00002")
+    initial = SourceProgress(next_index=1, success=1, skipped=0, failed=0)
+    store = Store(initial)
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(),
+        UnusedOai(),
+        FailingPublisher(fail_type),
+        store,
+        batch_size=50,
+        source_runner=Runner(),
+    )
+
+    with pytest.raises(RuntimeError, match="failed to publish"):
+        await processor.process(
+            command(
+                [
+                    {"paperId": str(first.paper_id), "arxivId": first.arxiv_id},
+                    {"paperId": str(second.paper_id), "arxivId": second.arxiv_id},
+                ],
+                "source:publish-failure",
+            )
+        )
+
+    assert store.source_progress is initial
+    assert store.saved_source_progress == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_publish_failure_retains_final_checkpoint() -> None:
+    store = Store()
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(),
+        UnusedOai(),
+        FailingPublisher(MessageType.ARXIV_JOB_COMPLETED),
+        store,
+        batch_size=50,
+        source_runner=Runner(),
+    )
+
+    with pytest.raises(RuntimeError, match="ARXIV_JOB_COMPLETED"):
+        await processor.process(
+            command(
+                [{"paperId": str(uuid4()), "arxivId": "2608.00001"}],
+                "source:terminal-failure",
+            )
+        )
+
+    assert store.source_progress is not None
+    assert store.source_progress.next_index == 1
+    assert store.marked == []
+
+
+class MarkFailingStore(Store):
+    async def mark_processed(self, key: str) -> None:
+        raise RuntimeError("processed marker unavailable")
+
+
+@pytest.mark.asyncio
+async def test_processed_marker_failure_retains_final_checkpoint() -> None:
+    store = MarkFailingStore()
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(),
+        UnusedOai(),
+        Publisher(),
+        store,
+        batch_size=50,
+        source_runner=Runner(),
+    )
+
+    with pytest.raises(RuntimeError, match="processed marker unavailable"):
+        await processor.process(
+            command(
+                [{"paperId": str(uuid4()), "arxivId": "2608.00001"}],
+                "source:marker-failure",
+            )
+        )
+
+    assert store.source_progress is not None
+    assert store.source_progress.next_index == 1
+
+
+class ClearOnceFailingStore(Store):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_clear = True
+
+    async def clear_source_progress(self, idempotency_key: str) -> None:
+        if self.fail_clear:
+            self.fail_clear = False
+            raise RuntimeError("checkpoint delete unavailable")
+        await super().clear_source_progress(idempotency_key)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_clear_failure_after_marker_does_not_replay_items() -> None:
+    store = ClearOnceFailingStore()
+    runner = Runner()
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), Publisher(), store, batch_size=50, source_runner=runner
+    )
+    body = command(
+        [{"paperId": str(uuid4()), "arxivId": "2608.00001"}],
+        "source:clear-failure",
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint delete unavailable"):
+        await processor.process(body)
+
+    assert await processor.process(body) is CommandOutcome.ACK
+    assert len(runner.targets) == 1
+    assert store.source_progress is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        cast(
+            SourceProgress,
+            UnsafeCheckpoint(next_index=1, success=0, skipped=0, failed=0),
+        ),
+        cast(
+            SourceProgress,
+            UnsafeCheckpoint(next_index=3, success=3, skipped=0, failed=0),
+        ),
+    ],
+)
+async def test_inconsistent_or_out_of_range_checkpoint_restarts_from_first_target(
+    checkpoint: SourceProgress,
+) -> None:
+    store = Store(checkpoint)
+    runner = Runner(("SUCCEEDED", "SUCCEEDED"))
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), Publisher(), store, batch_size=50, source_runner=runner
+    )
+    first = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001")
+    second = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00002")
+
+    assert (
+        await processor.process(
+            command(
+                [
+                    {"paperId": str(first.paper_id), "arxivId": first.arxiv_id},
+                    {"paperId": str(second.paper_id), "arxivId": second.arxiv_id},
+                ],
+                "source:invalid-checkpoint",
+            )
+        )
+        is CommandOutcome.ACK
+    )
+    assert runner.targets == [first, second]
+
+
+@pytest.mark.asyncio
+async def test_target_53_resume_uses_absolute_sequences_and_cumulative_counts() -> None:
+    targets = [
+        SourceTarget(paper_id=uuid4(), arxiv_id=f"2608.{index:05d}")
+        for index in range(1, 54)
+    ]
+    publisher = Publisher()
+    store = Store(SourceProgress(next_index=52, success=52, skipped=0, failed=0))
+    runner = Runner()
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), publisher, store, batch_size=50, source_runner=runner
+    )
+
+    assert (
+        await processor.process(
+            command(
+                [
+                    {"paperId": str(target.paper_id), "arxivId": target.arxiv_id}
+                    for target in targets
+                ],
+                "source:resume-52",
+            )
+        )
+        is CommandOutcome.ACK
+    )
+
+    assert runner.targets == [targets[52]]
+    item = next(
+        message
+        for message in publisher.messages
+        if message.type is MessageType.ARXIV_EXTRACTION_RESULT
+    )
+    progress = next(
+        message
+        for message in publisher.messages
+        if message.type is MessageType.ARXIV_JOB_PROGRESS
+    )
+    assert item.idempotency_key.endswith(":ARXIV_EXTRACTION_RESULT:105")
+    assert progress.idempotency_key.endswith(":ARXIV_JOB_PROGRESS:106")
+    assert (progress.payload.processed_count, progress.payload.success_count) == (53, 53)

@@ -5,6 +5,7 @@ import secrets
 import signal
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -164,9 +165,17 @@ async def run(settings: Settings | None = None) -> None:
                 try:
                     try:
                         outcome = await processor.process(record.value)
-                    except Exception:
-                        logger.exception("command_processing_failed_unexpectedly")
-                        outcome = CommandOutcome.REQUEUE
+                    except Exception as error:
+                        logger.error(
+                            "command_processing_failed_unexpectedly",
+                            jobId=(
+                                str(runtime_state.current_job_id)
+                                if runtime_state.current_job_id is not None
+                                else None
+                            ),
+                            errorType=type(error).__name__,
+                        )
+                        outcome = CommandOutcome.RETRY
                     await settle_delivery(
                         record,
                         outcome,
@@ -175,6 +184,9 @@ async def run(settings: Settings | None = None) -> None:
                         retry_topic=active.retry_topic,
                         dead_letter_topic=active.dead_letter_topic,
                         retry_delay_ms=int(active.retry_delay_seconds * 1_000),
+                        on_retry_exhausted=partial(
+                            processor.publish_retry_exhausted_failure, record.value
+                        ),
                     )
                 finally:
                     runtime_state.status = "IDLE"

@@ -101,11 +101,11 @@ public class ArxivResultRepository {
 				.fetch().rowsUpdated().then();
 	}
 
-	public Mono<Void> applyTerminal(UUID jobId, ArxivResultMessage.Payload payload) {
+	public Mono<Boolean> applyTerminal(UUID jobId, ArxivResultMessage.Payload payload) {
 		String status = terminalStatus(payload.status());
 		return databaseClient.sql("""
 				UPDATE jobs SET
-				  status = CASE WHEN status = 'CANCELED' THEN status ELSE :status END,
+				  status = :status,
 				  current_stage = :stage,
 				  processed_count = GREATEST(processed_count, :processed),
 				  success_count = GREATEST(success_count, :success),
@@ -116,7 +116,8 @@ public class ArxivResultRepository {
 				                          ELSE GREATEST(progress_percent, :progress) END,
 				  error_summary = nullif(:errorSummary, ''), heartbeat_at = now(), last_message_at = now(),
 				  ended_at = coalesce(ended_at, now()), updated_at = now(), version = version + 1
-				WHERE id = :jobId AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED')
+				WHERE id = :jobId
+				  AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED','CANCELED')
 				""").bind("status", status).bind("stage", safeStage(payload.stage()))
 				.bind("processed", nonNegative(payload.processedCount()))
 				.bind("success", nonNegative(payload.successCount()))
@@ -125,7 +126,14 @@ public class ArxivResultRepository {
 				.bind("total", nonNegative(payload.totalCount()))
 				.bind("progress", boundedProgress(payload.progressPercent()))
 				.bind("errorSummary", valueOrEmpty(safeError(payload.errorSummary()))).bind("jobId", jobId)
-				.fetch().rowsUpdated().then();
+				.fetch().rowsUpdated().map(rows -> rows == 1);
+	}
+
+	public Mono<Void> cancelOpenExtractionItems(UUID jobId) {
+		return databaseClient.sql("""
+				UPDATE job_items SET status = 'CANCELED', completed_at = coalesce(completed_at, now())
+				WHERE job_id = :jobId AND status IN ('PENDING','RUNNING')
+				""").bind("jobId", jobId).fetch().rowsUpdated().then();
 	}
 
 	public Mono<Void> assertExtractionItemsTerminal(

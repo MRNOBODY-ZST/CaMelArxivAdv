@@ -50,7 +50,7 @@ async def test_retry_is_durably_published_before_source_offset_commit() -> None:
 
     await settle_delivery(
         FakeRecord(headers=[]),  # type: ignore[arg-type]
-        CommandOutcome.REQUEUE,
+        CommandOutcome.RETRY,
         producer,  # type: ignore[arg-type]
         consumer,  # type: ignore[arg-type]
         retry_topic="camel.arxiv.retry.v1",
@@ -97,7 +97,7 @@ async def test_retry_exhaustion_dead_letters_instead_of_looping_forever() -> Non
 
     await settle_delivery(
         FakeRecord(headers=[("camelRetryCount", b"5")]),  # type: ignore[arg-type]
-        CommandOutcome.REQUEUE,
+        CommandOutcome.RETRY,
         producer,  # type: ignore[arg-type]
         consumer,  # type: ignore[arg-type]
         retry_topic="camel.arxiv.retry.v1",
@@ -109,7 +109,109 @@ async def test_retry_exhaustion_dead_letters_instead_of_looping_forever() -> Non
 
 
 @pytest.mark.asyncio
-async def test_result_publisher_uses_message_id_key_and_contract_header() -> None:
+async def test_defer_preserves_exhausted_retry_count_without_dead_lettering() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+    exhausted: list[str] = []
+
+    async def on_retry_exhausted() -> None:
+        exhausted.append("called")
+
+    await settle_delivery(
+        FakeRecord(headers=[("camelRetryCount", b"5")]),  # type: ignore[arg-type]
+        CommandOutcome.DEFER,
+        producer,  # type: ignore[arg-type]
+        consumer,  # type: ignore[arg-type]
+        retry_topic="camel.arxiv.retry.v1",
+        dead_letter_topic="camel.arxiv.dlt.v1",
+        now_epoch_ms=1_000,
+        on_retry_exhausted=on_retry_exhausted,
+    )
+
+    assert events == ["publish:camel.arxiv.retry.v1", "commit"]
+    assert exhausted == []
+    assert isinstance(producer.calls[0]["headers"], list)
+    assert dict(producer.calls[0]["headers"])["camelRetryCount"] == b"5"
+
+
+@pytest.mark.asyncio
+async def test_nonfinal_retry_increments_to_five_without_terminal_callback() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+    exhausted: list[str] = []
+
+    async def on_retry_exhausted() -> None:
+        exhausted.append("called")
+
+    await settle_delivery(
+        FakeRecord(headers=[("camelRetryCount", b"4")]),  # type: ignore[arg-type]
+        CommandOutcome.RETRY,
+        producer,  # type: ignore[arg-type]
+        consumer,  # type: ignore[arg-type]
+        retry_topic="camel.arxiv.retry.v1",
+        dead_letter_topic="camel.arxiv.dlt.v1",
+        now_epoch_ms=1_000,
+        on_retry_exhausted=on_retry_exhausted,
+    )
+
+    assert events == ["publish:camel.arxiv.retry.v1", "commit"]
+    assert exhausted == []
+    assert isinstance(producer.calls[0]["headers"], list)
+    assert dict(producer.calls[0]["headers"])["camelRetryCount"] == b"5"
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_publishes_dlt_then_terminal_event_then_commits() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+
+    async def on_retry_exhausted() -> None:
+        events.append("terminal")
+
+    await settle_delivery(
+        FakeRecord(headers=[("camelRetryCount", b"5")]),  # type: ignore[arg-type]
+        CommandOutcome.RETRY,
+        producer,  # type: ignore[arg-type]
+        consumer,  # type: ignore[arg-type]
+        retry_topic="camel.arxiv.retry.v1",
+        dead_letter_topic="camel.arxiv.dlt.v1",
+        now_epoch_ms=1_000,
+        on_retry_exhausted=on_retry_exhausted,
+    )
+
+    assert events == ["publish:camel.arxiv.dlt.v1", "terminal", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_callback_failure_does_not_commit_source_offset() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+
+    async def on_retry_exhausted() -> None:
+        events.append("terminal")
+        raise RuntimeError("result broker unavailable")
+
+    with pytest.raises(RuntimeError, match="result broker unavailable"):
+        await settle_delivery(
+            FakeRecord(headers=[("camelRetryCount", b"5")]),  # type: ignore[arg-type]
+            CommandOutcome.RETRY,
+            producer,  # type: ignore[arg-type]
+            consumer,  # type: ignore[arg-type]
+            retry_topic="camel.arxiv.retry.v1",
+            dead_letter_topic="camel.arxiv.dlt.v1",
+            now_epoch_ms=1_000,
+            on_retry_exhausted=on_retry_exhausted,
+        )
+
+    assert events == ["publish:camel.arxiv.dlt.v1", "terminal"]
+
+
+@pytest.mark.asyncio
+async def test_result_publisher_uses_job_id_key_and_contract_header() -> None:
     events: list[str] = []
     producer = FakeProducer(events)
     message = MessageEnvelope[ResultPayload](
@@ -127,7 +229,7 @@ async def test_result_publisher_uses_message_id_key_and_contract_header() -> Non
     ).publish(message)
 
     call = producer.calls[0]
-    assert call["key"] == str(message.message_id).encode()
+    assert call["key"] == str(message.job_id).encode()
     assert isinstance(call["headers"], list)
     assert dict(call["headers"])["contractVersion"] == b"1"
 

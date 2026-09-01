@@ -27,10 +27,9 @@ class FakeRedis:
 
 @pytest.mark.asyncio
 async def test_source_progress_round_trips_with_a_source_specific_ttl_key() -> None:
-    progress_type = getattr(job_control, "SourceProgress")
     redis = FakeRedis()
     store = job_control.RedisJobStore(redis)
-    progress = progress_type(next_index=53, success=52, skipped=0, failed=1)
+    progress = job_control.SourceProgress(next_index=53, success=52, skipped=0, failed=1)
 
     await store.save_source_progress("source:job-1", progress)
 
@@ -55,6 +54,9 @@ async def test_source_progress_round_trips_with_a_source_specific_ttl_key() -> N
         '{"version":2,"nextIndex":1,"success":1,"skipped":0,"failed":0}',
         '{"version":1,"nextIndex":true,"success":1,"skipped":0,"failed":0}',
         '{"version":1,"nextIndex":-1,"success":0,"skipped":0,"failed":0}',
+        '{"version":1,"nextIndex":1,"success":0,"skipped":0,"failed":0}',
+        '{"version":1,"nextIndex":"1","success":1,"skipped":0,"failed":0}',
+        '{"version":1,"nextIndex":1,"success":1,"skipped":0,"failed":0,"extra":0}',
     ],
 )
 async def test_invalid_source_progress_is_ignored(raw: str) -> None:
@@ -63,3 +65,15 @@ async def test_invalid_source_progress_is_ignored(raw: str) -> None:
     store = job_control.RedisJobStore(redis)
 
     assert await store.source_progress_for("source:job-1") is None
+
+
+@pytest.mark.asyncio
+async def test_source_progress_redis_failure_is_not_treated_as_missing_checkpoint() -> None:
+    class FailingRedis(FakeRedis):
+        async def get(self, key: str) -> bytes | str | None:
+            raise ConnectionError("redis unavailable")
+
+    store = job_control.RedisJobStore(FailingRedis())
+
+    with pytest.raises(ConnectionError, match="redis unavailable"):
+        await store.source_progress_for("source:job-1")

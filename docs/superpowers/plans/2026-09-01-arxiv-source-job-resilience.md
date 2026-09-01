@@ -4,7 +4,7 @@
 
 **Goal:** Make arXiv source extraction tolerate malformed individual papers, resume retried batches, and terminate visibly when unexpected retries are exhausted.
 
-**Architecture:** Parse nested author metadata with balanced command spans and classify document-shape validation as one failed extraction result. Persist a versioned cumulative source checkpoint in Redis after Kafka result acknowledgements. Extend Kafka settlement with a pre-commit dead-letter callback so an idempotent `ARXIV_JOB_FAILED` result is durable before final offset commit.
+**Architecture:** Parse nested author metadata with balanced command spans and classify document-shape validation as one failed extraction result. Persist a versioned cumulative source checkpoint in Redis after Kafka result acknowledgements. Split uncounted control deferral from counted retry, then use a post-DLT/pre-commit exhaustion callback so an idempotent `ARXIV_JOB_FAILED` result is durable before final offset commit.
 
 **Tech Stack:** Python 3.12, asyncio, Pydantic 2, Redis 8, aiokafka, pytest, Spring Boot result consumer, PostgreSQL 17, Docker Compose.
 
@@ -18,7 +18,7 @@
 - Checkpoints are saved only after the corresponding Kafka results are acknowledged.
 - Retry exhaustion must persist a terminal backend event before the source offset is committed.
 - Do not expose source text, email addresses, credentials, tokens, or exception values in logs or public errors.
-- Preserve existing message topics, contract version, result idempotency keys, control semantics, and unrelated services.
+- Preserve existing message topics, contract version, result idempotency keys, control semantics, and unrelated services. Key job-scoped result records by job ID to preserve per-job partition ordering.
 - Do not include the assistant product name in source, branches, commits, or deployment artifacts.
 
 ---
@@ -136,9 +136,9 @@ Expected: source checkpoint interfaces and resume behavior are absent.
 
 Serialize literal JSON fields `version`, `nextIndex`, `success`, `skipped`, and `failed` under `camel:worker:source-progress:<idempotency-key>`. Parse strictly, reject booleans/non-integers/negative values, and return `None` on invalid data.
 
-- [ ] **Step 4: Implement publish-then-checkpoint ordering**
+- [x] **Step 4: Implement publish-then-checkpoint ordering**
 
-Initialize the loop from a checkpoint only when counts sum to `nextIndex` and the index is within the target list. Save cumulative progress after both per-item publishes. Preserve it on pause/requeue; clear it after the terminal result is published and before marking the command processed.
+Initialize the loop from a checkpoint only when counts sum to `nextIndex` and the index is within the target list. Save cumulative progress after both per-item publishes. Preserve it on pause/retry; after terminal publication, mark the command processed before clearing the checkpoint.
 
 - [ ] **Step 5: Run the focused tests and verify GREEN**
 
@@ -162,13 +162,13 @@ git commit -m "fix: resume retried arxiv source batches"
 - Modify: `worker/tests/test_contracts.py`
 
 **Interfaces:**
-- Produces: `DeliverySettlement` values `ACKED`, `REQUEUED`, and `DEAD_LETTERED`.
-- Produces: optional async `before_dead_letter` callback on `settle_delivery`.
+- Produces: `CommandOutcome` values `ACK`, `DEFER`, `RETRY`, and `DEAD`.
+- Produces: optional async `on_retry_exhausted` callback on `settle_delivery`.
 - Produces: `ArxivCommandProcessor.publish_retry_exhausted_failure(body: bytes)` with deterministic result idempotency.
 
-- [ ] **Step 1: Write failing settlement-order and failure-envelope tests**
+- [x] **Step 1: Write failing settlement-order and failure-envelope tests**
 
-Assert final retry event order is DLT publish, terminal callback, then source offset commit. Assert callback failure prevents commit. Assert the processor publishes `ARXIV_JOB_FAILED`, status `FAILED`, code `WORKER_RETRY_EXHAUSTED`, and no exception or source text. Assert non-final retries never call the callback.
+Assert final retry event order is DLT publish, terminal callback, then source offset commit. Assert callback failure prevents commit. Assert the processor publishes `ARXIV_JOB_FAILED`, status `FAILED`, code `WORKER_RETRY_EXHAUSTED`, and no exception or source text. Assert non-final retries never call the callback, pause at retry count five remains deferred, and mid-loop cancel is acknowledged.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -179,9 +179,9 @@ uv run pytest tests/test_kafka.py tests/jobs/test_arxiv_consumer.py tests/test_c
 
 Expected: settlement has no callback/result and the processor has no terminal-failure method.
 
-- [ ] **Step 3: Implement terminal publication before commit**
+- [x] **Step 3: Implement terminal publication before commit**
 
-Return a settlement enum from `settle_delivery`. On retry exhaustion, durably publish to the DLT, await `before_dead_letter` when provided, then commit. In the arXiv worker, capture only the exception class for logging and pass a callback that publishes the bounded terminal result through the existing result publisher.
+On retry exhaustion, durably publish to the DLT, await `on_retry_exhausted` when provided, then commit. In the arXiv worker, capture only the exception class for logging and pass a callback that publishes the bounded terminal result through the existing result publisher. `DEFER` republishes without consuming the retry counter; `RETRY` increments it.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 

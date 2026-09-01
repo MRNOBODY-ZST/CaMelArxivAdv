@@ -136,6 +136,31 @@ Contact: \texttt{jinjin.gu@insait.ai}.}}
     ]
 
 
+def test_nested_mailto_thanks_is_removed_without_losing_the_contact(tmp_path: Path) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\author{Alice Example\thanks{\href{mailto:alice@uni.edu}{Corresponding author}}}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [author.name for author in result.authors] == ["Alice Example"]
+    assert [contact.normalized_email for contact in result.contacts] == ["alice@uni.edu"]
+
+
+def test_author_formatting_commands_remain_after_metadata_removal(tmp_path: Path) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\author{\textbf{Alice Example} \and Bob Example}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [author.name for author in result.authors] == ["Alice Example", "Bob Example"]
+
+
 def test_body_and_bibliography_addresses_are_not_promoted_to_contacts(tmp_path: Path) -> None:
     result = extract(
         tmp_path,

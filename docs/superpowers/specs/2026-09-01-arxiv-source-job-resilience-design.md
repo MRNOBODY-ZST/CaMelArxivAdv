@@ -17,7 +17,7 @@ The fix has four cooperating boundaries:
 1. Parse nested author metadata structurally. Remove balanced nested metadata commands such as `thanks`, `affiliation`, and `institute`, then conservatively split common comma-plus-final-`and` author lists. Never truncate an oversized parsed name into apparently valid data.
 2. Convert Pydantic validation caused by one source document into a `SourceExtractionResult` with status `FAILED` and code `SOURCE_CONTENT_INVALID`. The command loop persists that item and continues with the remaining targets. Unexpected infrastructure or programming exceptions still escape for retry.
 3. Persist a validated source-batch checkpoint in Redis after each result and progress pair is durably published. It contains the next target index and cumulative success, skipped, and failed counts. A replay resumes only when the checkpoint is internally consistent with the command; corrupt or incompatible data fails safe by restarting at zero.
-4. When an unexpected exception reaches the final retry, publish an idempotent `ARXIV_JOB_FAILED` result before committing the dead-letter settlement. The public error is bounded and generic; logs include a safe exception type without source content or credentials.
+4. Separate user-controlled deferral from counted failure retry. A paused command is delayed without incrementing its retry counter; a canceled command is acknowledged after its terminal marker. When a transient or unexpected failure reaches the final retry, publish an idempotent `ARXIV_JOB_FAILED` result before committing the dead-letter settlement. The public error is bounded and generic; logs include a safe exception type without source content or credentials.
 
 Simple string truncation was rejected because it would store affiliation prose as a false author. Treating every exception as an item failure was rejected because it would hide Kafka, Redis, disk, and programming failures. Directly editing the production job was rejected because it would not prevent recurrence.
 
@@ -25,7 +25,7 @@ Simple string truncation was rejected because it would store affiliation prose a
 
 Balanced command removal reuses the existing TeX command scanner, so nested braces do not leak into names. The author-list split applies only when a cleaned segment contains a comma-separated sequence with a final `and`; ordinary single names and existing `\and`, TeX line-break, and semicolon behavior remain unchanged.
 
-`SourceExtractionRunner.run` catches Pydantic `ValidationError` around extraction/model construction and returns a cleaned-up failure result:
+`SourceExtractionRunner.run` catches Pydantic `ValidationError` only around source discovery and contact extraction and returns a cleaned-up failure result. Outbound result-contract construction remains outside this boundary so programming defects still retry:
 
 - status: `FAILED`
 - error code: `SOURCE_CONTENT_INVALID`
@@ -37,11 +37,11 @@ No raw author text is returned or logged. Other existing security, availability,
 
 Redis stores a versioned JSON document under a source-specific key derived from the command idempotency key. The document includes `nextIndex`, `success`, `skipped`, and `failed`; all values are non-negative, their sum equals `nextIndex`, and `nextIndex` cannot exceed the command target count. The key expires after seven days.
 
-The worker saves the checkpoint only after both messages for an item have been acknowledged by Kafka. At command completion it publishes the terminal result, clears the source checkpoint, and marks the command processed. Crashes before checkpoint save can repeat at most one item; deterministic result idempotency keeps that repeat harmless. Pause, cancel, and transient retry preserve the checkpoint.
+The worker saves the checkpoint only after both messages for an item have been acknowledged by Kafka. At command completion it publishes the terminal result, marks the command processed, and then clears the source checkpoint. This order avoids replaying the whole batch if the marker write fails; a failed checkpoint delete leaves only a seven-day TTL-bounded stale key, and redelivery observes the processed marker. Crashes before checkpoint save can repeat at most one item; deterministic result idempotency keeps that repeat harmless. Pause and transient retry preserve the checkpoint; cancellation marks the command processed before clearing it.
 
 ## Retry exhaustion and observability
 
-Kafka settlement reports whether it committed, requeued, or dead-lettered a record. For an unexpected processing exception, the final dead-letter path invokes a callback that publishes `ARXIV_JOB_FAILED` before the source offset commit. If that publication fails, settlement does not commit, preserving at-least-once recovery.
+Kafka settlement has four explicit outcomes: `ACK`, `DEFER`, `RETRY`, and `DEAD`. `DEFER` republishes after a delay without changing `camelRetryCount`, while `RETRY` increments and can exhaust. On retry exhaustion, the worker publishes the DLT copy, invokes a callback that publishes `ARXIV_JOB_FAILED`, and only then commits the source offset. If either publication fails, settlement does not commit, preserving at-least-once recovery. Both handled upstream failures and unexpected exceptions use this same exhaustion hook.
 
 The terminal result uses a deterministic idempotency key and contains:
 
@@ -50,7 +50,7 @@ The terminal result uses a deterministic idempotency key and contains:
 - error code: `WORKER_RETRY_EXHAUSTED`
 - summary: `Worker exhausted retries after an unexpected processing failure`
 
-The worker log records the exception class and job ID, but not the exception value or source text. The backend already persists `ARXIV_JOB_FAILED` and exposes it through the job detail API and event timeline.
+The worker log records the exception class and job ID, but not the exception value or source text. Job-scoped results use the job ID as their Kafka key so one job's events remain in partition order. The backend accepts failure with pending extraction items, preserves canceled terminal state against late failures, records the bounded error code in event details, and exposes the result through the job detail API and event timeline.
 
 ## Production recovery
 
