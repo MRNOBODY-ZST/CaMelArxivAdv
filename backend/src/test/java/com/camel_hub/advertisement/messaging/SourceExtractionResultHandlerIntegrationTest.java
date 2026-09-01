@@ -574,6 +574,32 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void rejectsContactWithoutAPublicDnsDomainWithoutPartialRows() {
+		String unsafe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("university.edu", "localhost");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
+				.isEqualTo("UNKNOWN");
+	}
+
+	@Test
+	void rejectsContactWithAnIllegalDotLocalPartWithoutPartialRows() {
+		String unsafe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", "alice..x@university.edu");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+	}
+
+	@Test
 	void rejectsEmailLikeTextOutsideEncryptedContactFields() {
 		String safe = resultMessage(UUID.randomUUID(), "[email redacted]");
 		var unsafeMessages = java.util.List.of(

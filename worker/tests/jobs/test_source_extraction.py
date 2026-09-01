@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import signal
 import tarfile
 import time
 from collections.abc import Callable
@@ -109,6 +110,24 @@ def infrastructure_timeout_parser_process(
     response_path.write_text(
         '{"status":"INFRASTRUCTURE_TIMEOUT","error_type":null}',
         encoding="utf-8",
+    )
+
+
+def sigterm_ignoring_parser_process(
+    source_path: Path,
+    extracted_dir: Path,
+    response_path: Path,
+    limits: ArchiveLimits,
+    maximum_include_depth: int,
+    maximum_files: int,
+    metadata_authors: tuple[str, ...],
+) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (extracted_dir.parent / "parser-ready").write_text("ready", encoding="utf-8")
+    time.sleep(0.25)
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    (extracted_dir / "second-cancel.tex").write_text(
+        "late contact: secondcancel@example.edu", encoding="utf-8"
     )
 
 
@@ -307,6 +326,39 @@ async def test_subprocess_infrastructure_timeout_response_propagates_for_retry(
     with pytest.raises(TimeoutError, match="Source parsing dependency timed out"):
         await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
 
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_cannot_interrupt_subprocess_cleanup(
+    tmp_path: Path,
+) -> None:
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+        parser=SubprocessSourceParser(
+            start_method="spawn",
+            process_target=sigterm_ignoring_parser_process,
+        ),
+    )
+    task = asyncio.create_task(
+        runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+    )
+    async with asyncio.timeout(2):
+        while not tuple(tmp_path.rglob("parser-ready")):
+            await asyncio.sleep(0.01)
+
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.3)
     assert list(tmp_path.iterdir()) == []
 
 

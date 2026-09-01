@@ -30,7 +30,7 @@
 - [x] Irreversibly redact email-like author-adjacent text from affiliations, evidence context, and source paths; reject residual at-signs in worker and backend public fields.
 - [x] Match Java UTF-16 length limits for every Source result string boundary.
 - [x] Keep downloader timeout/retry semantics outside the bounded parsing deadline.
-- [x] Run archive/TeX/contact parsing in a killable subprocess and join it before cleanup on timeout.
+- [x] Run archive/TeX/contact parsing in a killable subprocess and complete shielded termination/join before cleanup on timeout or repeated cancellation.
 - [x] Convert only known Pydantic content-boundary errors to `SOURCE_CONTENT_INVALID`; let shape and infrastructure errors retry.
 - [x] Verify a failed paper does not stop the following target.
 

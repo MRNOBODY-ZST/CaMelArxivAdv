@@ -151,7 +151,10 @@ class SubprocessSourceParser:
         try:
             await asyncio.shield(join_task)
         except asyncio.CancelledError:
-            await _terminate_process(process, join_task)
+            cleanup_task = asyncio.create_task(
+                _terminate_process(process, join_task)
+            )
+            await _await_uninterruptibly(cleanup_task)
             process.close()
             raise
         exit_code = process.exitcode
@@ -199,6 +202,15 @@ async def _terminate_process(
         await join_task
     if process.is_alive():
         raise RuntimeError("Source parsing subprocess could not be terminated")
+
+
+async def _await_uninterruptibly(task: asyncio.Task[None]) -> None:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    task.result()
 
 
 def _parse_source_process(
