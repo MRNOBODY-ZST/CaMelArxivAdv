@@ -457,7 +457,8 @@ public class ArxivResultHandler {
 				|| (payload.papers() != null && payload.papers().size() > 100)
 				|| (payload.errorCode() != null
 						&& !payload.errorCode().matches("[A-Z0-9_]{1,80}"))
-				|| (payload.errorSummary() != null && payload.errorSummary().length() > 500)) {
+				|| (payload.errorSummary() != null && (payload.errorSummary().length() > 500
+						|| containsEmailLikeText(payload.errorSummary())))) {
 			throw new IllegalArgumentException("Result payload is invalid");
 		}
 		if (payload.taxonomyCategories() != null && payload.taxonomyCategories().size() > 500) {
@@ -480,7 +481,10 @@ public class ArxivResultHandler {
 				|| result.filesInspected() > 5000 || result.durationMs() < 0
 				|| invalidOptionalText(result.documentClass(), 100)
 				|| invalidOptionalText(result.sourceFormat(), 50)
-				|| invalidOptionalText(result.errorSummary(), 500)) {
+				|| invalidOptionalText(result.errorSummary(), 500)
+				|| containsEmailLikeText(result.documentClass())
+				|| containsEmailLikeText(result.sourceFormat())
+				|| containsEmailLikeText(result.errorSummary())) {
 			throw new IllegalArgumentException("Extraction result contract is invalid");
 		}
 		boolean successful = Set.of("SUCCEEDED", "PARTIALLY_SUCCEEDED").contains(result.status());
@@ -503,9 +507,11 @@ public class ArxivResultHandler {
 		for (ArxivResultMessage.SourceAuthor author : authors) {
 			if (author == null || author.order() < 1 || author.order() > 500
 					|| !orders.add(author.order()) || invalidText(author.name(), 300)
+					|| containsEmailLikeText(author.name())
 					|| !normalizedNames.add(normalizedAuthorName(author.name()))
 					|| author.affiliations() == null || author.affiliations().size() > 100
-					|| author.affiliations().stream().anyMatch(value -> invalidText(value, 2000))) {
+					|| author.affiliations().stream().anyMatch(value -> invalidText(value, 2000)
+							|| containsEmailLikeText(value))) {
 				throw new IllegalArgumentException("Extraction author is invalid");
 			}
 		}
@@ -535,6 +541,7 @@ public class ArxivResultHandler {
 					|| evidence.logicalLocation() == null
 					|| !evidence.logicalLocation().matches("[A-Z0-9_]{1,120}")
 					|| invalidText(evidence.maskedContext(), 600)
+					|| containsEmailLikeText(evidence.maskedContext())
 					|| evidence.maskedContext().toLowerCase(java.util.Locale.ROOT)
 							.contains(contact.normalizedEmail().toLowerCase(java.util.Locale.ROOT))
 					|| evidence.maskedContext().toLowerCase(java.util.Locale.ROOT)
@@ -558,11 +565,16 @@ public class ArxivResultHandler {
 
 	private boolean unsafePath(String value) {
 		if (value == null || value.isBlank() || value.startsWith("/") || value.contains("\\")
-				|| containsUnsafeControl(value)) {
+				|| containsUnsafeControl(value) || containsEmailLikeText(value)) {
 			return true;
 		}
 		return java.util.Arrays.stream(value.split("/", -1))
 				.anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."));
+	}
+
+	private boolean containsEmailLikeText(String value) {
+		return value != null && java.text.Normalizer.normalize(
+				value, java.text.Normalizer.Form.NFKC).contains("@");
 	}
 
 	private boolean invalidOptionalText(String value, int maximumLength) {

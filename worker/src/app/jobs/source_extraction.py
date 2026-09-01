@@ -34,6 +34,10 @@ class SourceContentValidationError(Exception):
     """Source-derived metadata violates a bounded extraction model."""
 
 
+class SourceParseTimeoutError(Exception):
+    """Bounded archive and TeX parsing exceeded its local deadline."""
+
+
 _SOURCE_CONTENT_VALIDATION_TYPES = {
     "greater_than_equal",
     "less_than_equal",
@@ -43,6 +47,7 @@ _SOURCE_CONTENT_VALIDATION_TYPES = {
     "too_short",
     "value_error",
 }
+_MAXIMUM_SOURCE_RESULT_BYTES = 768 * 1024
 
 
 class SourceExtractionRunner:
@@ -77,8 +82,18 @@ class SourceExtractionRunner:
         ) as work:
             work_path = Path(work)
             try:
-                async with asyncio.timeout(self._maximum_parse_seconds):
-                    result = await self._extract(target, work_path, started)
+                download_dir = work_path / "download"
+                download_dir.mkdir(parents=True, exist_ok=True)
+                downloaded = await self._downloader.download(
+                    target.arxiv_id, download_dir
+                )
+                try:
+                    async with asyncio.timeout(self._maximum_parse_seconds):
+                        result = await self._extract(
+                            target, work_path, started, downloaded
+                        )
+                except TimeoutError as exception:
+                    raise SourceParseTimeoutError from exception
             except SourceUnavailableError:
                 result = self._failure(
                     target,
@@ -111,7 +126,7 @@ class SourceExtractionRunner:
                     "SOURCE_CONTENT_INVALID",
                     "Source metadata exceeded supported parsing boundaries",
                 )
-            except TimeoutError:
+            except SourceParseTimeoutError:
                 result = self._failure(
                     target,
                     started,
@@ -134,12 +149,13 @@ class SourceExtractionRunner:
         return result
 
     async def _extract(
-        self, target: SourceTarget, work: Path, started: float
+        self,
+        target: SourceTarget,
+        work: Path,
+        started: float,
+        downloaded: DownloadedSource,
     ) -> SourceExtractionResult:
-        download_dir = work / "download"
         extracted_dir = work / "extracted"
-        download_dir.mkdir(parents=True, exist_ok=True)
-        downloaded = await self._downloader.download(target.arxiv_id, download_dir)
         report = await asyncio.to_thread(
             extract_source, downloaded.path, extracted_dir, self._limits
         )
@@ -197,7 +213,7 @@ class SourceExtractionRunner:
             )
             for item in document.contacts
         )
-        return SourceExtractionResult(
+        result = SourceExtractionResult(
             paper_id=target.paper_id,
             arxiv_id=target.arxiv_id,
             parser_version=self._parser_version,
@@ -212,6 +228,11 @@ class SourceExtractionRunner:
             authors=authors,
             contacts=contacts,
         )
+        if len(result.model_dump_json(by_alias=True).encode("utf-8")) > (
+            _MAXIMUM_SOURCE_RESULT_BYTES
+        ):
+            raise SourceContentValidationError
+        return result
 
     def _failure(
         self,

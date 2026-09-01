@@ -30,17 +30,23 @@ Truncating parsed names was rejected because it would persist false authors. Tre
 
 ## Parser and outbound contract
 
-The parser reuses its balanced TeX command scanner to remove complete nested metadata commands, including `thanks`, `affiliation`, `institute`, IEEE membership, and related footnotes. Explicit `\and`, TeX line breaks, and semicolon-separated names continue to work.
+The parser reuses its balanced TeX command scanner to remove complete nested metadata commands, including `thanks`, `affiliation`, `institute`, IEEE membership, `IEEEauthorrefmark`, and related footnotes. Explicit `\and`, TeX line breaks, and semicolon-separated names continue to work.
 
 A cleaned comma-plus-final-`and` segment is split only when its canonical names exactly match the target's ordered `metadataAuthors`. Missing or mismatched metadata produces no author records for that ambiguous segment. Contacts may still be stored at paper level, so this conservative fallback does not lose a syntactically valid address or invent an author relationship.
 
-Email normalization removes only paired TeX math delimiters and validates an ASCII IDNA domain made of legal LDH labels. It preserves a legal dollar sign in the local part and rejects unmatched or illegal domain characters. Pydantic models enforce the backend limits for names, affiliations, contacts, evidence, document classes, and collection sizes. Canonical author merging constructs a new validated model, so merging cannot bypass the 100-affiliation limit.
+Email normalization removes only paired TeX math delimiters and validates an ASCII IDNA domain made of legal LDH labels. It preserves a legal dollar sign in the local part and rejects unmatched or illegal domain characters. Before any public author or evidence field is constructed, affiliation tokens and source-path segments containing a normalized at-sign are removed or irreversibly replaced, and evidence context uses `[email redacted]` without retaining a local part or domain. Internal and outbound Pydantic models reject every residual normalized at-sign in author names, affiliations, evidence paths, and contexts. The backend repeats the same fail-closed check before persistence, so an old or foreign producer cannot bypass the encrypted-contact boundary and expose an address through the paper API.
+
+All Python string limits that cross into the Java result handler are measured in UTF-16 code units, matching `String.length()`, rather than Python Unicode code points. Astral text therefore cannot be acknowledged by the worker and rejected later by the backend. Pydantic models enforce these backend limits for names, affiliations, contacts, evidence, document classes, and collection sizes. Canonical author merging constructs a new validated model, so merging cannot bypass the 100-affiliation limit.
 
 `SourceExtractionRunner` converts a Pydantic error into `SOURCE_CONTENT_INVALID` only when every error is a known content-boundary type. Missing fields and model-shape errors still propagate as programming failures. No source text or address is copied into a public error.
 
-## Command size boundary
+The Source downloader runs outside the local parsing deadline and retains its own HTTP timeout and retry semantics. Only archive extraction, TeX discovery, and contact parsing are wrapped by the parse deadline. A downloader timeout therefore propagates for command retry, while a genuine parsing timeout becomes the bounded `SOURCE_PARSE_TIMEOUT` item result.
+
+## Messaging size boundaries
 
 The backend fetches ordered `paper_authors.raw_name` values with each target. It gives all `metadataAuthors` arrays in one command a 256 KiB UTF-8 JSON budget. A paper's list is included completely or omitted completely; lists are never truncated. The serialized command envelope has a 768 KiB hard limit, leaving space below Kafka's default one MiB record boundary for protocol overhead and headers. Size validation happens before the job and outbox row are created.
+
+After the worker builds a complete `SourceExtractionResult`, it serializes that result with the same aliases used on the wire and enforces a 768 KiB UTF-8 limit before returning it to the command processor. A document whose individually legal fields exceed the aggregate budget becomes a small `SOURCE_CONTENT_INVALID` item result, allowing later targets to continue. Kafka producer failures and other outbound programming errors remain outside this content boundary and still retry the command.
 
 ## Durable checkpoint and consumer liveness
 
@@ -76,4 +82,4 @@ Completion requires 100 terminal items, no pending item, no Source checkpoint, z
 
 ## Validation
 
-Tests cover production-shaped TeX, ambiguous author rejection, metadata cross-validation, strict email domains, merged-model revalidation, item isolation, canonical Redis parsing and Lua monotonicity against real Redis, checkpoint publication order, poll heartbeats during long work, deep poison envelopes, dead-letter callback ordering, command-size boundaries, Source retry item reconstruction, cross-partition completion-before-item ordering, inflated late progress, zero-item timeout reconciliation, API/worker cancellation, exact item-derived terminal counts, and late-message guards. Full worker static checks/tests, backend checks, frontend checks, container/Compose contracts, independent review, and production API/UI verification are required before completion.
+Tests cover production-shaped TeX, IEEE reference marks, ambiguous author rejection, metadata cross-validation, strict email domains, fail-closed redaction of ASCII/quoted/Unicode email-like text across every public field, Java-compatible UTF-16 boundaries, download-versus-parse timeout classification, merged-model revalidation, item isolation, aggregate result size, canonical Redis parsing and Lua monotonicity against real Redis, checkpoint publication order, poll heartbeats during long work, deep poison envelopes, dead-letter callback ordering, command-size boundaries, Source retry item reconstruction, cross-partition completion-before-item ordering, inflated late progress, zero-item timeout reconciliation, API/worker cancellation, exact item-derived terminal counts, and late-message guards. Full worker static checks/tests, backend checks, frontend checks, container/Compose contracts, independent review, and production API/UI verification are required before completion.

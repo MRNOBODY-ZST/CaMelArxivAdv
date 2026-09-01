@@ -5,8 +5,17 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
+
+from app.source_safety import contains_email_like_text, unsafe_bounded_text
 
 
 class MessageType(StrEnum):
@@ -71,9 +80,7 @@ class SourceTarget(ContractModel):
     @classmethod
     def safe_metadata_authors(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if any(
-            not value.strip()
-            or len(value) > 300
-            or any(ord(character) < 32 and not character.isspace() for character in value)
+            unsafe_bounded_text(value, 300)
             for value in values
         ):
             raise ValueError("Source target metadata authors are invalid")
@@ -99,6 +106,23 @@ class SourceAuthor(ContractModel):
     affiliations: tuple[str, ...] = Field(default=(), max_length=100)
     corresponding: bool = False
 
+    @field_validator("name")
+    @classmethod
+    def safe_name(cls, value: str) -> str:
+        if unsafe_bounded_text(value, 300) or contains_email_like_text(value):
+            raise ValueError("Source author name is unsafe")
+        return value
+
+    @field_validator("affiliations")
+    @classmethod
+    def safe_affiliations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            unsafe_bounded_text(value, 2000) or contains_email_like_text(value)
+            for value in values
+        ):
+            raise ValueError("Source author affiliation is unsafe")
+        return values
+
 
 class SourceEvidence(ContractModel):
     source_relative_path: str = Field(min_length=1, max_length=500)
@@ -114,7 +138,10 @@ class SourceEvidence(ContractModel):
             self.source_relative_path.startswith("/")
             or "\\" in self.source_relative_path
             or any(part in {"", ".", ".."} for part in parts)
-            or any(ord(char) < 32 for char in self.source_relative_path)
+            or unsafe_bounded_text(self.source_relative_path, 500)
+            or contains_email_like_text(self.source_relative_path)
+            or unsafe_bounded_text(self.masked_context, 600)
+            or contains_email_like_text(self.masked_context)
         ):
             raise ValueError("Source evidence path is unsafe")
         return self
@@ -133,6 +160,8 @@ class SourceContact(ContractModel):
 
     @model_validator(mode="after")
     def no_plaintext_evidence(self) -> SourceContact:
+        if unsafe_bounded_text(self.display_email, 320):
+            raise ValueError("Source contact display email is unsafe")
         for item in self.evidence:
             context = item.masked_context.casefold()
             if (
@@ -163,6 +192,23 @@ class SourceExtractionResult(ContractModel):
     contacts: tuple[SourceContact, ...] = Field(default=(), max_length=500)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,80}$")
     error_summary: str | None = Field(default=None, max_length=500)
+
+    @field_validator("source_format", "document_class", "error_summary")
+    @classmethod
+    def java_bounded_optional_text(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        limits = {"source_format": 50, "document_class": 100, "error_summary": 500}
+        field_name = info.field_name
+        if field_name is None:
+            raise ValueError("Source result field identity is unavailable")
+        if unsafe_bounded_text(value, limits[field_name]) or contains_email_like_text(
+            value
+        ):
+            raise ValueError("Source result text is unsafe")
+        return value
 
     @model_validator(mode="after")
     def consistent_result(self) -> SourceExtractionResult:
@@ -205,6 +251,15 @@ class ResultPayload(ContractModel):
     taxonomy_source_updated_at: datetime | None = None
     taxonomy_categories: tuple[dict[str, object], ...] = Field(default=(), max_length=500)
     extractions: tuple[SourceExtractionResult, ...] = Field(default=(), max_length=10)
+
+    @field_validator("error_summary")
+    @classmethod
+    def safe_error_summary(cls, value: str | None) -> str | None:
+        if value is not None and (
+            unsafe_bounded_text(value, 500) or contains_email_like_text(value)
+        ):
+            raise ValueError("Result error summary is unsafe")
+        return value
 
 
 class MessageEnvelope[PayloadT](ContractModel):

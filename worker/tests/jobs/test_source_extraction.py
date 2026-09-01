@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.arxiv.source_downloader import (
     SourceDownloadSecurityError,
     SourceUnavailableError,
 )
-from app.extraction.archive_guard import ArchiveLimits
+from app.extraction.archive_guard import ArchiveLimits, extract_source
 from app.extraction.models import (
     Confidence,
     ExtractedAuthor,
@@ -63,6 +64,11 @@ class InvalidMetadataDownloader:
             member.size = len(content)
             archive.addfile(member, io.BytesIO(content))
         return DownloadedSource(path, path.stat().st_size, "application/gzip")
+
+
+class TimedOutDownloader:
+    async def download(self, arxiv_id: str, destination: Path) -> DownloadedSource:
+        raise TimeoutError("upstream request timed out")
 
 
 def extraction_limits() -> ArchiveLimits:
@@ -138,6 +144,53 @@ async def test_download_policy_violation_is_security_rejected(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_download_timeout_propagates_for_command_retry(tmp_path: Path) -> None:
+    runner = SourceExtractionRunner(
+        TimedOutDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+
+    with pytest.raises(TimeoutError, match="upstream request timed out"):
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_parse_timeout_remains_a_bounded_item_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_to_thread = asyncio.to_thread
+
+    async def stalled_parse(function: object, *args: object, **kwargs: object) -> object:
+        if function is extract_source:
+            await asyncio.Event().wait()
+        return await real_to_thread(function, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.jobs.source_extraction.asyncio.to_thread", stalled_parse)
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+    runner._maximum_parse_seconds = 0.01
+
+    result = await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+
+    assert result.status == "FAILED"
+    assert result.error_code == "SOURCE_PARSE_TIMEOUT"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_invalid_source_metadata_fails_only_that_item_without_leaking_content(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +210,55 @@ async def test_invalid_source_metadata_fails_only_that_item_without_leaking_cont
     assert result.error_summary == "Source metadata exceeded supported parsing boundaries"
     assert "A" * 20 not in (result.error_summary or "")
     assert result.cleanup_confirmed is True
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_aggregate_source_result_over_kafka_budget_is_an_item_content_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def oversized_document(_corpus: object) -> ExtractionDocument:
+        affiliations = (
+            "A" * 200,
+            "B" * 200,
+            "C" * 200,
+            "D" * 200,
+            "E" * 1999,
+        )
+        return ExtractionDocument(
+            document_class="article",
+            files_inspected=1,
+            authors=tuple(
+                ExtractedAuthor(
+                    order=index,
+                    name=f"Bounded Author {index}",
+                    affiliations=affiliations,
+                )
+                for index in range(1, 501)
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.jobs.source_extraction.extract_contacts",
+        oversized_document,
+    )
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+
+    result = await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+
+    assert result.status == "FAILED"
+    assert result.error_code == "SOURCE_CONTENT_INVALID"
+    assert result.authors == ()
+    assert result.contacts == ()
+    assert len(result.model_dump_json(by_alias=True).encode("utf-8")) < 2_000
     assert list(tmp_path.iterdir()) == []
 
 

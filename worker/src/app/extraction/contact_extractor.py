@@ -12,6 +12,11 @@ from app.extraction.models import (
     ExtractionEvidence,
     TexCorpus,
 )
+from app.source_safety import (
+    contains_email_like_text,
+    redact_email_like_tokens,
+    truncate_utf16,
+)
 
 _COMMAND_START = re.compile(r"\\([A-Za-z@]+)\*?\s*(?:\[[^\]]*\]\s*)?\{")
 _EMAIL = re.compile(
@@ -26,6 +31,7 @@ _AFFILIATION_COMMANDS = {"affiliation", "affil", "address", "institute"}
 _AUTHOR_METADATA_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {
     "thanks",
     "corref",
+    "ieeeauthorrefmark",
     "ieeemembership",
     "ieeecompsocitemizethanks",
 }
@@ -166,7 +172,7 @@ def extract_contacts(
                     display=email,
                     domain=domain,
                     example=example,
-                    path=tex_file.relative_path,
+                    path=_redact_source_path(tex_file.relative_path),
                     position=match.start(),
                     line=normalized_front.count("\n", 0, match.start()) + 1,
                     context=surrounding,
@@ -323,7 +329,11 @@ def _nearby_affiliations(
         and item.start - author.end < 1000
         and item.name.lower() in _AFFILIATION_COMMANDS
     ]
-    values = tuple(value for item in following[:5] if (value := _plain_tex(item.argument)))
+    values = tuple(
+        value
+        for item in following[:5]
+        if (value := _safe_affiliation(item.argument))
+    )
     return tuple(dict.fromkeys(values))
 
 
@@ -338,8 +348,8 @@ def _ieee_affiliations(
             or command.end > end
         ):
             continue
-        without_email = _EMAIL.sub("", _tex_unescape(command.argument))
-        value = _plain_tex(without_email)
+        without_refmarks = _without_commands(command.argument, {"ieeeauthorrefmark"})
+        value = _safe_affiliation(without_refmarks)
         if value:
             values.append(value)
     return tuple(dict.fromkeys(values))
@@ -347,6 +357,18 @@ def _ieee_affiliations(
 
 def _tex_unescape(value: str) -> str:
     return re.sub(r"\\([_#$%&{}])", r"\1", unicodedata.normalize("NFKC", value))
+
+
+def _safe_affiliation(value: str) -> str:
+    scrubbed = redact_email_like_tokens(_tex_unescape(value), "")
+    return _plain_tex(scrubbed).strip(" ,;:")
+
+
+def _redact_source_path(value: str) -> str:
+    return "/".join(
+        "redacted" if contains_email_like_text(part) else part
+        for part in value.split("/")
+    )
 
 
 def _normalize_email(raw: str) -> tuple[str, str, bool] | None:
@@ -472,13 +494,5 @@ def _line_context(text: str, start: int, end: int) -> str:
 
 
 def _mask_context(context: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        normalized = _normalize_email(match.group(1))
-        if normalized is None:
-            return "***"
-        email, domain, _ = normalized
-        local = email.rsplit("@", 1)[0]
-        prefix = local[:2] if len(local) > 1 else local[:1]
-        return f"{prefix}***@{domain}"
-
-    return _EMAIL.sub(replace, _tex_unescape(context))[:600]
+    redacted = redact_email_like_tokens(_tex_unescape(context), "[email redacted]")
+    return truncate_utf16(redacted, 600)

@@ -26,6 +26,10 @@
 - [x] Split comma-separated authors only when canonical names equal ordered `metadataAuthors`.
 - [x] Validate legal local parts and strict LDH/IDNA domains.
 - [x] Revalidate canonical author merges and all outbound contract limits.
+- [x] Remove IEEE author reference marks without promoting them into names or affiliations.
+- [x] Irreversibly redact email-like author-adjacent text from affiliations, evidence context, and source paths; reject residual at-signs in worker and backend public fields.
+- [x] Match Java UTF-16 length limits for every Source result string boundary.
+- [x] Keep downloader timeout/retry semantics outside the bounded parsing deadline.
 - [x] Convert only known Pydantic content-boundary errors to `SOURCE_CONTENT_INVALID`; let shape and infrastructure errors retry.
 - [x] Verify a failed paper does not stop the following target.
 
@@ -35,6 +39,7 @@
 - [x] Add `metadataAuthors` to the worker target contract.
 - [x] Give author arrays a 256 KiB aggregate UTF-8 JSON budget, including or omitting each paper's list as a whole.
 - [x] Reject a serialized command envelope over 768 KiB before creating the job/outbox row.
+- [x] Convert a Source result over 768 KiB into a bounded item failure before Kafka publication.
 - [x] Cover the 100-paper, 500-author, 300-character boundary and ordinary small lists.
 
 ## Task 3: Make long and retried commands resumable

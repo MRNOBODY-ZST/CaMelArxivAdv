@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from enum import StrEnum
 
 from pydantic import (
@@ -12,16 +11,14 @@ from pydantic import (
     model_validator,
 )
 
+from app.source_safety import contains_email_like_text, unsafe_bounded_text
+
 _LOCAL_PART = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}")
 _DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 def _unsafe_text(value: str, maximum_length: int) -> bool:
-    return (
-        not value.strip()
-        or len(value) > maximum_length
-        or any(unicodedata.category(character) == "Cc" for character in value)
-    )
+    return unsafe_bounded_text(value, maximum_length)
 
 
 class Confidence(StrEnum):
@@ -55,14 +52,17 @@ class ExtractedAuthor(ExtractionModel):
     @field_validator("name")
     @classmethod
     def safe_name(cls, value: str) -> str:
-        if _unsafe_text(value, 300):
+        if _unsafe_text(value, 300) or contains_email_like_text(value):
             raise ValueError("Extracted author name is unsafe")
         return value
 
     @field_validator("affiliations")
     @classmethod
     def safe_affiliations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if any(_unsafe_text(value, 2000) for value in values):
+        if any(
+            _unsafe_text(value, 2000) or contains_email_like_text(value)
+            for value in values
+        ):
             raise ValueError("Extracted author affiliation is unsafe")
         return values
 
@@ -82,9 +82,11 @@ class ExtractionEvidence(ExtractionModel):
             or "\\" in self.source_relative_path
             or any(part in {"", ".", ".."} for part in parts)
             or _unsafe_text(self.source_relative_path, 500)
+            or contains_email_like_text(self.source_relative_path)
             or re.fullmatch(r"[A-Z0-9_]{1,120}", self.rule_name) is None
             or re.fullmatch(r"[A-Z0-9_]{1,120}", self.logical_location) is None
             or _unsafe_text(self.masked_context, 600)
+            or contains_email_like_text(self.masked_context)
         ):
             raise ValueError("Extraction evidence is unsafe")
         return self
@@ -138,6 +140,8 @@ class ExtractionDocument(ExtractionModel):
     @field_validator("document_class")
     @classmethod
     def safe_document_class(cls, value: str | None) -> str | None:
-        if value is not None and _unsafe_text(value, 100):
+        if value is not None and (
+            _unsafe_text(value, 100) or contains_email_like_text(value)
+        ):
             raise ValueError("Document class is unsafe")
         return value

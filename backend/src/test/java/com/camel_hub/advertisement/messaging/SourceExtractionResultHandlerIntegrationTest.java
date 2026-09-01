@@ -67,7 +67,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 	@Test
 	void encryptsAndPersistsExtractionResultAtomicallyAndDeduplicatesReplay() {
 		UUID messageId = UUID.randomUUID();
-		String message = resultMessage(messageId, "al***@university.edu");
+		String message = resultMessage(messageId, "[email redacted]");
 
 		var first = handler.handle(message).block();
 		var replay = handler.handle(message).block();
@@ -88,7 +88,8 @@ class SourceExtractionResultHandlerIntegrationTest {
 		assertThat(text("SELECT raw_name FROM paper_authors WHERE paper_id = '" + PAPER + "'"))
 				.isEqualTo("Alice Metadata");
 		assertThat(text("SELECT masked_context FROM extraction_evidence LIMIT 1"))
-				.contains("al***@university.edu").doesNotContain("alice@university.edu");
+				.isEqualTo("Corresponding author: [email redacted]")
+				.doesNotContain("alice@university.edu", "@");
 		assertThat(text("SELECT details::text FROM job_events WHERE event_type = 'ARXIV_EXTRACTION_RESULT'"))
 				.doesNotContain("alice", "university.edu");
 		assertThat(databaseClient.sql("""
@@ -114,7 +115,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 		assertThat(contacts.find(contact.id()).block().paperId()).isEqualTo(PAPER);
 		assertThat(contacts.evidence(contact.mappingId()).collectList().block())
 				.singleElement().satisfies(item -> assertThat(item.maskedContext())
-						.isEqualTo("Corresponding author: al***@university.edu"));
+						.isEqualTo("Corresponding author: [email redacted]"));
 		assertThat(contacts.updateVerification(
 				contact.id(), contact.mappingId(), 0, "CONFIRMED", ACTOR).block()).isTrue();
 		assertThat(contacts.updateVerification(
@@ -157,7 +158,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
 				.isZero();
 
-		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
 
 		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo("SUCCEEDED");
@@ -200,7 +201,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo(2);
 
-		String inflatedItem = resultMessage(UUID.randomUUID(), "al***@university.edu")
+		String inflatedItem = resultMessage(UUID.randomUUID(), "[email redacted]")
 				.replace("\"processedCount\":1,", "\"processedCount\":2,")
 				.replace("\"successCount\":1,", "\"successCount\":2,")
 				.replace("\"totalCount\":1,", "\"totalCount\":2,");
@@ -312,7 +313,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 				Clock.fixed(now, ZoneOffset.UTC));
 
 		assertThat(reconciliation.reconcileNow().block()).isZero();
-		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
 
 		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo("CANCELED");
@@ -328,7 +329,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 
 	@Test
 	void sourceCompletionUsesPersistedItemTotalsInsteadOfInflatedProgress() {
-		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
 		databaseClient.sql("""
 				UPDATE jobs SET processed_count = 52, success_count = 52, total_count = 100,
 				  progress_percent = 52 WHERE id = :jobId
@@ -486,7 +487,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 				 {"order":2,"name":"Alice Metadata","affiliations":["Example Lab"],
 				  "corresponding":true}],
 				"contacts":""";
-		String message = resultMessage(UUID.randomUUID(), "al***@university.edu")
+		String message = resultMessage(UUID.randomUUID(), "[email redacted]")
 				.replaceFirst("(?s)\"authors\":\\[.*?],\\s*\"contacts\":", sourceAuthors)
 				.replace("\"authorOrder\":1", "\"authorOrder\":2");
 
@@ -504,7 +505,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 
 	@Test
 	void scopesLatestContactMappingToTheFilteredPaper() {
-		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
 		UUID otherPaper = UUID.randomUUID();
 		UUID otherAuthor = UUID.randomUUID();
 		UUID otherPaperAuthor = UUID.randomUUID();
@@ -570,6 +571,40 @@ class SourceExtractionResultHandlerIntegrationTest {
 		assertThat(count("extraction_runs")).isZero();
 		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
 				.isEqualTo("UNKNOWN");
+	}
+
+	@Test
+	void rejectsEmailLikeTextOutsideEncryptedContactFields() {
+		String safe = resultMessage(UUID.randomUUID(), "[email redacted]");
+		var unsafeMessages = java.util.List.of(
+				safe.replace("Alice Example", "alice＠example.edu"),
+				safe.replace("Example Lab", "Example Lab; 用户@example.org"),
+				safe.replace("paper/main.tex", "paper/bob@example.org.tex"),
+				resultMessage(UUID.randomUUID(), "Contact josé@example.org"),
+				safe.replace("TAR_GZIP", "alice@example.edu"),
+				safe.replace("article", "用户@example.org"));
+
+		for (String unsafe : unsafeMessages) {
+			assertThatThrownBy(() -> handler.handle(unsafe).block())
+					.isInstanceOf(IllegalArgumentException.class);
+		}
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+		assertThat(count("extraction_evidence")).isZero();
+	}
+
+	@Test
+	void rejectsEmailLikeJobErrorSummaryWithoutAProcessedMarker() {
+		String unsafe = failureMessage(UUID.randomUUID()).replace(
+				"Worker\\u0001stopped before the source batch completed",
+				"Contact alice@example.edu");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
 	}
 
 	private String resultMessage(UUID messageId, String context) {

@@ -42,7 +42,78 @@ def test_single_author_direct_email_is_high_confidence_and_evidence_is_masked(
     assert contact.confidence is Confidence.HIGH
     assert contact.corresponding is True
     assert "alice@example.edu" not in contact.evidence[0].masked_context
-    assert "al***@example.edu" in contact.evidence[0].masked_context
+    assert "[email redacted]" in contact.evidence[0].masked_context
+    assert "@" not in contact.evidence[0].masked_context
+
+
+def test_evidence_redacts_every_email_like_token_on_the_source_line(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r'''\documentclass{article}
+\author{Alice Example}
+\thanks{Contact alice@example.edu, josé@example.org, "bob"@example.net, 用户@example.cn}
+\begin{document}\maketitle
+''',
+    )
+
+    context = result.contacts[0].evidence[0].masked_context
+    assert "@" not in context
+    assert "alice" not in context
+    assert "josé" not in context
+    assert "bob" not in context
+    assert "用户" not in context
+
+
+def test_affiliations_drop_ascii_unicode_and_quoted_email_like_tokens(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r'''\documentclass{article}
+\author{Alice Example}
+\affil{Example University;alice@example.edu;josé@example.org;"bob"@example.net}
+\begin{document}\maketitle
+''',
+    )
+
+    assert result.authors[0].affiliations == ("Example University",)
+    assert "@" not in result.authors[0].affiliations[0]
+
+
+def test_email_like_author_name_is_rejected_instead_of_becoming_public_data(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="author name"):
+        extract(
+            tmp_path,
+            r'''\documentclass{article}
+\author{用户@example.org}
+\begin{document}\maketitle
+''',
+        )
+
+
+def test_email_like_source_filename_is_irreversibly_redacted(tmp_path: Path) -> None:
+    corpus = TexCorpus(
+        root_path="/bounded/source",
+        document_class="article",
+        files=(
+            TexFile(
+                relative_path="authors/alice@example.edu.tex",
+                text=(
+                    "\\author{Alice Example}\\email{alice@example.edu}"
+                    "\\begin{document}\\maketitle"
+                ),
+            ),
+        ),
+    )
+
+    evidence = extract_contacts(corpus).contacts[0].evidence[0]
+
+    assert evidence.source_relative_path == "authors/redacted"
+    assert "@" not in evidence.source_relative_path
 
 
 def test_equal_author_and_email_lists_map_positionally_at_medium_confidence(
@@ -288,6 +359,41 @@ def test_ieee_membership_metadata_is_removed_before_splitting_named_people(
         tmp_path,
         r"""\documentclass{IEEEtran}
 \author{Alice Smith, \IEEEmembership{Senior Member, IEEE}, and Bob Jones}
+\begin{document}\maketitle
+""",
+        ("Alice Smith", "Bob Jones"),
+    )
+
+    assert [author.name for author in result.authors] == ["Alice Smith", "Bob Jones"]
+
+
+def test_ieee_author_refmarks_are_removed_from_and_names_and_affiliations(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{IEEEtran}
+\author{
+\IEEEauthorblockN{Alice Smith\IEEEauthorrefmark{1} \and
+Bob Jones\IEEEauthorrefmark{2}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1} Lab One}
+\IEEEauthorblockA{\IEEEauthorrefmark{2} Lab Two}}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [author.name for author in result.authors] == ["Alice Smith", "Bob Jones"]
+    assert result.authors[0].affiliations == ("Lab One", "Lab Two")
+    assert result.authors[1].affiliations == ("Lab One", "Lab Two")
+
+
+def test_ieee_author_refmarks_do_not_break_metadata_verified_comma_names(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{IEEEtran}
+\author{Alice Smith\IEEEauthorrefmark{1}, and Bob Jones\IEEEauthorrefmark{2}}
 \begin{document}\maketitle
 """,
         ("Alice Smith", "Bob Jones"),
