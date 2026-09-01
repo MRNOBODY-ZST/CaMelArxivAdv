@@ -90,6 +90,54 @@ async def test_terminal_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_permanent_failure_dead_letters_then_terminalizes_before_commit() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+
+    async def on_permanent_failure() -> None:
+        events.append("terminal")
+
+    await settle_delivery(
+        FakeRecord(headers=[]),  # type: ignore[arg-type]
+        CommandOutcome.DEAD,
+        producer,  # type: ignore[arg-type]
+        consumer,  # type: ignore[arg-type]
+        retry_topic="camel.arxiv.retry.v1",
+        dead_letter_topic="camel.arxiv.dlt.v1",
+        now_epoch_ms=1_000,
+        on_permanent_failure=on_permanent_failure,
+    )
+
+    assert events == ["publish:camel.arxiv.dlt.v1", "terminal", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_callback_failure_does_not_commit() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+
+    async def on_permanent_failure() -> None:
+        events.append("terminal")
+        raise RuntimeError("result broker unavailable")
+
+    with pytest.raises(RuntimeError, match="result broker unavailable"):
+        await settle_delivery(
+            FakeRecord(headers=[]),  # type: ignore[arg-type]
+            CommandOutcome.DEAD,
+            producer,  # type: ignore[arg-type]
+            consumer,  # type: ignore[arg-type]
+            retry_topic="camel.arxiv.retry.v1",
+            dead_letter_topic="camel.arxiv.dlt.v1",
+            now_epoch_ms=1_000,
+            on_permanent_failure=on_permanent_failure,
+        )
+
+    assert events == ["publish:camel.arxiv.dlt.v1", "terminal"]
+
+
+@pytest.mark.asyncio
 async def test_retry_exhaustion_dead_letters_instead_of_looping_forever() -> None:
     events: list[str] = []
     producer = FakeProducer(events)

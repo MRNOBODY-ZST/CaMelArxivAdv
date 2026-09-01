@@ -69,6 +69,7 @@ async def settle_delivery(
     now_epoch_ms: int | None = None,
     retry_delay_ms: int = 30_000,
     on_retry_exhausted: Callable[[], Awaitable[object]] | None = None,
+    on_permanent_failure: Callable[[], Awaitable[object]] | None = None,
 ) -> None:
     if outcome is CommandOutcome.ACK:
         await _commit(consumer, incoming)
@@ -82,6 +83,8 @@ async def settle_delivery(
             key=incoming.key,
             headers=[*headers.items(), ("failureCategory", b"PERMANENT_FAILURE")],
         )
+        if on_permanent_failure is not None:
+            await on_permanent_failure()
         await _commit(consumer, incoming)
         return
     if outcome is CommandOutcome.RETRY and retry_count >= 5:

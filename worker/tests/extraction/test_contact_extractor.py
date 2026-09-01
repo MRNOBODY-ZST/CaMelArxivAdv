@@ -3,15 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from app.extraction.contact_extractor import extract_contacts
-from app.extraction.models import Confidence
+from app.extraction.models import Confidence, ExtractionDocument, TexCorpus, TexFile
 from app.extraction.tex_discovery import discover_tex
 
 
-def extract(tmp_path: Path, source: str):  # type: ignore[no-untyped-def]
+def extract(
+    tmp_path: Path,
+    source: str,
+    metadata_authors: tuple[str, ...] = (),
+) -> ExtractionDocument:
     (tmp_path / "main.tex").write_text(source, encoding="utf-8")
-    return extract_contacts(discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20))
+    return extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20),
+        metadata_authors,
+    )
 
 
 def test_single_author_direct_email_is_high_confidence_and_evidence_is_masked(
@@ -121,6 +129,13 @@ for Computer Science, Artificial Intelligence and Technology, Sofia, Bulgaria}.
 Contact: \texttt{jinjin.gu@insait.ai}.}}
 \begin{document}\maketitle
 """,
+        (
+            "Xinlei Wang",
+            "Mingtian Tan",
+            "Jing Qiu",
+            "Junhua Zhao",
+            "Jinjin Gu",
+        ),
     )
 
     assert [author.name for author in result.authors] == [
@@ -159,6 +174,126 @@ def test_author_formatting_commands_remain_after_metadata_removal(tmp_path: Path
     )
 
     assert [author.name for author in result.authors] == ["Alice Example", "Bob Example"]
+
+
+def test_math_wrapped_email_drops_tex_delimiters_before_domain_validation(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\author{Alice Example}
+\thanks{Contact: \texttt{$alice@mails.tsinghua.edu.cn$}}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "alice@mails.tsinghua.edu.cn"
+    ]
+    assert result.contacts[0].domain == "mails.tsinghua.edu.cn"
+    assert "$" not in result.contacts[0].evidence[0].masked_context
+
+
+def test_production_shaped_math_wrapped_contacts_are_backend_compatible(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\author{Alice Example}
+\thanks{$<$lin-jf21@mails.tsinghua.edu.cn$>$,
+$<$wangyuxu22@mails.tsinghua.edu.cn$>$,
+$<$wujialong0229@gmail.com$>$, peizhyi@tsinghua.edu.cn}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "lin-jf21@mails.tsinghua.edu.cn",
+        "wangyuxu22@mails.tsinghua.edu.cn",
+        "wujialong0229@gmail.com",
+        "peizhyi@tsinghua.edu.cn",
+    ]
+    assert all("$" not in contact.domain for contact in result.contacts)
+
+
+def test_unpaired_math_delimiter_is_rejected_but_legal_dollar_local_is_kept(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\author{Alice Example}
+\email{bob@uni.edu$}
+\email{$tag@uni.edu}
+\begin{document}\maketitle
+""",
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == ["$tag@uni.edu"]
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "bad_domain.edu",
+        "bad$domain.edu",
+        "bad/domain.edu",
+        "bad+domain.edu",
+        "bad=domain.edu",
+        "bad!domain.edu",
+    ],
+)
+def test_non_ldh_domain_characters_are_rejected(tmp_path: Path, domain: str) -> None:
+    result = extract(
+        tmp_path,
+        "\\documentclass{article}\n"
+        f"\\email{{alice@{domain}}}\n"
+        "\\begin{document}\\maketitle\n",
+    )
+
+    assert result.contacts == ()
+
+
+@pytest.mark.parametrize(
+    "author_text",
+    [
+        "Alice Smith, Jr., and Bob Jones",
+        "Center for AI, University of Example, and Research Institute",
+        (
+            "Applied Intelligence Initiative, Trusted Systems Initiative, "
+            "and Responsible Computing Initiative"
+        ),
+    ],
+)
+def test_ambiguous_comma_author_text_is_not_persisted_as_false_people(
+    tmp_path: Path,
+    author_text: str,
+) -> None:
+    result = extract(
+        tmp_path,
+        "\\documentclass{article}\n"
+        f"\\author{{{author_text}}}\n"
+        "\\begin{document}\\maketitle\n",
+    )
+
+    assert result.authors == ()
+
+
+def test_ieee_membership_metadata_is_removed_before_splitting_named_people(
+    tmp_path: Path,
+) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{IEEEtran}
+\author{Alice Smith, \IEEEmembership{Senior Member, IEEE}, and Bob Jones}
+\begin{document}\maketitle
+""",
+        ("Alice Smith", "Bob Jones"),
+    )
+
+    assert [author.name for author in result.authors] == ["Alice Smith", "Bob Jones"]
 
 
 def test_body_and_bibliography_addresses_are_not_promoted_to_contacts(tmp_path: Path) -> None:
@@ -238,3 +373,24 @@ def test_canonicalizes_repeated_authors_across_tex_files_and_remaps_contacts(
     assert result.authors[0].affiliations == ("Reliability Lab",)
     assert result.authors[1].affiliations == ("Reliability Lab",)
     assert [item.author_order for item in result.contacts] == [1, 2]
+
+
+def test_canonical_author_merge_revalidates_affiliation_count() -> None:
+    corpus = TexCorpus(
+        root_path="/bounded/source",
+        document_class="article",
+        files=tuple(
+            TexFile(
+                relative_path=f"author-{index}.tex",
+                text=(
+                    "\\author{Alice Example}\n"
+                    f"\\affil{{Reliability Laboratory {index}}}\n"
+                    "\\begin{document}\n"
+                ),
+            )
+            for index in range(101)
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="affiliations"):
+        extract_contacts(corpus)

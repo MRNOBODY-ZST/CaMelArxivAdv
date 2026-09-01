@@ -94,7 +94,7 @@ class FakeStore:
         self.source_progress: SourceProgress | None = None
 
     async def is_processed(self, key: str) -> bool:
-        return self.duplicate
+        return self.duplicate or key in self.marked
 
     async def mark_processed(self, key: str) -> None:
         self.marked.append(key)
@@ -116,8 +116,9 @@ class FakeStore:
 
     async def save_source_progress(
         self, idempotency_key: str, progress: SourceProgress
-    ) -> None:
+    ) -> bool:
         self.source_progress = progress
+        return True
 
     async def clear_source_progress(self, idempotency_key: str) -> None:
         self.source_progress = None
@@ -262,8 +263,9 @@ async def test_mid_loop_cancel_is_acked_without_fetching_or_retrying() -> None:
 @pytest.mark.asyncio
 async def test_retry_exhaustion_failure_is_deterministic_and_bounded() -> None:
     publisher = FakePublisher()
+    store = FakeStore()
     processor = ArxivCommandProcessor(
-        FakeLegacyClient(), FakeOaiClient(), publisher, FakeStore(), batch_size=50
+        FakeLegacyClient(), FakeOaiClient(), publisher, store, batch_size=50
     )
     body = command_body()
 
@@ -281,6 +283,124 @@ async def test_retry_exhaustion_failure_is_deterministic_and_bounded() -> None:
         == "Worker exhausted retries after an unexpected processing failure"
     )
     assert "2510.13029" not in first.model_dump_json(by_alias=True)
+    assert store.marked == ["import:test", "import:test"]
+    assert await processor.process(body) is CommandOutcome.ACK
+
+
+@pytest.mark.asyncio
+async def test_parseable_poison_command_gets_a_bounded_terminal_failure() -> None:
+    publisher = FakePublisher()
+    store = FakeStore()
+    processor = ArxivCommandProcessor(
+        FakeLegacyClient(), FakeOaiClient(), publisher, store, batch_size=50
+    )
+    body = (
+        MessageEnvelope[dict[str, object]](
+            message_id=uuid4(),
+            type=MessageType.ARXIV_IMPORT_METADATA,
+            job_id=uuid4(),
+            idempotency_key="import:invalid",
+            trace_id="0123456789abcdef",
+            payload={"mode": "SELECTED", "arxivIds": ["2608.00001"], "maxPapers": 0},
+        )
+        .model_dump_json(by_alias=True)
+        .encode()
+    )
+
+    assert await processor.process(body) is CommandOutcome.DEAD
+    await processor.publish_permanent_failure(body)
+
+    failure = publisher.messages[-1]
+    assert failure.type is MessageType.ARXIV_JOB_FAILED
+    assert failure.payload.error_code == "WORKER_COMMAND_INVALID"
+    assert failure.payload.error_summary == "Worker rejected an invalid arXiv job command"
+    assert store.marked == ["import:invalid"]
+
+
+@pytest.mark.asyncio
+async def test_newer_contract_poison_still_terminalizes_the_identified_job() -> None:
+    publisher = FakePublisher()
+    store = FakeStore()
+    processor = ArxivCommandProcessor(
+        FakeLegacyClient(), FakeOaiClient(), publisher, store, batch_size=50
+    )
+    job_id = uuid4()
+    body = (
+        "{"
+        '"version":2,'
+        f'"messageId":"{uuid4()}",'
+        '"type":"ARXIV_IMPORT_METADATA",'
+        f'"jobId":"{job_id}",'
+        '"idempotencyKey":"import:newer-contract",'
+        '"traceId":"invalid trace",'
+        '"occurredAt":"2026-08-05T00:00:00Z",'
+        '"payload":{"mode":"SELECTED"},'
+        '"futureField":true'
+        "}"
+    ).encode()
+
+    assert await processor.process(body) is CommandOutcome.DEAD
+    await processor.publish_permanent_failure(body)
+
+    failure = publisher.messages[-1]
+    assert failure.job_id == job_id
+    assert failure.payload.error_code == "WORKER_COMMAND_INVALID"
+    assert store.marked == ["import:newer-contract"]
+
+
+@pytest.mark.asyncio
+async def test_future_arxiv_command_type_still_terminalizes_the_identified_job() -> None:
+    publisher = FakePublisher()
+    store = FakeStore()
+    processor = ArxivCommandProcessor(
+        FakeLegacyClient(), FakeOaiClient(), publisher, store, batch_size=50
+    )
+    job_id = uuid4()
+    body = (
+        "{"
+        '"version":1,'
+        f'"messageId":"{uuid4()}",'
+        '"type":"ARXIV_SYNC_FUTURE_SOURCE",'
+        f'"jobId":"{job_id}",'
+        '"idempotencyKey":"future:command",'
+        '"traceId":"0123456789abcdef",'
+        '"payload":{}'
+        "}"
+    ).encode()
+
+    assert await processor.process(body) is CommandOutcome.DEAD
+    await processor.publish_permanent_failure(body)
+
+    assert publisher.messages[-1].job_id == job_id
+    assert publisher.messages[-1].payload.status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_deep_poison_payload_cannot_bypass_terminal_failure_callback() -> None:
+    publisher = FakePublisher()
+    store = FakeStore()
+    processor = ArxivCommandProcessor(
+        FakeLegacyClient(), FakeOaiClient(), publisher, store, batch_size=50
+    )
+    job_id = uuid4()
+    nested_payload = "[" * 5_000 + "null" + "]" * 5_000
+    body = (
+        "{"
+        '"version":1,'
+        f'"messageId":"{uuid4()}",'
+        '"type":"ARXIV_IMPORT_METADATA",'
+        f'"jobId":"{job_id}",'
+        '"idempotencyKey":"deep:command",'
+        '"traceId":"0123456789abcdef",'
+        f'"payload":{nested_payload}'
+        "}"
+    ).encode()
+
+    assert await processor.process(body) is CommandOutcome.DEAD
+    await processor.publish_permanent_failure(body)
+
+    assert publisher.messages[-1].job_id == job_id
+    assert publisher.messages[-1].payload.error_code == "WORKER_COMMAND_INVALID"
 
 
 def command_body() -> bytes:

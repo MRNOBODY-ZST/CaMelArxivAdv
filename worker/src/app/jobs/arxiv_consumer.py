@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Literal, Protocol
+from json.decoder import scanstring  # type: ignore[attr-defined]
+from typing import Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -76,7 +80,7 @@ class JobStore(Protocol):
 
     async def save_source_progress(
         self, idempotency_key: str, progress: SourceProgress
-    ) -> None: ...
+    ) -> bool: ...
 
     async def clear_source_progress(self, idempotency_key: str) -> None: ...
 
@@ -86,6 +90,27 @@ class CommandOutcome(StrEnum):
     DEFER = "DEFER"
     RETRY = "RETRY"
     DEAD = "DEAD"
+
+
+_COMMAND_TYPES = {
+    MessageType.ARXIV_IMPORT_METADATA,
+    MessageType.ARXIV_SYNC_OAI,
+    MessageType.ARXIV_SYNC_TAXONOMY,
+    MessageType.ARXIV_FETCH_AND_PARSE_SOURCE,
+    MessageType.ARXIV_REEXTRACT_CONTACTS,
+}
+_SOURCE_COMMAND_TYPES = {
+    MessageType.ARXIV_FETCH_AND_PARSE_SOURCE,
+    MessageType.ARXIV_REEXTRACT_CONTACTS,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _FailureContext:
+    job_id: UUID
+    idempotency_key: str
+    trace_id: str
+    source_command: bool
 
 
 class ArxivCommandProcessor:
@@ -263,27 +288,56 @@ class ArxivCommandProcessor:
             envelope = MessageEnvelope[dict[str, object]].model_validate_json(body)
         except (ValidationError, UnicodeDecodeError, ValueError):
             return
-        if envelope.job_id is None or envelope.type not in {
-            MessageType.ARXIV_IMPORT_METADATA,
-            MessageType.ARXIV_SYNC_OAI,
-            MessageType.ARXIV_SYNC_TAXONOMY,
-            MessageType.ARXIV_FETCH_AND_PARSE_SOURCE,
-            MessageType.ARXIV_REEXTRACT_CONTACTS,
-        }:
+        context = _failure_context(envelope)
+        if context is None:
             return
-        await self._publish(
-            envelope,
-            MessageType.ARXIV_JOB_FAILED,
-            ResultPayload(
-                status="FAILED",
-                stage="FAILED",
-                error_code="WORKER_RETRY_EXHAUSTED",
-                error_summary=(
-                    "Worker exhausted retries after an unexpected processing failure"
-                ),
+        await self._publish_terminal_failure(
+            context,
+            error_code="WORKER_RETRY_EXHAUSTED",
+            error_summary=(
+                "Worker exhausted retries after an unexpected processing failure"
             ),
-            999_997,
         )
+
+    async def publish_permanent_failure(self, body: bytes) -> None:
+        context = _recover_command_context(body)
+        if context is None:
+            return
+        await self._publish_terminal_failure(
+            context,
+            error_code="WORKER_COMMAND_INVALID",
+            error_summary="Worker rejected an invalid arXiv job command",
+        )
+
+    async def _publish_terminal_failure(
+        self,
+        context: _FailureContext,
+        *,
+        error_code: str,
+        error_summary: str,
+    ) -> None:
+        message_type = MessageType.ARXIV_JOB_FAILED
+        sequence = 999_997
+        await self._publisher.publish(
+            MessageEnvelope[ResultPayload](
+                message_id=uuid4(),
+                type=message_type,
+                job_id=context.job_id,
+                idempotency_key=_result_idempotency_key(
+                    context.idempotency_key, message_type, sequence
+                ),
+                trace_id=context.trace_id,
+                payload=ResultPayload(
+                    status="FAILED",
+                    stage="FAILED",
+                    error_code=error_code,
+                    error_summary=error_summary,
+                ),
+            )
+        )
+        await self._store.mark_processed(context.idempotency_key)
+        if context.source_command:
+            await self._store.clear_source_progress(context.idempotency_key)
 
     async def _process_source(
         self,
@@ -354,10 +408,12 @@ class ArxivCommandProcessor:
                 ),
                 index * 2 + 2,
             )
-            await self._store.save_source_progress(
+            advanced = await self._store.save_source_progress(
                 envelope.idempotency_key,
                 SourceProgress(processed, success, skipped, failed),
             )
+            if not advanced:
+                return CommandOutcome.DEFER
         return _SourceSummary(len(command.targets), success, skipped, failed)
 
     async def _process_import(
@@ -562,11 +618,176 @@ class ArxivCommandProcessor:
                 message_id=uuid4(),
                 type=message_type,
                 job_id=command.job_id,
-                idempotency_key=f"{command.idempotency_key}:result:{message_type}:{sequence}",
+                idempotency_key=_result_idempotency_key(
+                    command.idempotency_key, message_type, sequence
+                ),
                 trace_id=command.trace_id,
                 payload=payload,
             )
         )
+
+
+def _recover_command_context(body: bytes) -> _FailureContext | None:
+    if not body or len(body) > 10 * 1024 * 1024:
+        return None
+    try:
+        raw = _top_level_json_strings(body)
+        raw_type = raw.get("type")
+        if raw_type is None:
+            return None
+        try:
+            message_type = MessageType(raw_type)
+        except ValueError:
+            if re.fullmatch(r"ARXIV_[A-Z0-9_]{1,70}", raw_type) is None:
+                return None
+            message_type = None
+        if message_type is not None and message_type not in _COMMAND_TYPES:
+            return None
+        raw_job_id = raw.get("jobId")
+        if raw_job_id is None:
+            return None
+        job_id = UUID(raw_job_id)
+    except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        return None
+    raw_key = raw.get("idempotencyKey")
+    idempotency_key = (
+        raw_key
+        if raw_key is not None
+        and 1 <= len(raw_key) <= 120
+        and not any(ord(character) < 32 or ord(character) == 127 for character in raw_key)
+        else f"arxiv-command:{job_id}"
+    )
+    raw_trace = raw.get("traceId")
+    trace_id = (
+        raw_trace
+        if raw_trace is not None
+        and re.fullmatch(r"[A-Za-z0-9_-]{8,64}", raw_trace) is not None
+        else job_id.hex
+    )
+    return _FailureContext(
+        job_id=job_id,
+        idempotency_key=idempotency_key,
+        trace_id=trace_id,
+        source_command=message_type in _SOURCE_COMMAND_TYPES,
+    )
+
+
+def _failure_context(
+    envelope: MessageEnvelope[dict[str, object]],
+) -> _FailureContext | None:
+    if envelope.job_id is None or envelope.type not in _COMMAND_TYPES:
+        return None
+    return _FailureContext(
+        job_id=envelope.job_id,
+        idempotency_key=envelope.idempotency_key,
+        trace_id=envelope.trace_id,
+        source_command=envelope.type in _SOURCE_COMMAND_TYPES,
+    )
+
+
+def _result_idempotency_key(
+    command_key: str, message_type: MessageType, sequence: int
+) -> str:
+    suffix = f":result:{message_type}:{sequence}"
+    maximum_base = 200 - len(suffix)
+    if len(command_key) <= maximum_base:
+        base = command_key
+    else:
+        digest = hashlib.sha256(command_key.encode("utf-8")).hexdigest()[:16]
+        base = f"{command_key[:maximum_base - 17]}:{digest}"
+    return f"{base}{suffix}"
+
+
+def _top_level_json_strings(body: bytes) -> dict[str, str]:
+    text = body.decode("utf-8", errors="strict")
+    cursor = _skip_json_space(text, 0)
+    if cursor >= len(text) or text[cursor] != "{":
+        raise ValueError("Command envelope is not a JSON object")
+    cursor += 1
+    wanted = {"type", "jobId", "idempotencyKey", "traceId"}
+    values: dict[str, str] = {}
+    while True:
+        cursor = _skip_json_space(text, cursor)
+        if cursor >= len(text):
+            raise ValueError("Command envelope is incomplete")
+        if text[cursor] == "}":
+            cursor += 1
+            break
+        name, cursor = _scan_json_string(text, cursor)
+        cursor = _skip_json_space(text, cursor)
+        if cursor >= len(text) or text[cursor] != ":":
+            raise ValueError("Command envelope field has no value")
+        cursor = _skip_json_space(text, cursor + 1)
+        if cursor >= len(text):
+            raise ValueError("Command envelope field is incomplete")
+        if text[cursor] == '"':
+            value, cursor = _scan_json_string(text, cursor)
+            if name in wanted:
+                if name in values:
+                    raise ValueError("Command envelope field is duplicated")
+                values[name] = value
+        else:
+            cursor = _skip_json_value(text, cursor)
+        cursor = _skip_json_space(text, cursor)
+        if cursor >= len(text):
+            raise ValueError("Command envelope is incomplete")
+        if text[cursor] == ",":
+            cursor += 1
+            continue
+        if text[cursor] == "}":
+            cursor += 1
+            break
+        raise ValueError("Command envelope has an invalid separator")
+    if _skip_json_space(text, cursor) != len(text):
+        raise ValueError("Command envelope has trailing data")
+    return values
+
+
+def _scan_json_string(text: str, cursor: int) -> tuple[str, int]:
+    if cursor >= len(text) or text[cursor] != '"':
+        raise ValueError("Expected a JSON string")
+    return cast(tuple[str, int], scanstring(text, cursor + 1, True))
+
+
+def _skip_json_space(text: str, cursor: int) -> int:
+    while cursor < len(text) and text[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor
+
+
+def _skip_json_value(text: str, cursor: int) -> int:
+    if text[cursor] == '"':
+        return _scan_json_string(text, cursor)[1]
+    if text[cursor] in "[{":
+        closing = {"[": "]", "{": "}"}
+        stack = [closing[text[cursor]]]
+        cursor += 1
+        while stack:
+            if cursor >= len(text) or len(stack) > 100_000:
+                raise ValueError("Command envelope nesting is invalid")
+            character = text[cursor]
+            if character == '"':
+                _, cursor = _scan_json_string(text, cursor)
+            elif character in closing:
+                stack.append(closing[character])
+                cursor += 1
+            elif character in "]}":
+                if character != stack.pop():
+                    raise ValueError("Command envelope nesting is invalid")
+                cursor += 1
+            else:
+                cursor += 1
+        return cursor
+    end = cursor
+    while end < len(text) and text[end] not in ",}":
+        end += 1
+    primitive = text[cursor:end].strip()
+    if re.fullmatch(
+        r"(?:null|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)",
+        primitive,
+    ) is None:
+        raise ValueError("Command envelope primitive is invalid")
+    return cursor + len(text[cursor:end].rstrip())
 
 
 def _paper_payload(paper: ArxivMetadata) -> dict[str, object]:

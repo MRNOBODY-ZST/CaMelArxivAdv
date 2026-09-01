@@ -99,11 +99,12 @@ class Store:
 
     async def save_source_progress(
         self, idempotency_key: str, progress: SourceProgress
-    ) -> None:
+    ) -> bool:
         self.saved_source_progress.append(progress)
         self.source_progress = progress
         if self.events is not None:
             self.events.append("save-checkpoint")
+        return True
 
     async def clear_source_progress(self, idempotency_key: str) -> None:
         self.cleared_source_progress.append(idempotency_key)
@@ -343,6 +344,41 @@ class FailingPublisher(Publisher):
         if message.type is self.fail_type:
             raise RuntimeError(f"failed to publish {message.type.value}")
         await super().publish(message)
+
+
+class SupersededCheckpointStore(Store):
+    async def save_source_progress(
+        self, idempotency_key: str, progress: SourceProgress
+    ) -> bool:
+        self.saved_source_progress.append(progress)
+        return False
+
+
+@pytest.mark.asyncio
+async def test_superseded_source_processor_defers_without_terminal_or_global_marker() -> None:
+    publisher = Publisher()
+    store = SupersededCheckpointStore()
+    runner = Runner(("SUCCEEDED", "SUCCEEDED"))
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), publisher, store, batch_size=50, source_runner=runner
+    )
+
+    outcome = await processor.process(
+        command(
+            [
+                {"paperId": str(uuid4()), "arxivId": "2608.00001"},
+                {"paperId": str(uuid4()), "arxivId": "2608.00002"},
+            ],
+            "source:superseded",
+        )
+    )
+
+    assert outcome is CommandOutcome.DEFER
+    assert len(runner.targets) == 1
+    assert store.marked == []
+    assert MessageType.ARXIV_JOB_COMPLETED not in {
+        message.type for message in publisher.messages
+    }
 
 
 @pytest.mark.asyncio

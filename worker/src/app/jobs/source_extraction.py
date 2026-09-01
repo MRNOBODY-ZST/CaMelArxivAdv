@@ -34,6 +34,17 @@ class SourceContentValidationError(Exception):
     """Source-derived metadata violates a bounded extraction model."""
 
 
+_SOURCE_CONTENT_VALIDATION_TYPES = {
+    "greater_than_equal",
+    "less_than_equal",
+    "string_too_long",
+    "string_too_short",
+    "too_long",
+    "too_short",
+    "value_error",
+}
+
+
 class SourceExtractionRunner:
     def __init__(
         self,
@@ -139,9 +150,21 @@ class SourceExtractionRunner:
                 maximum_include_depth=self._maximum_include_depth,
                 maximum_files=self._limits.maximum_file_count,
             )
-            document = await asyncio.to_thread(extract_contacts, corpus)
+            document = await (
+                asyncio.to_thread(
+                    extract_contacts, corpus, target.metadata_authors
+                )
+                if target.metadata_authors
+                else asyncio.to_thread(extract_contacts, corpus)
+            )
         except ValidationError as exception:
-            raise SourceContentValidationError from exception
+            errors = exception.errors()
+            if errors and all(
+                error["type"] in _SOURCE_CONTENT_VALIDATION_TYPES
+                for error in errors
+            ):
+                raise SourceContentValidationError from exception
+            raise
         authors = tuple(
             SourceAuthor(
                 order=item.order,

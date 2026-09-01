@@ -13,6 +13,33 @@ class AsyncRedisStore(Protocol):
 
     async def delete(self, key: str) -> object: ...
 
+    async def eval(self, script: str, numkeys: int, *values: object) -> object: ...
+
+
+_SOURCE_PROGRESS_TTL_SECONDS = 32 * 24 * 60 * 60
+_SAVE_SOURCE_PROGRESS = """
+local current = redis.call('GET', KEYS[1])
+if current then
+  local next_text, success_text, skipped_text, failed_text = string.match(
+    current,
+    '^{"version":1,"nextIndex":(%d+),"success":(%d+),"skipped":(%d+),"failed":(%d+)}$'
+  )
+  local next_index = tonumber(next_text)
+  local success = tonumber(success_text)
+  local skipped = tonumber(skipped_text)
+  local failed = tonumber(failed_text)
+  local valid = next_index ~= nil and success ~= nil and skipped ~= nil and failed ~= nil
+      and tostring(next_index) == next_text and tostring(success) == success_text
+      and tostring(skipped) == skipped_text and tostring(failed) == failed_text
+      and success + skipped + failed == next_index
+  if valid and next_index >= tonumber(ARGV[2]) then
+    return 0
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+return 1
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class SourceProgress:
@@ -54,12 +81,13 @@ class SourceProgress:
                 return None
             if value["version"] != 1 or type(value["version"]) is not int:
                 return None
-            return cls(
+            progress = cls(
                 next_index=value["nextIndex"],
                 success=value["success"],
                 skipped=value["skipped"],
                 failed=value["failed"],
             )
+            return progress if progress.to_json() == raw else None
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
@@ -95,17 +123,24 @@ class RedisJobStore:
 
     async def source_progress_for(self, idempotency_key: str) -> SourceProgress | None:
         raw = await self._redis.get(self._source_progress_key(idempotency_key))
-        value = raw.decode("utf-8", errors="strict") if isinstance(raw, bytes) else raw
+        try:
+            value = raw.decode("utf-8", errors="strict") if isinstance(raw, bytes) else raw
+        except UnicodeDecodeError:
+            return None
         return SourceProgress.from_json(value) if isinstance(value, str) and value else None
 
     async def save_source_progress(
         self, idempotency_key: str, progress: SourceProgress
-    ) -> None:
-        await self._redis.set(
+    ) -> bool:
+        saved = await self._redis.eval(
+            _SAVE_SOURCE_PROGRESS,
+            1,
             self._source_progress_key(idempotency_key),
             progress.to_json(),
-            ex=7 * 24 * 60 * 60,
+            progress.next_index,
+            _SOURCE_PROGRESS_TTL_SECONDS,
         )
+        return saved == 1
 
     async def clear_source_progress(self, idempotency_key: str) -> None:
         await self._redis.delete(self._source_progress_key(idempotency_key))

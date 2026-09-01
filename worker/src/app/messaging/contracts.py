@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -65,6 +65,19 @@ class SourceTarget(ContractModel):
         pattern=r"^(?:[0-9]{4}\.[0-9]{4,5}|[A-Za-z0-9.-]{1,40}/[0-9]{7})$",
         max_length=48,
     )
+    metadata_authors: tuple[str, ...] = Field(default=(), max_length=500)
+
+    @field_validator("metadata_authors")
+    @classmethod
+    def safe_metadata_authors(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            not value.strip()
+            or len(value) > 300
+            or any(ord(character) < 32 and not character.isspace() for character in value)
+            for value in values
+        ):
+            raise ValueError("Source target metadata authors are invalid")
+        return values
 
 
 class SourceExtractionCommand(ContractModel):

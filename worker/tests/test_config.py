@@ -18,6 +18,13 @@ def test_defaults_enforce_safe_arxiv_rate_and_hosts() -> None:
     assert settings.kafka_bootstrap_servers == "localhost:9092"
     assert settings.jobs_topic == "camel.arxiv.jobs.v1"
     assert settings.consumer_group == "camel-arxiv-workers-v1"
+    assert settings.maximum_poll_interval_ms >= 10 * settings.consumer_poll_interval_seconds * 1_000
+
+
+def test_poll_heartbeat_keeps_a_bounded_group_eviction_backstop() -> None:
+    settings = Settings(consumer_poll_interval_seconds=90)
+
+    assert settings.maximum_poll_interval_ms == 15 * 60 * 1_000
 
 
 def test_rejects_an_arxiv_interval_below_three_seconds() -> None:

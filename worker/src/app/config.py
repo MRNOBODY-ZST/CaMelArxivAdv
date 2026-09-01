@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     retry_topic: str = "camel.arxiv.retry.v1"
     dead_letter_topic: str = "camel.arxiv.dlt.v1"
     retry_delay_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    consumer_poll_interval_seconds: float = Field(default=60.0, ge=5.0, le=300.0)
     command_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     metadata_batch_size: int = Field(default=50, ge=1, le=100)
     heartbeat_interval_seconds: float = Field(default=15.0, ge=5.0, le=300.0)
@@ -59,6 +60,13 @@ class Settings(BaseSettings):
     max_include_depth: int = Field(default=16, ge=1, le=100)
     max_parse_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     temp_root: Path | None = None
+
+    @property
+    def maximum_poll_interval_ms(self) -> int:
+        return max(
+            15 * 60 * 1_000,
+            round(self.consumer_poll_interval_seconds * 10 * 1_000),
+        )
 
 
 class PersonalizationSettings(BaseSettings):

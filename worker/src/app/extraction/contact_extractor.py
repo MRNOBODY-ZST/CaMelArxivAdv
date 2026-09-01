@@ -19,12 +19,14 @@ _EMAIL = re.compile(
     r"([A-Za-z0-9.!#$%&'*+/=?^_`|~-]+@[^\s{}\\<>@,;:]+)",
     re.IGNORECASE,
 )
+_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _AUTHOR_NAMES = {"author", "authors"}
 _EMAIL_COMMANDS = {"email", "ead"}
 _AFFILIATION_COMMANDS = {"affiliation", "affil", "address", "institute"}
 _AUTHOR_METADATA_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {
     "thanks",
     "corref",
+    "ieeemembership",
     "ieeecompsocitemizethanks",
 }
 _STOP_MARKERS = (
@@ -66,7 +68,9 @@ class _Candidate:
     corresponding: bool
 
 
-def extract_contacts(corpus: TexCorpus) -> ExtractionDocument:
+def extract_contacts(
+    corpus: TexCorpus, metadata_authors: tuple[str, ...] = ()
+) -> ExtractionDocument:
     authors: list[ExtractedAuthor] = []
     candidates: list[_Candidate] = []
     for tex_file in corpus.files:
@@ -93,7 +97,7 @@ def extract_contacts(corpus: TexCorpus) -> ExtractionDocument:
                     block_affiliations = _ieee_affiliations(
                         commands, block.end, segment_end
                     )
-                    for raw_name in _author_names(block.argument):
+                    for raw_name in _author_names(block.argument, metadata_authors):
                         name = re.sub(
                             r"^\s*\d+(?:st|nd|rd|th)\s+",
                             "",
@@ -117,7 +121,7 @@ def extract_contacts(corpus: TexCorpus) -> ExtractionDocument:
                         )
                         spans.append(_AuthorSpan((order,), block.start, segment_end))
                 continue
-            names = _author_names(command.argument)
+            names = _author_names(command.argument, metadata_authors)
             orders: list[int] = []
             for name in names:
                 order = len(authors) + 1
@@ -253,7 +257,9 @@ def _commands(text: str) -> tuple[_Command, ...]:
     return tuple(commands)
 
 
-def _author_names(argument: str) -> tuple[str, ...]:
+def _author_names(
+    argument: str, metadata_authors: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     cleaned = _without_commands(argument, _AUTHOR_METADATA_COMMANDS)
     pieces = re.split(r"\\and\b|\\\\|;", cleaned)
     names: list[str] = []
@@ -261,15 +267,27 @@ def _author_names(argument: str) -> tuple[str, ...]:
         name = _plain_tex(piece)
         if not name:
             continue
-        if name.count(",") >= 2 and re.search(r",\s*and\s+", name, re.I):
-            names.extend(
-                item
-                for raw in re.split(r"\s*,\s*(?:and\s+)?", name, flags=re.I)
-                if (item := raw.strip(" ,"))
-            )
+        comma_names = _comma_author_names(name, metadata_authors)
+        if comma_names is not None:
+            names.extend(comma_names)
         else:
             names.append(name)
     return tuple(names)
+
+
+def _comma_author_names(
+    value: str, metadata_authors: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    if re.search(r",\s*and\s+", value, re.I) is None:
+        return None
+    names = tuple(
+        item
+        for raw in re.split(r"\s*,\s*(?:and\s+)?", value, flags=re.I)
+        if (item := raw.strip(" ,"))
+    )
+    expected = tuple(_canonical_text(name) for name in metadata_authors)
+    actual = tuple(_canonical_text(name) for name in names)
+    return names if expected and actual == expected else ()
 
 
 def _without_commands(value: str, names: set[str]) -> str:
@@ -333,6 +351,8 @@ def _tex_unescape(value: str) -> str:
 
 def _normalize_email(raw: str) -> tuple[str, str, bool] | None:
     value = _tex_unescape(raw).strip(" \t\r\n.,;:()[]<>\"'")
+    while len(value) > 2 and value.startswith("$") and value.endswith("$"):
+        value = value[1:-1].strip()
     if len(value) > 320 or value.count("@") != 1:
         return None
     local, raw_domain = value.rsplit("@", 1)
@@ -349,8 +369,7 @@ def _normalize_email(raw: str) -> tuple[str, str, bool] | None:
     except UnicodeError:
         return None
     if len(domain) > 255 or "." not in domain or any(
-        not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
-        for label in domain.split(".")
+        _DOMAIN_LABEL.fullmatch(label) is None for label in domain.split(".")
     ):
         return None
     if re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`|~-]+", local) is None:
@@ -396,15 +415,22 @@ def _canonicalize_authors(
         if canonical_index is None:
             canonical_index = len(canonical)
             index_by_name[name_key] = canonical_index
-            canonical.append(author.model_copy(update={"order": canonical_index + 1}))
+            canonical.append(
+                ExtractedAuthor(
+                    order=canonical_index + 1,
+                    name=author.name,
+                    affiliations=author.affiliations,
+                    corresponding=author.corresponding,
+                )
+            )
         else:
             current = canonical[canonical_index]
             affiliations = _merge_text_values(current.affiliations, author.affiliations)
-            canonical[canonical_index] = current.model_copy(
-                update={
-                    "affiliations": affiliations,
-                    "corresponding": current.corresponding or author.corresponding,
-                }
+            canonical[canonical_index] = ExtractedAuthor(
+                order=current.order,
+                name=current.name,
+                affiliations=affiliations,
+                corresponding=current.corresponding or author.corresponding,
             )
         canonical_orders[author.order] = canonical_index + 1
     return canonical, canonical_orders

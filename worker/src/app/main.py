@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import signal
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -26,6 +28,7 @@ from app.jobs.job_control import RedisJobStore
 from app.jobs.source_extraction import SourceExtractionRunner
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
 from app.messaging.kafka import (
+    KafkaRecord,
     KafkaResultPublisher,
     contract_headers,
     forward_retry,
@@ -88,7 +91,7 @@ async def run(settings: Settings | None = None) -> None:
         auto_offset_reset="earliest",
         isolation_level="read_committed",
         max_poll_records=1,
-        max_poll_interval_ms=900_000,
+        max_poll_interval_ms=active.maximum_poll_interval_ms,
     )
     await producer.start()
     await consumer.start()
@@ -160,37 +163,19 @@ async def run(settings: Settings | None = None) -> None:
                         default_topic=active.jobs_topic,
                     )
                     continue
-                runtime_state.status = "BUSY"
-                runtime_state.current_job_id = _command_job_id(record.value)
-                try:
-                    try:
-                        outcome = await processor.process(record.value)
-                    except Exception as error:
-                        logger.error(
-                            "command_processing_failed_unexpectedly",
-                            jobId=(
-                                str(runtime_state.current_job_id)
-                                if runtime_state.current_job_id is not None
-                                else None
-                            ),
-                            errorType=type(error).__name__,
-                        )
-                        outcome = CommandOutcome.RETRY
-                    await settle_delivery(
+                await _run_with_consumer_polling(
+                    consumer,
+                    _handle_command_record(
                         record,
-                        outcome,
+                        processor,
                         producer,
                         consumer,
-                        retry_topic=active.retry_topic,
-                        dead_letter_topic=active.dead_letter_topic,
-                        retry_delay_ms=int(active.retry_delay_seconds * 1_000),
-                        on_retry_exhausted=partial(
-                            processor.publish_retry_exhausted_failure, record.value
-                        ),
-                    )
-                finally:
-                    runtime_state.status = "IDLE"
-                    runtime_state.current_job_id = None
+                        active,
+                        runtime_state,
+                        logger,
+                    ),
+                    interval_seconds=active.consumer_poll_interval_seconds,
+                )
     finally:
         stop_event.set()
         if heartbeat_task is not None:
@@ -206,6 +191,103 @@ async def run(settings: Settings | None = None) -> None:
             finally:
                 await producer.stop()
         logger.info("worker_stopped")
+
+
+async def _handle_command_record(
+    record: KafkaRecord,
+    processor: ArxivCommandProcessor,
+    producer: AIOKafkaProducer,
+    consumer: AIOKafkaConsumer,
+    settings: Settings,
+    runtime_state: WorkerRuntimeState,
+    logger: FilteringBoundLogger,
+) -> None:
+    runtime_state.status = "BUSY"
+    runtime_state.current_job_id = _command_job_id(record.value)
+    try:
+        try:
+            outcome = await processor.process(record.value)
+        except Exception as error:
+            logger.error(
+                "command_processing_failed_unexpectedly",
+                jobId=(
+                    str(runtime_state.current_job_id)
+                    if runtime_state.current_job_id is not None
+                    else None
+                ),
+                errorType=type(error).__name__,
+            )
+            outcome = CommandOutcome.RETRY
+        await settle_delivery(
+            record,
+            outcome,
+            producer,
+            consumer,
+            retry_topic=settings.retry_topic,
+            dead_letter_topic=settings.dead_letter_topic,
+            retry_delay_ms=int(settings.retry_delay_seconds * 1_000),
+            on_retry_exhausted=partial(
+                processor.publish_retry_exhausted_failure, record.value
+            ),
+            on_permanent_failure=partial(
+                processor.publish_permanent_failure, record.value
+            ),
+        )
+    finally:
+        runtime_state.status = "IDLE"
+        runtime_state.current_job_id = None
+
+
+async def _run_with_consumer_polling[T](
+    consumer: AIOKafkaConsumer,
+    operation: Awaitable[T],
+    *,
+    interval_seconds: float,
+) -> T:
+    if interval_seconds <= 0:
+        raise ValueError("Consumer poll interval must be positive")
+    paused = set(consumer.assignment())
+    if paused:
+        consumer.pause(*paused)
+    finished = asyncio.Event()
+    operation_task = asyncio.ensure_future(operation)
+
+    async def keep_polling() -> None:
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                assigned = set(consumer.assignment())
+                new_partitions = assigned - paused
+                if new_partitions:
+                    consumer.pause(*new_partitions)
+                    paused.update(new_partitions)
+                records = await consumer.getmany(timeout_ms=0, max_records=1)
+                if any(records.values()):
+                    raise RuntimeError("Paused Kafka consumer returned records") from None
+
+    poll_task = asyncio.create_task(keep_polling())
+    try:
+        completed, _ = await asyncio.wait(
+            {operation_task, poll_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if poll_task in completed:
+            await poll_task
+            raise RuntimeError("Kafka poll heartbeat stopped unexpectedly")
+        return await operation_task
+    finally:
+        finished.set()
+        try:
+            if not operation_task.done():
+                operation_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await operation_task
+            if not poll_task.done():
+                await poll_task
+        finally:
+            resumable = paused.intersection(consumer.assignment())
+            if resumable:
+                consumer.resume(*resumable)
 
 
 async def _heartbeat_loop(
