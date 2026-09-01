@@ -6,15 +6,18 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.transaction.reactive.TransactionalOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class MailTrackingConfigurationTest {
 	private static final String KEY = "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=";
 	private final ApplicationContextRunner context = new ApplicationContextRunner()
 			.withUserConfiguration(MailTrackingConfiguration.class)
 			.withPropertyValues("spring.profiles.active=api", "app.mail-tracking.public-base-url=http://localhost:8080")
-			.withBean(DatabaseClient.class, () -> DatabaseClient.create(ConnectionFactories.get("r2dbc:postgresql://unused:unused@localhost/unused")));
+			.withBean(DatabaseClient.class, () -> DatabaseClient.create(ConnectionFactories.get("r2dbc:postgresql://unused:unused@localhost/unused")))
+			.withBean(TransactionalOperator.class, () -> mock(TransactionalOperator.class));
 
 	@Test
 	void disabledConfigurationStartsWithoutAKeyAndEnabledConfigurationFailsClosedWithoutOne() {

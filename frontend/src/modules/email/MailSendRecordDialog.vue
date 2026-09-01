@@ -14,7 +14,13 @@ import {
   mailSendStatusLabel,
   mailTrackingState,
 } from '@/modules/email/mail-tracking.presentation'
-import type { MailOpenClassification, MailOpenEvent, MailSendRecord } from '@/modules/email/mail-tracking.types'
+import type {
+  MailClickEvent,
+  MailClickLink,
+  MailOpenClassification,
+  MailOpenEvent,
+  MailSendRecord,
+} from '@/modules/email/mail-tracking.types'
 
 const props = defineProps<{ recordId: string | null }>()
 const emit = defineEmits<{ close: [] }>()
@@ -23,6 +29,8 @@ const loading = ref(false)
 const error = ref('')
 const record = ref<MailSendRecord | null>(null)
 const events = ref<MailOpenEvent[]>([])
+const links = ref<MailClickLink[]>([])
+const clickEvents = ref<MailClickEvent[]>([])
 const latestEvents = computed(() => [...events.value]
   .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime())
   .slice(0, 50))
@@ -30,6 +38,8 @@ const latestEvents = computed(() => [...events.value]
 watch(() => props.recordId, (id) => {
   record.value = null
   events.value = []
+  links.value = []
+  clickEvents.value = []
   error.value = ''
   if (id) void load(id)
 }, { immediate: true })
@@ -43,6 +53,8 @@ async function load(id = props.recordId): Promise<void> {
     if (props.recordId !== id) return
     record.value = result.record
     events.value = result.events
+    links.value = result.links
+    clickEvents.value = result.clickEvents
   } catch (cause) {
     if (props.recordId === id) error.value = mailTrackingErrorMessage(cause, '测试邮件记录详情加载失败。')
   } finally {
@@ -61,13 +73,17 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
   if (value === 'PREFETCH' || value === 'IMAGE_PROXY') return 'warning'
   return 'neutral'
 }
+
+function clickTarget(linkId: string): string {
+  return links.value.find(link => link.id === linkId)?.targetUrl ?? '目标链接不可用'
+}
 </script>
 
 <template>
   <DsModal
     :open="Boolean(recordId)"
     title="测试邮件记录详情"
-    description="图片加载回传只表示远程图片被请求，不能证明人工阅读。"
+    description="图片加载与链接点击回传只表示相应请求到达，不能证明人工阅读或点击。"
     @close="emit('close')"
   >
     <div class="space-y-4">
@@ -168,7 +184,7 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
           </div>
           <div>
             <dt class="text-xs font-medium text-slate-500">
-              可能自动化回传
+              图片可能自动化
             </dt>
             <dd class="mt-1 text-slate-800">
               {{ record.automatedOpenCount }} 次
@@ -176,10 +192,34 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
           </div>
           <div>
             <dt class="text-xs font-medium text-slate-500">
-              首次 / 最近回传
+              图片首次 / 最近回传
             </dt>
             <dd class="mt-1 text-slate-800">
               {{ formatMailTrackingDate(record.firstOpenAt) }} / {{ formatMailTrackingDate(record.lastOpenAt) }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-slate-500">
+              链接点击回传
+            </dt>
+            <dd class="mt-1 text-slate-800">
+              {{ record.rawClickCount }} 次
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-slate-500">
+              点击可能自动化
+            </dt>
+            <dd class="mt-1 text-slate-800">
+              {{ record.automatedClickCount }} 次
+            </dd>
+          </div>
+          <div class="sm:col-span-2">
+            <dt class="text-xs font-medium text-slate-500">
+              点击首次 / 最近回传
+            </dt>
+            <dd class="mt-1 text-slate-800">
+              {{ formatMailTrackingDate(record.firstClickAt) }} / {{ formatMailTrackingDate(record.lastClickAt) }}
             </dd>
           </div>
           <div v-if="record.failureCategory">
@@ -228,6 +268,88 @@ function classificationTone(value: MailOpenClassification): 'neutral' | 'warning
               </p>
             </li>
           </ol>
+        </section>
+
+        <section
+          aria-labelledby="click-callbacks-title"
+          class="border-t border-slate-200 pt-4"
+        >
+          <div class="border-b border-slate-200 pb-3">
+            <h3
+              id="click-callbacks-title"
+              class="text-sm font-semibold text-slate-900"
+            >
+              链接点击回传
+            </h3>
+            <p class="mt-1 text-xs/5 text-slate-500">
+              仅表示安全重定向被请求；未分类事件也不等于人工点击。
+            </p>
+          </div>
+          <p
+            v-if="links.length === 0"
+            class="mt-3 text-sm text-slate-500"
+          >
+            邮件中没有可检测的 HTTP(S) 链接。
+          </p>
+          <ol
+            v-else
+            class="mt-3 divide-y divide-slate-200 rounded-md border border-slate-200"
+          >
+            <li
+              v-for="link in links"
+              :key="link.id"
+              class="p-3 text-sm"
+            >
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <p class="font-medium text-slate-900">
+                    {{ link.label ?? `链接 ${link.position}` }}
+                  </p>
+                  <p class="mt-1 break-all text-xs/5 text-slate-500">
+                    {{ link.targetUrl }}
+                  </p>
+                </div>
+                <DsBadge :tone="link.rawClickCount > 0 ? 'info' : 'neutral'">
+                  {{ link.rawClickCount }} 次
+                </DsBadge>
+              </div>
+              <p
+                v-if="link.automatedClickCount"
+                class="mt-2 text-xs text-slate-500"
+              >
+                可能自动化：{{ link.automatedClickCount }}
+              </p>
+            </li>
+          </ol>
+
+          <div
+            v-if="clickEvents.length"
+            class="mt-4"
+          >
+            <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              最近点击分类
+            </h4>
+            <ol class="mt-2 space-y-2">
+              <li
+                v-for="event in clickEvents"
+                :key="event.id"
+                class="rounded-md border border-slate-200 p-3 text-sm"
+              >
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <DsBadge :tone="classificationTone(event.classification)">
+                    {{ classificationLabel(event.classification) }}
+                  </DsBadge>
+                  <time class="text-xs text-slate-500">{{ formatMailTrackingDate(event.occurredAt) }}</time>
+                </div>
+                <p class="mt-2 break-all text-xs/5 text-slate-600">
+                  {{ clickTarget(event.linkId) }}
+                </p>
+                <p class="mt-1 text-xs/5 text-slate-500">
+                  {{ event.reason }}
+                </p>
+              </li>
+            </ol>
+          </div>
         </section>
       </template>
     </div>

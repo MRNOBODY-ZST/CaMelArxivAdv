@@ -15,6 +15,7 @@ function record(overrides: Partial<MailSendRecord> = {}): MailSendRecord {
     smtpAccountName: 'Mailpit', status: 'SMTP_ACCEPTED', failureCategory: null, trackingEnabled: true,
     createdAt: '2026-08-28T10:00:00Z', completedAt: '2026-08-28T10:00:01Z', trackingExpiresAt: '2099-08-29T10:00:00Z',
     rawOpenCount: 0, automatedOpenCount: 0, firstOpenAt: null, lastOpenAt: null,
+    rawClickCount: 0, automatedClickCount: 0, firstClickAt: null, lastClickAt: null,
     ...overrides,
   }
 }
@@ -25,6 +26,7 @@ describe('mail tracking presentation', () => {
     expect(mailSendSourceLabel(record({ source: 'TEMPLATE_TEST' }))).toBe('模板测试')
     expect(mailSendStatusLabel(record({ status: 'UNKNOWN' }))).toBe('发送状态未知')
     expect(mailTrackingState(record({ rawOpenCount: 2 }))).toBe('检测到图片加载（2）')
+    expect(mailTrackingState(record({ rawClickCount: 2 }))).toBe('检测到链接点击（2）')
     expect(mailTrackingState(record({ status: 'FAILED' }))).toBe('发送失败，未确认检测')
   })
 
@@ -32,6 +34,7 @@ describe('mail tracking presentation', () => {
     expect(mailTrackingState(record({ status: 'UNKNOWN', rawOpenCount: 1 }))).toBe('检测到图片加载（1）')
     expect(mailTrackingState(record({ status: 'FAILED', rawOpenCount: 2 }))).toBe('检测到图片加载（2）')
     expect(mailTrackingState(record({ trackingExpiresAt: '2020-01-01T00:00:00Z', rawOpenCount: 3 }))).toBe('检测到图片加载（3）')
+    expect(mailTrackingState(record({ status: 'UNKNOWN', rawClickCount: 1 }))).toBe('检测到链接点击（1）')
   })
 
   it('handles nullable dates and expired tracking with the shared semantics', () => {

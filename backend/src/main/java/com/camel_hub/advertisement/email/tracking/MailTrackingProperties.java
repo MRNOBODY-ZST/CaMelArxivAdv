@@ -41,7 +41,7 @@ public record MailTrackingProperties(
 	public MailTrackingModels.CallbackScope callbackScope() {
 		return isLocalHost(URI.create(publicBaseUrl).getHost())
 				? MailTrackingModels.CallbackScope.LOCAL_ONLY
-				: MailTrackingModels.CallbackScope.PUBLIC_HTTPS_UNVERIFIED;
+				: MailTrackingModels.CallbackScope.PUBLIC_HTTPS_CONFIGURED;
 	}
 
 	static byte[] decodeKey(String encoded) {

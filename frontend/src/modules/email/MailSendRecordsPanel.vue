@@ -34,6 +34,7 @@ const status = ref<MailTrackingStatus | null>(null)
 const page = ref(1)
 const totalPages = ref(0)
 const selectedRecordId = computed(() => typeof route.query.record === 'string' ? route.query.record : null)
+const publicCallbackObserved = computed(() => records.value.some(item => item.rawOpenCount > 0 || item.rawClickCount > 0))
 
 onMounted(() => {
   void Promise.all([load(), loadStatus()])
@@ -100,7 +101,7 @@ function sendStatusTone(value: MailSendRecord): 'neutral' | 'positive' | 'warnin
 
 function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning' | 'danger' | 'info' {
   if (!value.trackingEnabled) return 'neutral'
-  if (value.rawOpenCount > 0) return 'info'
+  if (value.rawOpenCount > 0 || value.rawClickCount > 0) return 'info'
   if (value.status === 'FAILED') return 'danger'
   if (value.status === 'UNKNOWN' || isMailTrackingExpired(value)) return 'warning'
   return 'neutral'
@@ -121,7 +122,7 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
           测试邮件记录
         </h2>
         <p class="mt-1 max-w-3xl text-sm/6 text-slate-600">
-          SMTP 诊断和模板测试与活动投递分开记录。图片加载回传仅是估算，不代表人工阅读。
+          SMTP 诊断和模板测试与活动投递分开记录。图片加载与链接点击回传均为估算，不代表人工阅读或点击。
         </p>
       </div>
       <DsButton
@@ -156,11 +157,18 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
       回传来源：{{ callbackOrigin(status.callbackBaseUrl) }}。外部收件箱通常无法回传；该状态不代表公网可达。
     </DsAlert>
     <DsAlert
-      v-else-if="status"
-      tone="warning"
-      title="公网 HTTPS 回传尚未验证"
+      v-else-if="status && publicCallbackObserved"
+      tone="success"
+      title="已收到公网回传"
     >
-      回传来源：{{ callbackOrigin(status.callbackBaseUrl) }}。这是配置值，尚未验证公网可达性或邮件客户端行为。
+      当前页记录已收到来自 {{ callbackOrigin(status.callbackBaseUrl) }} 的图片加载或链接点击请求；这仍不能证明人工行为。
+    </DsAlert>
+    <DsAlert
+      v-else-if="status"
+      tone="info"
+      title="公网 HTTPS 回传已配置"
+    >
+      回传来源：{{ callbackOrigin(status.callbackBaseUrl) }}。实际可达性以发送记录收到的回传为准。
     </DsAlert>
 
     <div
@@ -196,7 +204,7 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
               发送结果
             </th>
             <th class="px-5 py-3">
-              图片加载状态
+              回传状态
             </th>
             <th class="hidden px-5 py-3 lg:table-cell">
               完成时间
@@ -254,6 +262,18 @@ function trackingTone(value: MailSendRecord): 'neutral' | 'positive' | 'warning'
                 class="mt-1 text-xs text-slate-500"
               >
                 可能自动化：{{ item.automatedOpenCount }}
+              </p>
+              <p
+                v-if="item.trackingEnabled && item.rawClickCount"
+                class="mt-1 text-xs font-medium text-brand-700"
+              >
+                链接点击 {{ item.rawClickCount }} 次
+              </p>
+              <p
+                v-if="item.trackingEnabled && item.automatedClickCount"
+                class="mt-1 text-xs text-slate-500"
+              >
+                点击可能自动化：{{ item.automatedClickCount }}
               </p>
             </td>
             <td class="hidden whitespace-nowrap px-5 py-4 text-sm text-slate-500 lg:table-cell">

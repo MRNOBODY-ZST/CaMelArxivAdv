@@ -16,13 +16,13 @@ Phase 3 还要求设置受监控的 `ARXIV_CONTACT_EMAIL`。官方端点固定�
 
 Source 端点固定为 `https://export.arxiv.org/e-print`。`.env.example` 提供归档 50 MiB、展开 250 MiB、单文件 20 MiB、5,000 文件及压缩比 100 的默认上限；只可在容量评审后收紧或有限提高，不能为了处理未知归档而取消限制。Compose 将 Worker 的 `/var/tmp/arxiv-source` 挂为 512 MiB tmpfs，生产编排平台必须提供等价的临时卷、容量上限和任务结束清理语义。
 
-## 测试邮件图片回传
+## 测试邮件互动回传
 
-`TRACKING_ENABLED=false` 为默认值；每封诊断/模板测试邮件还必须显式选择 `trackOpens=true` 才插入图片。启用前通过 Secret 单独提供至少 32 字节的 Base64 `TRACKING_SIGNING_KEY_BASE64`，不能复用 JWT、模板图片或其他应用密钥；缺失、格式错误或复用会使启用态 API 启动失败。
+`TRACKING_ENABLED=false` 为默认值；每封诊断/模板测试邮件还必须显式选择 `trackOpens=true` 才插入图片并改写符合条件的 HTTP(S) 链接。启用前通过 Secret 单独提供至少 32 字节的 Base64 `TRACKING_SIGNING_KEY_BASE64`，不能复用 JWT、模板图片或其他应用密钥；缺失、格式错误或复用会使启用态 API 启动失败。
 
 `TRACKING_PUBLIC_BASE_URL` 未配置时沿用现有 `PUBLIC_BASE_URL`（Compose 中空值也回退），默认 `http://localhost:8080`。必须是无路径、查询、片段或用户信息的绝对 origin；公网主机只允许 HTTPS，本地/私网允许 HTTP。HTTPS 只表示配置形态，不能证明公网可达。外部邮箱图片代理无法访问本机 localhost；本功能不创建公网服务或隧道，也不调整端口暴露。
 
-默认 `TRACKING_TOKEN_TTL=PT720H`（30 天），允许 1 分钟至 90 天的整数秒。Nginx `/t/` 关闭访问/错误日志、禁用缓存并按来源地址限制为 10 请求/秒、突发 20；上游负载均衡、WAF、APM 同样必须排除这些能力 URL，不能记录完整路径或异常请求 URL。回传仅表示“检测到图片加载 / 估算打开”，不能证明已阅读。数据模型、权限、误差、手动保留期清理及本地验证流程见 [邮件回传说明](EMAIL_TRACKING.md)。
+默认 `TRACKING_TOKEN_TTL=PT720H`（30 天），允许 1 分钟至 90 天的整数秒。`TRACKING_STALE_SENDING_AFTER=PT15M` 控制残留发送状态对账，允许 5 分钟至 1 天。Nginx `/t/` 关闭访问/错误日志、禁用缓存并按来源地址限制为 10 请求/秒、突发 20；上游负载均衡、WAF、APM 同样必须排除这些能力 URL，不能记录完整路径或异常请求 URL。回传仅表示图片或签名重定向请求到达，不能证明人工阅读或点击。数据模型、权限、误差、手动保留期清理及本地验证流程见 [邮件回传说明](EMAIL_TRACKING.md)。
 
 ## 开发环境
 
@@ -81,4 +81,4 @@ V6 是向前兼容迁移：增加分类快照/同步游标/论文导入来源，
 
 V7 增加 Source 提取幂等/清理列、联系人 `display_nonce` 和映射乐观版本。回滚到不理解独立显示 nonce 或 Source 结果的版本前，先停止 Source 命令发布与 Worker 消费；不要删除 V7 列或索引。更换联系人密钥需要专门的版本化重加密迁移，不能直接替换环境变量。
 
-V14 只新增测试邮件发送记录/图片回传事件，不改活动投递表。回滚时保留新表；旧版应用不会处理新图片回传。暂停收集可先设置 `TRACKING_ENABLED=false`，无需删除历史记录。轮换跟踪签名密钥会立即使此前发出的图片 token 失效，不应把因此缺失的回传解释为未阅读。
+V14 新增测试邮件发送记录/图片回传事件，V15 新增服务器侧链接映射与点击事件；两者都不改活动投递表。回滚时保留新表；旧版应用不会处理新点击回传或执行残留 `SENDING` 对账。暂停收集可先设置 `TRACKING_ENABLED=false`，无需删除历史记录。轮换跟踪签名密钥会立即使此前发出的图片与点击 token 失效，不应把因此缺失的回传解释为未阅读或未点击。

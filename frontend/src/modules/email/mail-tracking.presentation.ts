@@ -26,12 +26,13 @@ function mailTrackingCollectionState(value: MailSendRecord): string | null {
 }
 
 export function mailTrackingCondition(value: MailSendRecord): string | null {
-  if (!value.trackingEnabled || value.rawOpenCount === 0) return null
+  if (!value.trackingEnabled || (value.rawOpenCount === 0 && value.rawClickCount === 0)) return null
   return mailTrackingCollectionState(value)
 }
 
 export function mailTrackingState(value: MailSendRecord): string {
   if (!value.trackingEnabled) return '未启用检测'
   if (value.rawOpenCount > 0) return `检测到图片加载（${value.rawOpenCount}）`
+  if (value.rawClickCount > 0) return `检测到链接点击（${value.rawClickCount}）`
   return mailTrackingCollectionState(value) ?? '尚无回传'
 }

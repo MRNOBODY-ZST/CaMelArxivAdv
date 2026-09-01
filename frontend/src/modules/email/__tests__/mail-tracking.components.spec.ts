@@ -32,6 +32,10 @@ interface RecordFixture {
   automatedOpenCount: number
   firstOpenAt: string | null
   lastOpenAt: string | null
+  rawClickCount: number
+  automatedClickCount: number
+  firstClickAt: string | null
+  lastClickAt: string | null
 }
 
 const TEST_NOW = new Date('2026-08-28T12:00:00Z')
@@ -47,7 +51,7 @@ const modalStub = {
 function trackingStatus(overrides: Partial<{
   enabled: boolean
   callbackBaseUrl: string
-  callbackScope: 'LOCAL_ONLY' | 'PUBLIC_HTTPS_UNVERIFIED'
+  callbackScope: 'LOCAL_ONLY' | 'PUBLIC_HTTPS_CONFIGURED'
   tokenTtlSeconds: number
 }> = {}) {
   return {
@@ -76,6 +80,10 @@ function record(overrides: Partial<RecordFixture> = {}): RecordFixture {
     automatedOpenCount: 0,
     firstOpenAt: null,
     lastOpenAt: null,
+    rawClickCount: 0,
+    automatedClickCount: 0,
+    firstClickAt: null,
+    lastClickAt: null,
     ...overrides,
   }
 }
@@ -120,6 +128,20 @@ describe('mail tracking option', () => {
     expect(wrapper.get<HTMLInputElement>('#errored-track-opens').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('配置暂时无法加载')
   })
+
+  it('describes public HTTPS as configured without claiming a callback was observed', async () => {
+    vi.mocked(mailTrackingApi.getStatus).mockResolvedValue(trackingStatus({
+      callbackBaseUrl: 'https://mail.example.org',
+      callbackScope: 'PUBLIC_HTTPS_CONFIGURED',
+    }))
+
+    const wrapper = mount(MailTrackingOption, { props: { id: 'public-track-opens', modelValue: false } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('公网 HTTPS 回传已配置')
+    expect(wrapper.text()).toContain('图片加载与链接点击')
+    expect(wrapper.text()).not.toContain('尚未验证')
+  })
 })
 
 describe('mail send records', () => {
@@ -144,6 +166,23 @@ describe('mail send records', () => {
     await wrapper.get('button[aria-label="刷新测试邮件记录"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('检测到图片加载')
+  })
+
+  it('distinguishes configured public HTTPS from callback evidence observed in records', async () => {
+    vi.mocked(mailTrackingApi.getStatus).mockResolvedValue(trackingStatus({
+      callbackBaseUrl: 'https://mail.example.org',
+      callbackScope: 'PUBLIC_HTTPS_CONFIGURED',
+    }))
+    vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([
+      record({ rawClickCount: 1, firstClickAt: '2026-08-28T10:05:00Z', lastClickAt: '2026-08-28T10:05:00Z' }),
+    ]))
+
+    const { wrapper } = await mountPanel('/email/deliveries')
+
+    expect(wrapper.text()).toContain('已收到公网回传')
+    expect(wrapper.text()).toContain('链接点击 1 次')
+    expect(wrapper.text()).not.toContain('尚未验证')
+    expect(wrapper.text()).not.toContain('人工点击')
   })
 
   it('keeps untracked, expired, failed, and unknown records distinct from a read claim', async () => {
@@ -195,7 +234,7 @@ describe('mail send records', () => {
         reason: `回传 ${index + 1}`,
       }))
       vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([detail]))
-      vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events })
+      vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events, links: [], clickEvents: [] })
 
       const { wrapper } = await mountPanel('/email/deliveries?record=record-1')
       const trackingState = definitionValue(wrapper, '检测状态')
@@ -218,6 +257,8 @@ describe('mail send records', () => {
         { id: 2, occurredAt: '2026-08-28T10:06:00Z', classification: 'PREFETCH', reason: 'prefetch' },
         { id: 1, occurredAt: '2026-08-28T10:05:00Z', classification: 'UNCLASSIFIED', reason: 'pixel returned' },
       ],
+      links: [],
+      clickEvents: [],
     })
 
     const { router, wrapper } = await mountPanel('/email/deliveries?record=record-1')
@@ -230,6 +271,47 @@ describe('mail send records', () => {
     await wrapper.get('button[aria-label="关闭"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.query.record).toBeUndefined()
+  })
+
+  it('renders link summaries and classified click observations without a human-click claim', async () => {
+    const detail = record({
+      rawClickCount: 2,
+      automatedClickCount: 1,
+      firstClickAt: '2026-08-28T10:05:00Z',
+      lastClickAt: '2026-08-28T10:06:00Z',
+    })
+    vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([detail]))
+    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({
+      record: detail,
+      events: [],
+      links: [{
+        id: 'link-1',
+        targetUrl: 'https://example.invalid/paper?id=42',
+        label: 'Paper details',
+        position: 1,
+        rawClickCount: 2,
+        automatedClickCount: 1,
+        firstClickAt: '2026-08-28T10:05:00Z',
+        lastClickAt: '2026-08-28T10:06:00Z',
+      }],
+      clickEvents: [{
+        id: 1,
+        linkId: 'link-1',
+        occurredAt: '2026-08-28T10:06:00Z',
+        classification: 'BOT',
+        reason: 'bot_user_agent',
+      }],
+    })
+
+    const { wrapper } = await mountPanel('/email/deliveries?record=record-1')
+
+    expect(wrapper.text()).toContain('链接点击回传')
+    expect(wrapper.text()).toContain('https://example.invalid/paper?id=42')
+    expect(wrapper.text()).toContain('2 次')
+    expect(wrapper.text()).toContain('可能自动化：1')
+    expect(wrapper.text()).toContain('bot_user_agent')
+    expect(wrapper.text()).toContain('不等于人工点击')
+    expect(wrapper.text()).not.toContain('确认人工点击')
   })
 
   it('shows a detail error without turning a missing callback into a read claim', async () => {
@@ -251,7 +333,7 @@ describe('mail send records', () => {
       reason: `回传 ${index + 2}`,
     }))
     vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([detail]))
-    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events })
+    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: detail, events, links: [], clickEvents: [] })
 
     const { wrapper } = await mountPanel('/email/deliveries?record=record-1')
     const callbackItems = wrapper.findAll('ol li')
@@ -270,10 +352,12 @@ describe('mail send records', () => {
     const refreshed = record({ rawOpenCount: 1, firstOpenAt: '2026-08-28T10:05:00Z', lastOpenAt: '2026-08-28T10:05:00Z' })
     vi.mocked(mailTrackingApi.listSendRecords).mockResolvedValue(page([initial]))
     vi.mocked(mailTrackingApi.getSendRecord)
-      .mockResolvedValueOnce({ record: initial, events: [] })
+      .mockResolvedValueOnce({ record: initial, events: [], links: [], clickEvents: [] })
       .mockResolvedValueOnce({
         record: refreshed,
         events: [{ id: 1, occurredAt: '2026-08-28T10:05:00Z', classification: 'UNCLASSIFIED', reason: 'pixel returned' }],
+        links: [],
+        clickEvents: [],
       })
 
     const { wrapper } = await mountPanel('/email/deliveries?record=record-1')

@@ -35,6 +35,7 @@ function mailRecord() {
     subject: '测试记录', smtpAccountName: 'Mailpit', status: 'SMTP_ACCEPTED' as const,
     failureCategory: null, trackingEnabled: true, createdAt: '2026-08-28T10:00:00Z', completedAt: null,
     trackingExpiresAt: '2026-08-29T10:00:00Z', rawOpenCount: 0, automatedOpenCount: 0, firstOpenAt: null, lastOpenAt: null,
+    rawClickCount: 0, automatedClickCount: 0, firstClickAt: null, lastClickAt: null,
   }
 }
 
@@ -69,7 +70,7 @@ describe('deliveries permission-gated tabs', () => {
   })
 
   it('switches back to records when a same-route record query arrives after selecting campaigns', async () => {
-    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: mailRecord(), events: [] })
+    vi.mocked(mailTrackingApi.getSendRecord).mockResolvedValue({ record: mailRecord(), events: [], links: [], clickEvents: [] })
     const { router, wrapper } = await mountDeliveries(['smtp:read', 'campaign:read'])
 
     await button(wrapper, '活动发送记录').trigger('click')

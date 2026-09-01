@@ -22,8 +22,8 @@ class MailTrackingPropertiesTest {
 
 	@ParameterizedTest
 	@ValueSource(strings = {"https://mail.example.org", "https://8.8.8.8", "https://[2001:4860:4860::8888]"})
-	void publicHttpsOnlyDescribesUnverifiedConfiguration(String origin) {
-		assertThat(properties(origin).callbackScope()).isEqualTo(MailTrackingModels.CallbackScope.PUBLIC_HTTPS_UNVERIFIED);
+	void publicHttpsDescribesConfiguredTransportWithoutClaimingAReceivedCallback(String origin) {
+		assertThat(properties(origin).callbackScope()).isEqualTo(MailTrackingModels.CallbackScope.PUBLIC_HTTPS_CONFIGURED);
 	}
 
 	@ParameterizedTest

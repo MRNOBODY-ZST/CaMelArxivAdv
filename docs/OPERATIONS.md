@@ -42,6 +42,8 @@ docker compose logs --since=15m postgres kafka redis
 | Source Job 无法进入终态 | `job_items`、结果队列/DLQ、`processed_messages` | 先处理未持久化的 item result；禁止直接把 Job 改为成功 |
 | Worker tmpfs 增长 | 当前 Job、heartbeat、容器 RestartCount | 暂停新任务，保留日志后安全重建 Worker；确认临时根为空再恢复 |
 | 邮件没有进入 Mailpit | `ALLOW_LIVE_SMTP`、mail-worker、Mailpit accepted 数 | 不改为真实 SMTP 作为排障手段 |
+| 测试邮件长期停留 `SENDING` | 记录 `created_at`、`backend-api` 重启/发送日志、SMTP 侧记录 | 服务会在启动时及每分钟把超过 `TRACKING_STALE_SENDING_AFTER` 的记录保守改为 `UNKNOWN/SEND_OUTCOME_MISSING`；不要据回传猜测为已发送，也不要自动重发 |
+| 公网回传配置存在但没有事件 | DNS/TLS、Nginx `/t/`、邮件 MIME、token 是否过期及代理策略 | `PUBLIC_HTTPS_CONFIGURED` 只表示配置形态；用内部 Mailpit 的实际 `/t/o/`、`/t/c/` URL 合成验收，禁止把无事件解释为未阅读/未点击 |
 | 个性化生成按钮禁用 | `/api/v1/system/runtime` 的非敏感开关、`PERSONALIZATION_ENABLED` | 注入有效 API Key 后再启用；不要在浏览器、日志或数据库中粘贴 Key |
 | 生成长期 QUEUED/RUNNING | personalization worker、Ray 节点、`mail.personalization.*` 队列 | 先确认 Worker/Ray 健康和积压；保留原幂等键，禁止直接改活动为完成 |
 | 单个作者生成失败 | 收件人安全错误码、提供方状态、Ray 有界重试日志 | 永久失败逐条保留；不记录模型请求全文或联系人邮箱，不重跑整个已完成批次 |

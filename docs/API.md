@@ -167,6 +167,11 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 | `GET/PUT/DELETE /api/v1/smtp-accounts/{id}` | 读取、乐观更新或删除未被活动引用的账户；更新密码为 `null` 表示保留 |
 | `POST /api/v1/smtp-accounts/{id}/test-connection` | 验证握手并返回 `CONNECTION_SUCCEEDED` 或稳定错误类别 |
 | `POST /api/v1/smtp-accounts/{id}/test-email` | 发送一封内部诊断邮件并返回 `SMTP_ACCEPTED` |
+| `GET /api/v1/mail-tracking/status` | 返回测试邮件回传开关、回调 origin、`LOCAL_ONLY`/`PUBLIC_HTTPS_CONFIGURED` 与 token TTL |
+| `GET /api/v1/mail-send-records` | 分页返回脱敏测试邮件发送结果及图片/点击聚合；需要 `smtp:read` |
+| `GET /api/v1/mail-send-records/{id}` | 返回记录、最多 50 条图片事件、服务器保存的链接汇总及最多 50 条点击事件；不返回 token |
+| `GET|HEAD /t/o/{token}` | 匿名图片回传；`HEAD` 不计数 |
+| `GET|HEAD /t/c/{token}` | 匿名签名点击重定向；目标只取自服务器保存映射，`HEAD` 不计数 |
 | `GET/POST /api/v1/mailbox-accounts` | 分页读取或创建 IMAP/POP3 账户；只返回 `passwordConfigured` |
 | `GET/PUT/DELETE /api/v1/mailbox-accounts/{id}` | 读取、乐观更新或删除邮箱账户；更新密码为 `null` 表示保留 |
 | `POST /api/v1/mailbox-accounts/{id}/test-connection` | 验证协议、TLS 与认证，返回稳定错误类别 |

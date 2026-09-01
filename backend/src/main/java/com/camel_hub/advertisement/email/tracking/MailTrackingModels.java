@@ -10,7 +10,7 @@ public final class MailTrackingModels {
 	public enum Source { SMTP_DIAGNOSTIC, TEMPLATE_TEST }
 	public enum Status { SENDING, SMTP_ACCEPTED, FAILED, UNKNOWN }
 	public enum Classification { UNCLASSIFIED, PREFETCH, IMAGE_PROXY, BOT }
-	public enum CallbackScope { LOCAL_ONLY, PUBLIC_HTTPS_UNVERIFIED }
+	public enum CallbackScope { LOCAL_ONLY, PUBLIC_HTTPS_CONFIGURED }
 
 	public record TrackingStatus(
 			boolean enabled, String callbackBaseUrl, CallbackScope callbackScope, long tokenTtlSeconds

@@ -46,8 +46,8 @@ function update(value: boolean): void {
       :id="id"
       :model-value="trackingAvailable ? modelValue : false"
       :disabled="!trackingAvailable"
-      label="检测图片加载（可选）"
-      description="仅记录远程图片回传；检测到图片加载不能证明人工阅读。"
+      label="检测图片加载与链接点击（可选）"
+      description="记录远程图片请求和安全重定向回传；两者都不能证明人工阅读或点击。"
       @update:model-value="update"
     />
     <DsAlert
@@ -80,10 +80,10 @@ function update(value: boolean): void {
     </DsAlert>
     <DsAlert
       v-else
-      tone="warning"
-      title="公网 HTTPS 回传尚未验证"
+      tone="info"
+      title="公网 HTTPS 回传已配置"
     >
-      回传地址：{{ status.callbackBaseUrl }}。这只是配置值，尚未验证公网可达性或邮件客户端行为。
+      回传地址：{{ status.callbackBaseUrl }}。实际可达性以发送记录收到的图片加载与链接点击回传为准。
     </DsAlert>
   </div>
 </template>
