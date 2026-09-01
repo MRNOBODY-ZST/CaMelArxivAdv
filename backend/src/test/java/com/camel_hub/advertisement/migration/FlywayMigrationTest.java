@@ -64,6 +64,8 @@ class FlywayMigrationTest {
 				"tracking_events",
 				"mail_send_records",
 				"mail_open_events",
+				"mail_click_links",
+				"mail_click_events",
 				"audit_logs");
 			assertThat(constraintNames()).contains(
 				"uk_papers_arxiv_id",
@@ -72,7 +74,10 @@ class FlywayMigrationTest {
 				"uk_contacts_email_hmac",
 				"uk_email_template_version",
 				"uk_template_assets_object_key",
-					"uk_tracking_token");
+					"uk_tracking_token",
+					"uk_mail_click_target",
+					"uk_mail_click_token",
+					"uk_mail_click_minute");
 			assertThat(columnNames("outbox_messages")).contains("topic_name").doesNotContain("exchange_name");
 		assertThat(flyway.migrate().migrationsExecuted).isZero();
 		assertThat(canInsertGlobalAggregateRows()).isTrue();
@@ -138,7 +143,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-				assertThat(latest.migrate().migrationsExecuted).isEqualTo(6);
+				assertThat(latest.migrate().migrationsExecuted).isEqualTo(7);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);

@@ -329,7 +329,12 @@ class MailTrackingApiIntegrationTest {
 		assertThat(rowJson).doesNotContain(firstToken, "qa@example.invalid", "<p>");
 		JsonNode response = detail(first);
 		assertThat(response.toString()).doesNotContain(firstToken, "token_hash", "tokenHash", "/t/o/", "qa@example.invalid");
-		assertThat(response.path("record").size()).isEqualTo(15);
+		assertThat(response.at("/record/rawClickCount").asLong()).isZero();
+		assertThat(response.at("/record/automatedClickCount").asLong()).isZero();
+		assertThat(response.at("/record/firstClickAt").isNull()).isTrue();
+		assertThat(response.at("/record/lastClickAt").isNull()).isTrue();
+		assertThat(response.path("links")).isEmpty();
+		assertThat(response.path("clickEvents")).isEmpty();
 		manager.get().uri("/api/v1/mail-send-records").exchange().expectStatus().isOk().expectBody(String.class)
 				.value(body -> assertThat(body).doesNotContain(firstToken, secondToken, "tokenHash", "/t/o/", "qa@example.invalid"));
 	}
@@ -362,6 +367,38 @@ class MailTrackingApiIntegrationTest {
 		assertThat(Instant.parse(result.at("/record/firstOpenAt").asText())).isEqualTo(firstMinute);
 		assertThat(Instant.parse(result.at("/record/lastOpenAt").asText())).isEqualTo(firstMinute.plusSeconds(60));
 		assertThat(result.at("/record/automatedOpenCount").asLong()).isZero();
+	}
+
+	@Test
+	void clickLinksAndEventsPersistWithAtomicMinuteDeduplication() throws Exception {
+		String recordId = diagnostic(trackedPayload()).path("correlationId").asText();
+		UUID linkId = UUID.randomUUID();
+		Instant createdAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+		Instant expiresAt = createdAt.plus(Duration.ofDays(30));
+		trackingRepository.insertLinks(UUID.fromString(recordId), List.of(new MailTrackingModels.PendingClickLink(
+				linkId, "https://example.invalid/paper?id=42", "Paper details", 1,
+				MailTrackingSigner.digest("test-click-token"), expiresAt)), createdAt).block();
+
+		MutableClock clock = new MutableClock(createdAt.plusSeconds(10));
+		HttpHeaders headers = new HttpHeaders();
+		headers.set(HttpHeaders.USER_AGENT, "Unknown click client");
+		MailOpenClassifier.Observation observation = new MailOpenClassifier().classify(headers);
+		reactor.core.publisher.Flux.range(0, 24)
+				.flatMap(ignored -> trackingRepository.observeClick(linkId, observation, clock.instant()), 24).blockLast();
+		clock.set(clock.instant().plusSeconds(60));
+		trackingRepository.observeClick(linkId, observation, clock.instant()).block();
+
+		JsonNode result = detail(recordId);
+		assertThat(result.at("/record/rawClickCount").asLong()).isEqualTo(2);
+		assertThat(result.at("/record/automatedClickCount").asLong()).isZero();
+		assertThat(result.path("links")).hasSize(1);
+		assertThat(result.at("/links/0/id").asText()).isEqualTo(linkId.toString());
+		assertThat(result.at("/links/0/targetUrl").asText()).isEqualTo("https://example.invalid/paper?id=42");
+		assertThat(result.at("/links/0/rawClickCount").asLong()).isEqualTo(2);
+		assertThat(result.path("clickEvents")).hasSize(2);
+		assertThat(result.path("clickEvents").findValuesAsText("classification"))
+				.containsOnly("UNCLASSIFIED");
+		assertThat(count("mail_click_events")).isEqualTo(2);
 	}
 
 	@Test

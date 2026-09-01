@@ -53,7 +53,9 @@ public final class MailTrackingService {
 	public Mono<Detail> detail(UUID id) {
 		if (id == null) return Mono.error(new MailTrackingValidationException("Mail send record ID is required"));
 		return repository.find(id).switchIfEmpty(Mono.error(new MailTrackingNotFoundException()))
-				.flatMap(record -> repository.latestEvents(id).collectList().map(events -> new Detail(record, events)));
+				.flatMap(record -> Mono.zip(repository.latestEvents(id).collectList(), repository.latestLinks(id).collectList(),
+						repository.latestClickEvents(id).collectList())
+						.map(values -> new Detail(record, values.getT1(), values.getT2(), values.getT3())));
 	}
 
 	public Mono<Void> send(

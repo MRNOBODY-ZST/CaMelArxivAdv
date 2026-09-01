@@ -7,6 +7,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import static com.camel_hub.advertisement.email.tracking.MailTrackingModels.*;
@@ -61,6 +62,35 @@ public final class MailTrackingRepository {
 				.bind("bucket", Math.floorDiv(occurredAt.getEpochSecond(), 60)).fetch().rowsUpdated().then();
 	}
 
+	public Mono<Void> insertLinks(UUID recordId, List<PendingClickLink> links, Instant createdAt) {
+		return Flux.fromIterable(links).concatMap(link -> {
+			var query = database.sql("""
+					INSERT INTO mail_click_links (
+					    id, record_id, target_url, target_url_hash, label, position, token_hash, expires_at, created_at
+					) VALUES (:id, :record, :target, :targetHash, :label, :position, :tokenHash, :expires, :created)
+					""").bind("id", link.id()).bind("record", recordId).bind("target", link.targetUrl())
+					.bind("targetHash", MailTrackingSigner.digest(link.targetUrl())).bind("position", link.position())
+					.bind("tokenHash", link.tokenHash()).bind("expires", link.expiresAt()).bind("created", createdAt);
+			query = link.label() == null ? query.bindNull("label", String.class) : query.bind("label", link.label());
+			return query.fetch().rowsUpdated();
+		}).then();
+	}
+
+	public Mono<Void> observeClick(UUID linkId, MailOpenClassifier.Observation observation, Instant occurredAt) {
+		return database.sql("""
+				INSERT INTO mail_click_events (link_id, occurred_at, classification, reason, fingerprint_hash, minute_bucket)
+				SELECT link.id, :occurred, :classification, :reason, :fingerprint, :bucket
+				FROM mail_click_links link
+				JOIN mail_send_records record ON record.id = link.record_id
+				WHERE link.id = :link AND link.expires_at > :occurred
+				  AND record.tracking_enabled = true AND record.status <> 'FAILED'
+				ON CONFLICT (link_id, fingerprint_hash, minute_bucket) DO NOTHING
+				""").bind("link", linkId).bind("occurred", occurredAt)
+				.bind("classification", observation.classification().name()).bind("reason", observation.reason())
+				.bind("fingerprint", observation.fingerprintHash())
+				.bind("bucket", Math.floorDiv(occurredAt.getEpochSecond(), 60)).fetch().rowsUpdated().then();
+	}
+
 	public Flux<MailSendRecord> list(int offset, int limit) {
 		return database.sql(selectSql("""
 				(SELECT * FROM mail_send_records ORDER BY created_at DESC, id DESC OFFSET :offset LIMIT :limit)
@@ -87,11 +117,42 @@ public final class MailTrackingRepository {
 				Classification.valueOf(row.get("classification", String.class)), row.get("reason", String.class))).all();
 	}
 
+	public Flux<MailClickLink> latestLinks(UUID id) {
+		return database.sql("""
+				SELECT link.id, link.target_url, link.label, link.position,
+				       count(event.id) AS raw_click_count,
+				       count(event.id) FILTER (WHERE event.classification <> 'UNCLASSIFIED') AS automated_click_count,
+				       min(event.occurred_at) AS first_click_at, max(event.occurred_at) AS last_click_at
+				FROM mail_click_links link
+				LEFT JOIN mail_click_events event ON event.link_id = link.id
+				WHERE link.record_id = :id
+				GROUP BY link.id, link.target_url, link.label, link.position
+				ORDER BY link.position, link.id
+				""").bind("id", id).map((row, metadata) -> new MailClickLink(
+				row.get("id", UUID.class), row.get("target_url", String.class), row.get("label", String.class),
+				row.get("position", Integer.class), row.get("raw_click_count", Long.class),
+				row.get("automated_click_count", Long.class), row.get("first_click_at", Instant.class),
+				row.get("last_click_at", Instant.class))).all();
+	}
+
+	public Flux<MailClickEvent> latestClickEvents(UUID id) {
+		return database.sql("""
+				SELECT event.id, event.link_id, event.occurred_at, event.classification, event.reason
+				FROM mail_click_events event
+				JOIN mail_click_links link ON link.id = event.link_id
+				WHERE link.record_id = :id
+				ORDER BY event.occurred_at DESC, event.id DESC LIMIT 50
+				""").bind("id", id).map((row, metadata) -> new MailClickEvent(
+				row.get("id", Long.class), row.get("link_id", UUID.class), row.get("occurred_at", Instant.class),
+				Classification.valueOf(row.get("classification", String.class)), row.get("reason", String.class))).all();
+	}
+
 	private String selectSql(String records) {
 		return """
 				SELECT r.id, r.source, r.recipient_masked, r.subject, a.name AS smtp_account_name,
 				       r.status, r.failure_category, r.tracking_enabled, r.created_at, r.completed_at, r.tracking_expires_at,
-				       e.raw_open_count, e.automated_open_count, e.first_open_at, e.last_open_at
+				       e.raw_open_count, e.automated_open_count, e.first_open_at, e.last_open_at,
+				       c.raw_click_count, c.automated_click_count, c.first_click_at, c.last_click_at
 				FROM %s r
 				LEFT JOIN smtp_accounts a ON a.id = r.smtp_account_id
 				LEFT JOIN LATERAL (
@@ -100,6 +161,14 @@ public final class MailTrackingRepository {
 				           min(occurred_at) AS first_open_at, max(occurred_at) AS last_open_at
 				    FROM mail_open_events WHERE record_id = r.id
 				) e ON true
+				LEFT JOIN LATERAL (
+				    SELECT count(event.id) AS raw_click_count,
+				           count(event.id) FILTER (WHERE event.classification <> 'UNCLASSIFIED') AS automated_click_count,
+				           min(event.occurred_at) AS first_click_at, max(event.occurred_at) AS last_click_at
+				    FROM mail_click_links link
+				    LEFT JOIN mail_click_events event ON event.link_id = link.id
+				    WHERE link.record_id = r.id
+				) c ON true
 				""".formatted(records);
 	}
 
@@ -110,6 +179,8 @@ public final class MailTrackingRepository {
 				Boolean.TRUE.equals(row.get("tracking_enabled", Boolean.class)), row.get("created_at", Instant.class),
 				row.get("completed_at", Instant.class), row.get("tracking_expires_at", Instant.class),
 				row.get("raw_open_count", Long.class), row.get("automated_open_count", Long.class),
-				row.get("first_open_at", Instant.class), row.get("last_open_at", Instant.class));
+				row.get("first_open_at", Instant.class), row.get("last_open_at", Instant.class),
+				row.get("raw_click_count", Long.class), row.get("automated_click_count", Long.class),
+				row.get("first_click_at", Instant.class), row.get("last_click_at", Instant.class));
 	}
 }

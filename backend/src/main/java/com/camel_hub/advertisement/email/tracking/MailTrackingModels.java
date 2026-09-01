@@ -20,14 +20,41 @@ public final class MailTrackingModels {
 			UUID id, Source source, String recipientMasked, String subject, String smtpAccountName,
 			Status status, String failureCategory, boolean trackingEnabled, Instant createdAt,
 			Instant completedAt, Instant trackingExpiresAt, long rawOpenCount, long automatedOpenCount,
-			Instant firstOpenAt, Instant lastOpenAt
+			Instant firstOpenAt, Instant lastOpenAt, long rawClickCount, long automatedClickCount,
+			Instant firstClickAt, Instant lastClickAt
 	) { }
 
 	public record MailOpenEvent(long id, Instant occurredAt, Classification classification, String reason) { }
 
-	public record Detail(MailSendRecord record, List<MailOpenEvent> events) {
+	public record PendingClickLink(
+			UUID id, String targetUrl, String label, int position, byte[] tokenHash, Instant expiresAt
+	) {
+		public PendingClickLink {
+			tokenHash = tokenHash.clone();
+		}
+
+		@Override
+		public byte[] tokenHash() {
+			return tokenHash.clone();
+		}
+	}
+
+	public record MailClickLink(
+			UUID id, String targetUrl, String label, int position, long rawClickCount, long automatedClickCount,
+			Instant firstClickAt, Instant lastClickAt
+	) { }
+
+	public record MailClickEvent(
+			long id, UUID linkId, Instant occurredAt, Classification classification, String reason
+	) { }
+
+	public record Detail(
+			MailSendRecord record, List<MailOpenEvent> events, List<MailClickLink> links, List<MailClickEvent> clickEvents
+	) {
 		public Detail {
 			events = List.copyOf(events);
+			links = List.copyOf(links);
+			clickEvents = List.copyOf(clickEvents);
 		}
 	}
 }
