@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app.arxiv.models import ArxivMetadata, OaiRecordPage
 from app.arxiv.oai_client import OaiProtocolError, OaiTokenExpiredError
 from app.arxiv.taxonomy import TaxonomyCategory
+from app.jobs.job_control import SourceProgress
 from app.messaging.contracts import (
     ImportMetadataCommand,
     MessageEnvelope,
@@ -70,6 +71,14 @@ class JobStore(Protocol):
     async def save_cursor(self, idempotency_key: str, token: str) -> None: ...
 
     async def clear_cursor(self, idempotency_key: str) -> None: ...
+
+    async def source_progress_for(self, idempotency_key: str) -> SourceProgress | None: ...
+
+    async def save_source_progress(
+        self, idempotency_key: str, progress: SourceProgress
+    ) -> None: ...
+
+    async def clear_source_progress(self, idempotency_key: str) -> None: ...
 
 
 class CommandOutcome(StrEnum):
@@ -206,6 +215,8 @@ class ArxivCommandProcessor:
                     ),
                     processed + 2,
                 )
+                if isinstance(command, SourceExtractionCommand):
+                    await self._store.clear_source_progress(envelope.idempotency_key)
             if isinstance(command, OaiSyncCommand):
                 await self._store.clear_cursor(envelope.idempotency_key)
             await self._store.mark_processed(envelope.idempotency_key)
@@ -245,10 +256,21 @@ class ArxivCommandProcessor:
     ) -> _SourceSummary | None:
         if self._source_runner is None:
             raise RuntimeError("Source extraction runner is not configured")
-        success = skipped = failed = 0
-        for index, target in enumerate(command.targets):
+        checkpoint = await self._store.source_progress_for(envelope.idempotency_key)
+        if checkpoint is not None and checkpoint.next_index <= len(command.targets):
+            start_index = checkpoint.next_index
+            success = checkpoint.success
+            skipped = checkpoint.skipped
+            failed = checkpoint.failed
+        else:
+            start_index = 0
+            success = skipped = failed = 0
+            if checkpoint is not None:
+                await self._store.clear_source_progress(envelope.idempotency_key)
+        for index in range(start_index, len(command.targets)):
             if await self._pause_or_cancel(envelope, index):
                 return None
+            target = command.targets[index]
             result = await self._source_runner.run(target)
             if result.status in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}:
                 success += 1
@@ -287,6 +309,10 @@ class ArxivCommandProcessor:
                     progress_percent=processed * 100.0 / len(command.targets),
                 ),
                 index * 2 + 2,
+            )
+            await self._store.save_source_progress(
+                envelope.idempotency_key,
+                SourceProgress(processed, success, skipped, failed),
             )
         return _SourceSummary(len(command.targets), success, skipped, failed)
 

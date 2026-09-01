@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import date
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -58,8 +59,11 @@ class Publisher:
 
 
 class Store:
-    def __init__(self) -> None:
+    def __init__(self, source_progress: Checkpoint | None = None) -> None:
         self.marked: list[str] = []
+        self.source_progress = source_progress
+        self.saved_source_progress: list[object] = []
+        self.cleared_source_progress: list[str] = []
 
     async def is_processed(self, key: str) -> bool:
         return False
@@ -78,6 +82,27 @@ class Store:
 
     async def clear_cursor(self, idempotency_key: str) -> None:
         pass
+
+    async def source_progress_for(self, idempotency_key: str) -> Checkpoint | None:
+        return self.source_progress
+
+    async def save_source_progress(
+        self, idempotency_key: str, progress: object
+    ) -> None:
+        self.saved_source_progress.append(progress)
+        self.source_progress = progress  # type: ignore[assignment]
+
+    async def clear_source_progress(self, idempotency_key: str) -> None:
+        self.cleared_source_progress.append(idempotency_key)
+        self.source_progress = None
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    next_index: int
+    success: int
+    skipped: int
+    failed: int
 
 
 class Runner:
@@ -190,3 +215,35 @@ async def test_mixed_success_and_security_failure_finishes_partially_succeeded()
     assert await processor.process(command(targets, "source:partial")) is CommandOutcome.ACK
     assert publisher.messages[-1].payload.status == "PARTIALLY_SUCCEEDED"
     assert publisher.messages[-1].payload.failed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_source_command_resumes_after_the_last_durably_published_item() -> None:
+    publisher = Publisher()
+    store = Store(Checkpoint(next_index=1, success=1, skipped=0, failed=0))
+    runner = Runner(("SUCCEEDED", "SUCCEEDED"))
+    processor = ArxivCommandProcessor(
+        UnusedLegacy(), UnusedOai(), publisher, store, batch_size=50, source_runner=runner
+    )
+    first = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001")
+    second = SourceTarget(paper_id=uuid4(), arxiv_id="2608.00002")
+
+    outcome = await processor.process(
+        command(
+            [
+                {"paperId": str(first.paper_id), "arxivId": first.arxiv_id},
+                {"paperId": str(second.paper_id), "arxivId": second.arxiv_id},
+            ],
+            "source:resume",
+        )
+    )
+
+    assert outcome is CommandOutcome.ACK
+    assert runner.targets == [second]
+    assert publisher.messages[-1].payload.success_count == 2
+    assert publisher.messages[-1].payload.processed_count == 2
+    assert [
+        (item.next_index, item.success, item.skipped, item.failed)
+        for item in store.saved_source_progress
+    ] == [(2, 2, 0, 0)]
+    assert store.cleared_source_progress == ["source:resume"]
