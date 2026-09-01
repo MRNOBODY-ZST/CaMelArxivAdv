@@ -14,7 +14,7 @@ CREATE TABLE mail_click_links (
     CONSTRAINT ck_mail_click_token_hash CHECK (octet_length(token_hash) = 32),
     CONSTRAINT ck_mail_click_position CHECK (position >= 1),
     CONSTRAINT ck_mail_click_expiry CHECK (expires_at > created_at),
-    CONSTRAINT ck_mail_click_target_scheme CHECK (target_url ~ '^https?://')
+    CONSTRAINT ck_mail_click_target_scheme CHECK (target_url ~* '^https?://')
 );
 
 CREATE INDEX ix_mail_click_record_position ON mail_click_links (record_id, position, id);

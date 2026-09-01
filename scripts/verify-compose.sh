@@ -94,8 +94,9 @@ if [[ $(jq -r '.services["backend-api"].environment.TEMPLATE_ASSET_BUCKET' <<<"$
 fi
 
 if [[ $(jq -r '.services["backend-api"].environment.TRACKING_ENABLED' <<<"$compose_json") != "false" ]] \
-  || [[ $(jq -r '.services["backend-api"].environment.TRACKING_TOKEN_TTL' <<<"$compose_json") != "PT720H" ]]; then
-  echo "Test-mail tracking must default disabled with a 30-day token TTL" >&2
+  || [[ $(jq -r '.services["backend-api"].environment.TRACKING_TOKEN_TTL' <<<"$compose_json") != "PT720H" ]] \
+  || [[ $(jq -r '.services["backend-api"].environment.TRACKING_STALE_SENDING_AFTER' <<<"$compose_json") != "PT15M" ]]; then
+  echo "Test-mail tracking must default disabled with a 30-day token TTL and 15-minute stale-send window" >&2
   exit 1
 fi
 

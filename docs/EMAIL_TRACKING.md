@@ -48,7 +48,7 @@ token 包含不透明记录 UUID、安全随机 nonce 和到期时间，并由 H
 
 - `GET /api/v1/mail-tracking/status`：需要 `smtp:read` 或 `template:read`，返回启用状态、回调 origin、配置范围及 TTL 秒数。
 - `GET /api/v1/mail-send-records?page=1&pageSize=20`：需要 `smtp:read`，沿用 `PageResponse`；页码 1–100000，单页 1–100，按创建时间和 UUID 稳定降序。
-- `GET /api/v1/mail-send-records/{id}`：需要 `smtp:read`，返回 `{record, events, links, clickEvents}`；两类事件各自最多返回最新 50 条并稳定降序；链接只返回服务器保存的原目标和聚合，不返回 token。
+- `GET /api/v1/mail-send-records/{id}`：需要 `smtp:read`，返回 `{record, events, links, clickEvents}`；两类事件各自最多返回最新 50 条并稳定降序，链接摘要按邮件位置稳定返回前 100 条；链接只返回服务器保存的原目标和聚合，不返回 token。
 - `GET /t/o/{token}`：匿名；合法、错误、伪造、过期、未知、失败或全局禁用 token 均返回相同透明 GIF。`HEAD` 只返回头部，不计数；其他方法不计数。
 - `GET /t/c/{token}`：匿名；合法 token 返回 `302` 到发送前保存的 HTTP(S) 目标并记录一次去重事件。`HEAD` 返回相同跳转但不计数，其他方法返回 `405`；错误、伪造、过期、未知、失败或禁用 token 使用相同 `404`，不会泄漏目标。
 

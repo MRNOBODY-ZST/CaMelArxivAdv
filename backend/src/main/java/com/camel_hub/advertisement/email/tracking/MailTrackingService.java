@@ -21,6 +21,8 @@ import static com.camel_hub.advertisement.email.tracking.MailTrackingModels.*;
 
 public final class MailTrackingService {
 	private static final Logger LOGGER = LoggerFactory.getLogger(MailTrackingService.class);
+	private static final Duration CALLBACK_RESOLUTION_TIMEOUT = Duration.ofSeconds(2);
+	private static final Duration CALLBACK_OBSERVATION_TIMEOUT = Duration.ofMillis(250);
 	private final MailTrackingRepository repository;
 	private final MailTrackingProperties properties;
 	private final MailTrackingSigner signer;
@@ -110,12 +112,15 @@ public final class MailTrackingService {
 		return Mono.defer(() -> {
 			if (!properties.enabled()) return Mono.empty();
 			Instant now = clock.instant();
-			return signer.verifyClick(token, now).map(verified -> repository.resolveClick(verified, now)
-					.flatMap(resolved -> (observe
-							? repository.observeClick(resolved.linkId(), classifier.classify(headers), now)
-									.onErrorResume(ignored -> Mono.empty())
-							: Mono.<Void>empty()).thenReturn(resolved))).orElseGet(Mono::empty);
-		}).timeout(Duration.ofSeconds(2)).onErrorResume(ignored -> Mono.empty());
+			Mono<ResolvedClick> resolution = signer.verifyClick(token, now)
+					.map(verified -> repository.resolveClick(verified, now)
+							.timeout(CALLBACK_RESOLUTION_TIMEOUT).onErrorResume(ignored -> Mono.empty()))
+					.orElseGet(Mono::empty);
+			return resolution.flatMap(resolved -> (observe
+					? repository.observeClick(resolved.linkId(), classifier.classify(headers), now)
+							.timeout(CALLBACK_OBSERVATION_TIMEOUT).onErrorResume(ignored -> Mono.empty())
+					: Mono.<Void>empty()).thenReturn(resolved));
+		});
 	}
 
 	public Mono<Void> observe(String token, HttpHeaders headers) {

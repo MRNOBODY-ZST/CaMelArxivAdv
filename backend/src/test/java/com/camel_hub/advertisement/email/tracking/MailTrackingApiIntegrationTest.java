@@ -220,8 +220,13 @@ class MailTrackingApiIntegrationTest {
 	@Test
 	void trackedSendRewritesEligibleLinksAndRedirectsWithoutTrustingARequestTarget() throws Exception {
 		String target = "https://example.invalid/paper?id=42";
+		String mixedCaseTarget = "HTTP://example.invalid/mixed-case";
+		String signedAssetTarget = "https://assets.example.invalid/api/v1/template-assets/"
+				+ UUID.randomUUID() + "/" + UUID.randomUUID() + "/content?signature=test-signature";
 		String html = "<p><a href=\"" + target + "\">Paper details</a>"
 				+ "<a href=\"" + target + "\">Repeated target</a>"
+				+ "<a href=\"" + mixedCaseTarget + "\">Mixed case</a>"
+				+ "<a href=\"" + signedAssetTarget + "\">Private asset</a>"
 				+ "<a href=\"mailto:author@example.invalid\">Mail author</a>"
 				+ "<a href=\"/relative\">Relative</a>"
 				+ "<a href=\"https://user:secret@example.invalid/private\">Unsafe</a></p>";
@@ -231,13 +236,20 @@ class MailTrackingApiIntegrationTest {
 						"reply@example.invalid", html, "Plain text unchanged", correlationId), true, outbound::add).block();
 
 		var links = org.jsoup.Jsoup.parseBodyFragment(outbound.getFirst().html()).select("a[href]");
-		assertThat(links).hasSize(5);
+		assertThat(links).hasSize(7);
 		assertThat(links.get(0).attr("href")).startsWith("http://localhost:8080/t/c/")
 				.isEqualTo(links.get(1).attr("href"));
-		assertThat(links.get(2).attr("href")).isEqualTo("mailto:author@example.invalid");
-		assertThat(links.get(3).attr("href")).isEqualTo("/relative");
-		assertThat(links.get(4).attr("href")).isEqualTo("https://user:secret@example.invalid/private");
+		assertThat(links.get(2).attr("href")).startsWith("http://localhost:8080/t/c/");
+		assertThat(links.get(3).attr("href")).isEqualTo(signedAssetTarget);
+		assertThat(links.get(4).attr("href")).isEqualTo("mailto:author@example.invalid");
+		assertThat(links.get(5).attr("href")).isEqualTo("/relative");
+		assertThat(links.get(6).attr("href")).isEqualTo("https://user:secret@example.invalid/private");
 		assertThat(outbound.getFirst().text()).isEqualTo("Plain text unchanged");
+		JsonNode preparedDetail = detail(correlationId);
+		assertThat(preparedDetail.path("links")).hasSize(2);
+		assertThat(preparedDetail.path("links").findValuesAsText("targetUrl"))
+				.containsExactlyInAnyOrder(target, mixedCaseTarget)
+				.doesNotContain(signedAssetTarget);
 
 		String clickPath = URI.create(links.getFirst().attr("href")).getPath();
 		anonymous.head().uri(clickPath).exchange().expectStatus().isFound()
@@ -258,6 +270,24 @@ class MailTrackingApiIntegrationTest {
 				.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
 				.expectBody(String.class).returnResult().getResponseBody();
 		assertThat(body).isNullOrEmpty();
+	}
+
+	@Test
+	void detailBoundsLinkSummariesWithStablePositions() throws Exception {
+		StringBuilder html = new StringBuilder();
+		for (int position = 1; position <= 101; position++) {
+			html.append("<a href=\"https://example.invalid/paper/").append(position).append("\">Paper ")
+					.append(position).append("</a>");
+		}
+		String correlationId = UUID.randomUUID().toString();
+		tracking.send(ACTOR, accountId, MailTrackingModels.Source.TEMPLATE_TEST,
+				new SmtpTransport.OutboundMessage("qa@example.invalid", "Bounded links", "Research Team",
+						"reply@example.invalid", html.toString(), "Plain text", correlationId), true, outbound::add).block();
+
+		JsonNode links = detail(correlationId).path("links");
+		assertThat(links).hasSize(100);
+		assertThat(links.get(0).path("position").asInt()).isEqualTo(1);
+		assertThat(links.get(99).path("position").asInt()).isEqualTo(100);
 	}
 
 	@Test

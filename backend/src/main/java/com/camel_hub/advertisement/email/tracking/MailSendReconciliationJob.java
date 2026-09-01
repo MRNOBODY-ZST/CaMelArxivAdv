@@ -9,12 +9,14 @@ import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class MailSendReconciliationJob {
 	private static final Logger LOGGER = LoggerFactory.getLogger(MailSendReconciliationJob.class);
 	private final MailTrackingRepository repository;
 	private final MailTrackingProperties properties;
 	private final Clock clock;
+	private final AtomicBoolean running = new AtomicBoolean();
 
 	public MailSendReconciliationJob(
 			MailTrackingRepository repository, MailTrackingProperties properties, Clock clock
@@ -38,7 +40,8 @@ public final class MailSendReconciliationJob {
 
 	@Scheduled(fixedDelayString = "${app.mail-tracking.reconcile-delay-ms:60000}")
 	void reconcile() {
-		reconcileNow().subscribe(count -> {
+		if (!running.compareAndSet(false, true)) return;
+		reconcileNow().doFinally(ignored -> running.set(false)).subscribe(count -> {
 			if (count > 0) LOGGER.warn("Reconciled {} stale test mail send record(s) to UNKNOWN", count);
 		}, error -> LOGGER.error("Stale test mail send reconciliation unavailable"));
 	}

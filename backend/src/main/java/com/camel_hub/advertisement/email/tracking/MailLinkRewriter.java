@@ -57,6 +57,7 @@ public final class MailLinkRewriter {
 			String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
 			if (!uri.isAbsolute() || uri.getHost() == null || uri.getRawUserInfo() != null
 					|| uri.getRawFragment() != null || !(scheme.equals("http") || scheme.equals("https"))) return null;
+			if (uri.getPath().startsWith("/api/v1/template-assets/")) return null;
 			if (sameOrigin(uri, callbackOrigin) && (uri.getPath().equals("/t") || uri.getPath().startsWith("/t/"))) return null;
 			return target;
 		}

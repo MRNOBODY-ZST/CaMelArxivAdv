@@ -149,7 +149,7 @@ public final class MailTrackingRepository {
 				LEFT JOIN mail_click_events event ON event.link_id = link.id
 				WHERE link.record_id = :id
 				GROUP BY link.id, link.target_url, link.label, link.position
-				ORDER BY link.position, link.id
+				ORDER BY link.position, link.id LIMIT 100
 				""").bind("id", id).map((row, metadata) -> new MailClickLink(
 				row.get("id", UUID.class), row.get("target_url", String.class), row.get("label", String.class),
 				row.get("position", Integer.class), row.get("raw_click_count", Long.class),
