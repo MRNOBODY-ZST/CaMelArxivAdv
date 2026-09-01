@@ -10,7 +10,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +22,8 @@ public class SourceExtractionService {
 
 	private static final String TYPE = "ARXIV_FETCH_AND_PARSE_SOURCE";
 	private static final int MAXIMUM_BATCH = 100;
+	private static final int MAXIMUM_METADATA_AUTHORS_BYTES = 256 * 1024;
+	private static final int MAXIMUM_COMMAND_ENVELOPE_BYTES = 768 * 1024;
 
 	private final SourceExtractionRepository repository;
 	private final AuditService auditService;
@@ -86,10 +90,7 @@ public class SourceExtractionService {
 		UUID jobId = UUID.randomUUID();
 		UUID messageId = UUID.randomUUID();
 		String idempotencyKey = "source:" + jobId;
-		List<Map<String, Object>> payloadTargets = targets.stream()
-				.map(target -> Map.<String, Object>of(
-						"paperId", target.paperId(), "arxivId", target.arxivId()))
-				.toList();
+		List<Map<String, Object>> payloadTargets = payloadTargets(targets);
 		Map<String, Object> payload = Map.of(
 				"targets", payloadTargets, "parserVersion", parserVersion);
 		Map<String, Object> envelope = Map.of(
@@ -101,9 +102,35 @@ public class SourceExtractionService {
 				"traceId", safeTrace(context.traceId()),
 				"occurredAt", Instant.now(),
 				"payload", payload);
+		String envelopeJson = json(envelope);
+		if (utf8Length(envelopeJson) > MAXIMUM_COMMAND_ENVELOPE_BYTES) {
+			throw new IllegalArgumentException("Source extraction command exceeds messaging size limit");
+		}
 		return new SourceExtractionRepository.Command(
 				jobId, messageId, actorId, TYPE, idempotencyKey, safeTrace(context.traceId()),
-				json(payload), json(envelope), targets);
+				json(payload), envelopeJson, targets);
+	}
+
+	private List<Map<String, Object>> payloadTargets(
+			List<SourceExtractionRepository.PaperTarget> targets
+	) {
+		int remainingAuthorBytes = MAXIMUM_METADATA_AUTHORS_BYTES;
+		List<Map<String, Object>> payloadTargets = new ArrayList<>(targets.size());
+		for (SourceExtractionRepository.PaperTarget target : targets) {
+			List<String> authors = List.of();
+			if (!target.authorNames().isEmpty()) {
+				int authorBytes = utf8Length(json(target.authorNames()));
+				if (authorBytes <= remainingAuthorBytes) {
+					authors = target.authorNames();
+					remainingAuthorBytes -= authorBytes;
+				}
+			}
+			payloadTargets.add(Map.of(
+					"paperId", target.paperId(),
+					"arxivId", target.arxivId(),
+					"metadataAuthors", authors));
+		}
+		return List.copyOf(payloadTargets);
 	}
 
 	private List<UUID> validate(List<UUID> paperIds) {
@@ -133,6 +160,10 @@ public class SourceExtractionService {
 		catch (JsonProcessingException exception) {
 			throw new IllegalArgumentException("Source extraction command could not be serialized", exception);
 		}
+	}
+
+	private int utf8Length(String value) {
+		return value.getBytes(StandardCharsets.UTF_8).length;
 	}
 
 	public record JobSubmission(UUID jobId, String status) { }

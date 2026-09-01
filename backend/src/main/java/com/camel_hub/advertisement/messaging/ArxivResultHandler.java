@@ -104,9 +104,12 @@ public class ArxivResultHandler {
 		if (Set.of("ARXIV_JOB_COMPLETED", "ARXIV_JOB_FAILED").contains(message.type())) {
 			if (isTerminalStatus(job.status())) {
 				return isCanceledExtractionCompletion(message, job)
-						? repository.cancelOpenExtractionItems(job.id()) : Mono.empty();
+						? applyCanceledSourceCompletion(message, job, false) : Mono.empty();
 			}
 			return applyTerminalForJob(message, job, details);
+		}
+		if (isTerminalStatus(job.status())) {
+			return Mono.empty();
 		}
 		Mono<Void> mutation = switch (message.type()) {
 			case "ARXIV_JOB_STARTED" -> repository.applyStarted(job.id(), payload);
@@ -116,12 +119,13 @@ public class ArxivResultHandler {
 			case "ARXIV_EXTRACTION_RESULT" -> applyExtraction(message, job)
 					.then(repository.applyProgress(
 							job.id(), payload, checkpoint(payload.checkpoint())));
-			case "ARXIV_JOB_PROGRESS" -> "ARXIV_SYNC_OAI".equals(job.type())
-					? applyOaiProgress(job.id(), payload)
-					: repository.applyProgress(job.id(), payload, checkpoint(payload.checkpoint()));
+			case "ARXIV_JOB_PROGRESS" -> applyProgressForJob(job, payload);
 			default -> Mono.error(new IllegalArgumentException("Result message type is unsupported"));
 		};
-		return mutation.then(repository.appendEvent(job.id(), message.type(), payload, details));
+		Mono<Void> persisted = mutation.then(
+				repository.appendEvent(job.id(), message.type(), payload, details));
+		return "ARXIV_EXTRACTION_RESULT".equals(message.type())
+				? persisted.then(completeDeferredSourceJob(message, job)) : persisted;
 	}
 
 	private Mono<Void> applyTerminalForJob(
@@ -130,19 +134,15 @@ public class ArxivResultHandler {
 			String details
 	) {
 		ArxivResultMessage.Payload payload = message.payload();
+		if (isExtractionJob(job.type())) {
+			return "CANCELED".equals(payload.status())
+					? applyCanceledSourceCompletion(message, job, true)
+					: applySourceTerminalForJob(message, job);
+		}
 		Mono<Void> preparation = Mono.empty();
 		if ("ARXIV_JOB_COMPLETED".equals(message.type())) {
 			if ("ARXIV_SYNC_TAXONOMY".equals(job.type())) {
 				preparation = applyTaxonomySnapshot(message, job);
-			}
-			else if (isExtractionJob(job.type())) {
-				if ("SUCCEEDED".equals(payload.status())
-						|| "PARTIALLY_SUCCEEDED".equals(payload.status())) {
-					preparation = repository.assertExtractionItemsTerminal(job.id(), payload);
-				}
-				else if ("CANCELED".equals(payload.status())) {
-					preparation = repository.cancelOpenExtractionItems(job.id());
-				}
 			}
 		}
 		return preparation.then(repository.applyTerminal(job.id(), payload))
@@ -151,17 +151,123 @@ public class ArxivResultHandler {
 						return Mono.empty();
 					}
 					Mono<Void> completion = "ARXIV_SYNC_OAI".equals(job.type())
+							&& "ARXIV_JOB_COMPLETED".equals(message.type())
+							&& Set.of("SUCCEEDED", "PARTIALLY_SUCCEEDED").contains(payload.status())
 							? repository.markSyncComplete(job.id()) : Mono.empty();
 					return completion.then(repository.appendEvent(
 							job.id(), message.type(), payload, details));
 				});
 	}
 
+	private Mono<Void> applySourceTerminalForJob(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job
+	) {
+		return repository.extractionItemTotals(job.id()).flatMap(totals -> {
+			boolean completed = "ARXIV_JOB_COMPLETED".equals(message.type());
+			boolean incomplete = completed
+					&& (totals.total() == 0 || totals.processed() != totals.total());
+			if (incomplete) {
+				ArxivResultMessage.Payload waiting = sourceTerminalPayload(
+						message.payload(), totals, "RUNNING", "AWAITING_ITEM_RESULTS", null, null);
+				return repository.applySourceWaitingExact(job.id(), waiting)
+						.then(repository.appendEvent(job.id(),
+								"ARXIV_JOB_COMPLETION_DEFERRED", waiting, details(waiting)));
+			}
+			String status = completed ? sourceStatus(totals) : "FAILED";
+			ArxivResultMessage.Payload authoritative = sourceTerminalPayload(
+					message.payload(), totals, status, message.payload().stage(),
+					message.payload().errorCode(), message.payload().errorSummary());
+			return repository.applySourceTerminalExact(job.id(), authoritative)
+					.flatMap(applied -> applied
+							? repository.appendEvent(
+									job.id(), message.type(), authoritative, details(authoritative))
+							: Mono.empty());
+		});
+	}
+
+	private Mono<Void> completeDeferredSourceJob(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job
+	) {
+		if (!isExtractionJob(job.type())) {
+			return Mono.empty();
+		}
+		return Mono.zip(
+				repository.hasDeferredSourceCompletion(job.id()),
+				repository.extractionItemTotals(job.id()))
+				.flatMap(state -> {
+					ArxivResultRepository.ItemTotals totals = state.getT2();
+					if (!state.getT1()) {
+						return Mono.empty();
+					}
+					if (totals.total() == 0 || totals.processed() != totals.total()) {
+						ArxivResultMessage.Payload waiting = sourceTerminalPayload(
+								message.payload(), totals, "RUNNING",
+								"AWAITING_ITEM_RESULTS", null, null);
+						return repository.applySourceWaitingExact(job.id(), waiting);
+					}
+					ArxivResultMessage.Payload authoritative = sourceTerminalPayload(
+							message.payload(), totals, sourceStatus(totals), "COMPLETED", null, null);
+					return repository.applySourceTerminalExact(job.id(), authoritative)
+							.flatMap(applied -> applied
+									? repository.appendEvent(job.id(), "ARXIV_JOB_COMPLETED",
+											authoritative, details(authoritative))
+									: Mono.empty());
+				});
+	}
+
+	private Mono<Void> applyCanceledSourceCompletion(
+			ArxivResultMessage message,
+			ArxivResultRepository.JobRecord job,
+			boolean appendEvent
+	) {
+		return repository.cancelOpenExtractionItems(job.id())
+				.then(repository.extractionItemTotals(job.id()))
+				.flatMap(totals -> {
+					ArxivResultMessage.Payload authoritative = sourceTerminalPayload(
+							message.payload(), totals, "CANCELED", message.payload().stage(),
+							message.payload().errorCode(), message.payload().errorSummary());
+					return repository.applySourceCanceledExact(job.id(), authoritative)
+							.flatMap(applied -> applied && appendEvent
+									? repository.appendEvent(job.id(), message.type(), authoritative,
+											details(authoritative))
+									: Mono.empty());
+				});
+	}
+
+	private String sourceStatus(ArxivResultRepository.ItemTotals totals) {
+		if (totals.failed() == 0) {
+			return "SUCCEEDED";
+		}
+		return totals.succeeded() + totals.skipped() > 0
+				? "PARTIALLY_SUCCEEDED" : "FAILED";
+	}
+
+	private ArxivResultMessage.Payload sourceTerminalPayload(
+			ArxivResultMessage.Payload source,
+			ArxivResultRepository.ItemTotals totals,
+			String status,
+			String stage,
+			String errorCode,
+			String errorSummary
+	) {
+		double progress = totals.total() == 0 ? 0
+				: totals.processed() * 100.0 / totals.total();
+		return new ArxivResultMessage.Payload(
+				status, stage, totals.processed(), totals.succeeded(), totals.skipped(),
+				totals.failed(), totals.total(), progress, source.checkpoint(), source.papers(),
+				errorCode, errorSummary, source.workerId(), source.workerType(), source.version(),
+				source.currentJobId(), source.snapshotVersion(), source.taxonomySourceUpdatedAt(),
+				source.taxonomyCategories(), source.extractions());
+	}
+
 	private boolean isCanceledExtractionCompletion(
 			ArxivResultMessage message,
 			ArxivResultRepository.JobRecord job
 	) {
-		return "ARXIV_JOB_COMPLETED".equals(message.type())
+		return "CANCELED".equals(job.status())
+				&& "ARXIV_JOB_COMPLETED".equals(message.type())
 				&& "CANCELED".equals(message.payload().status())
 				&& isExtractionJob(job.type());
 	}
@@ -197,6 +303,21 @@ public class ArxivResultHandler {
 		validateOaiCheckpoint(payload.checkpoint());
 		return repository.applyProgress(jobId, payload, checkpointJson)
 				.then(repository.upsertSyncCursor(jobId, checkpointJson));
+	}
+
+	private Mono<Void> applyProgressForJob(
+			ArxivResultRepository.JobRecord job,
+			ArxivResultMessage.Payload payload
+	) {
+		if ("ARXIV_SYNC_OAI".equals(job.type())) {
+			return applyOaiProgress(job.id(), payload);
+		}
+		if (isExtractionJob(job.type())) {
+			return repository.hasDeferredSourceCompletion(job.id())
+					.flatMap(deferred -> deferred ? Mono.empty() : repository.applyProgress(
+							job.id(), payload, checkpoint(payload.checkpoint())));
+		}
+		return repository.applyProgress(job.id(), payload, checkpoint(payload.checkpoint()));
 	}
 
 	private void validateOaiCheckpoint(JsonNode value) {
@@ -290,11 +411,27 @@ public class ArxivResultHandler {
 					throw new IllegalArgumentException("Result message job is required");
 				}
 				validatePayload(message.payload());
+				validateMessageStatus(message.type(), message.payload().status());
 			}
 			return message;
 		}
 		catch (JsonProcessingException exception) {
 			throw new IllegalArgumentException("Result message is malformed", exception);
+		}
+	}
+
+	private void validateMessageStatus(String type, String status) {
+		boolean valid = switch (type) {
+			case "ARXIV_JOB_STARTED", "ARXIV_JOB_BATCH", "ARXIV_EXTRACTION_RESULT" ->
+					"RUNNING".equals(status);
+			case "ARXIV_JOB_PROGRESS" -> Set.of("RUNNING", "PAUSED").contains(status);
+			case "ARXIV_JOB_COMPLETED" -> Set.of(
+					"SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED", "CANCELED").contains(status);
+			case "ARXIV_JOB_FAILED" -> "FAILED".equals(status);
+			default -> false;
+		};
+		if (!valid) {
+			throw new IllegalArgumentException("Result message type and status are inconsistent");
 		}
 	}
 

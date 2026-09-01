@@ -21,6 +21,7 @@ import java.util.List;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ArxivResultHandlerIntegrationTest {
 
@@ -134,6 +135,22 @@ class ArxivResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void rejectsFailedEventWhosePayloadClaimsSuccess() {
+		String invalid = envelope(UUID.randomUUID(), "ARXIV_JOB_FAILED", """
+				{"status":"SUCCEEDED","stage":"COMPLETED","processedCount":1,
+				 "successCount":1,"failedCount":0,"totalCount":1,"progressPercent":100,
+				 "checkpoint":{},"papers":[]}
+				""");
+
+		assertThatThrownBy(() -> handler.handle(invalid).block())
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("type and status");
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("PENDING");
+		assertThat(count("processed_messages")).isZero();
+	}
+
+	@Test
 	void persistsAndCompletesAnOpaqueOaiCursor() {
 		jobId = UUID.randomUUID();
 		databaseClient.sql("""
@@ -161,6 +178,42 @@ class ArxivResultHandlerIntegrationTest {
 				FROM arxiv_sync_cursors WHERE last_job_id = :jobId
 				""").bind("jobId", jobId)
 				.map((row, metadata) -> row.get("cleared", Boolean.class)).one().block()).isTrue();
+	}
+
+	@Test
+	void failedOaiJobRetainsItsOpaqueResumeCursor() {
+		jobId = UUID.randomUUID();
+		databaseClient.sql("""
+				INSERT INTO jobs (
+				  id, type, status, created_by, parameters, idempotency_key, current_stage)
+				VALUES (
+				  :id, 'ARXIV_SYNC_OAI', 'RUNNING', :actor,
+				  '{"setSpec":"cs:cs:AI","from":"2026-08-01"}'::jsonb,
+				  :key, 'FETCHING_OAI')
+				""").bind("id", jobId).bind("actor", ACTOR).bind("key", "oai-failed:" + jobId)
+				.fetch().rowsUpdated().block();
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", """
+				{"status":"RUNNING","stage":"FETCHING_OAI","processedCount":1,
+				 "successCount":1,"failedCount":0,"totalCount":0,"progressPercent":0,
+				 "checkpoint":{"resumptionToken":"opaque-token","responseDate":"2026-08-05T00:00:00Z"},
+				 "papers":[]}
+				""")).block();
+
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_FAILED", """
+				{"status":"FAILED","stage":"FAILED","processedCount":1,
+				 "successCount":1,"failedCount":0,"totalCount":0,"progressPercent":0,
+				 "checkpoint":{},"papers":[],"errorCode":"WORKER_RETRY_EXHAUSTED",
+				 "errorSummary":"Worker exhausted retries"}
+				""")).block();
+
+		assertThat(text("SELECT resumption_token FROM arxiv_sync_cursors WHERE last_job_id = '"
+				+ jobId + "'"))
+				.isEqualTo("opaque-token");
+		assertThat(databaseClient.sql("""
+				SELECT last_completed_datestamp IS NULL AS retained
+				FROM arxiv_sync_cursors WHERE last_job_id = :jobId
+				""").bind("jobId", jobId)
+				.map((row, metadata) -> row.get("retained", Boolean.class)).one().block()).isTrue();
 	}
 
 	@Test

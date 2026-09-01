@@ -98,10 +98,28 @@ public class JobRepository {
 				.bind("rootId", rootId).bind("originalId", original.id())
 				.fetch().rowsUpdated()
 				.flatMap(rows -> rows == 1
-						? insertRetryOutbox(
+						? copyRetrySourceItems(original, newId).then(insertRetryOutbox(
 								newId, messageId, original.type(), routingKey,
-								idempotencyKey, safeTrace(traceId)).then(find(newId))
+								idempotencyKey, safeTrace(traceId))).then(find(newId))
 						: Mono.empty());
+	}
+
+	private Mono<Void> copyRetrySourceItems(JobRecord original, UUID newJobId) {
+		if (!isExtractionJob(original.type())) {
+			return Mono.empty();
+		}
+		return databaseClient.sql("""
+				INSERT INTO job_items (job_id, external_key, status)
+				SELECT :newJobId, (target->>'paperId')::uuid::text, 'PENDING'
+				FROM jobs source
+				CROSS JOIN LATERAL jsonb_array_elements(source.parameters->'targets') target
+				WHERE source.id = :originalJobId
+				""").bind("newJobId", newJobId).bind("originalJobId", original.id())
+				.fetch().rowsUpdated()
+				.flatMap(rows -> rows == original.totalCount()
+						? Mono.empty()
+						: Mono.error(new IllegalStateException(
+								"Source retry targets do not match the original item count")));
 	}
 
 	private Mono<Void> insertRetryOutbox(
@@ -138,6 +156,36 @@ public class JobRepository {
 				""").bind("jobId", jobId).bind("eventType", eventType).bind("message", message);
 		statement = stage == null ? statement.bindNull("stage", String.class) : statement.bind("stage", stage);
 		return statement.fetch().rowsUpdated().then();
+	}
+
+	public Mono<Void> cancelOpenItems(UUID jobId) {
+		return databaseClient.sql("""
+				UPDATE job_items SET
+				  status = 'CANCELED', completed_at = coalesce(completed_at, now())
+				WHERE job_id = :jobId AND status IN ('PENDING','RUNNING')
+				""").bind("jobId", jobId).fetch().rowsUpdated()
+				.then(synchronizeItemCounters(jobId));
+	}
+
+	private Mono<Void> synchronizeItemCounters(UUID jobId) {
+		return databaseClient.sql("""
+				WITH totals AS (
+				  SELECT count(*) AS total,
+				         count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded,
+				         count(*) FILTER (WHERE status = 'SKIPPED') AS skipped,
+				         count(*) FILTER (WHERE status = 'FAILED') AS failed
+				  FROM job_items WHERE job_id = :jobId
+				)
+				UPDATE jobs job SET
+				  processed_count = totals.succeeded + totals.skipped + totals.failed,
+				  success_count = totals.succeeded,
+				  skipped_count = totals.skipped,
+				  failed_count = totals.failed,
+				  total_count = totals.total,
+				  progress_percent = CASE WHEN totals.total = 0 THEN 0
+				    ELSE (totals.succeeded + totals.skipped + totals.failed) * 100.0 / totals.total END
+				FROM totals WHERE job.id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().then();
 	}
 
 	public Flux<JobEventRecord> events(UUID jobId, long afterId, int limit) {
@@ -214,6 +262,11 @@ public class JobRepository {
 			case "ARXIV_REEXTRACT_CONTACTS" -> "arxiv.source.reextract";
 			default -> throw new IllegalArgumentException("Job type cannot be retried");
 		};
+	}
+
+	private boolean isExtractionJob(String type) {
+		return "ARXIV_FETCH_AND_PARSE_SOURCE".equals(type)
+				|| "ARXIV_REEXTRACT_CONTACTS".equals(type);
 	}
 
 	private String safeTrace(String traceId) {

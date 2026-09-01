@@ -18,13 +18,19 @@ public final class SourceExtractionRepository {
 
 	public Flux<PaperTarget> lockPapers(List<UUID> paperIds) {
 		return databaseClient.sql("""
-				SELECT id, arxiv_id FROM papers
-				WHERE id = ANY(:paperIds) AND deleted_at IS NULL
-				ORDER BY id
-				FOR UPDATE
+				SELECT p.id, p.arxiv_id, coalesce(a.author_names, ARRAY[]::text[]) AS author_names
+				FROM papers p
+				LEFT JOIN LATERAL (
+				  SELECT array_agg(pa.raw_name ORDER BY pa.author_order) AS author_names
+				  FROM paper_authors pa WHERE pa.paper_id = p.id
+				) a ON true
+				WHERE p.id = ANY(:paperIds) AND p.deleted_at IS NULL
+				ORDER BY p.id
+				FOR UPDATE OF p
 				""").bind("paperIds", paperIds.toArray(UUID[]::new))
 				.map((row, metadata) -> new PaperTarget(
-						row.get("id", UUID.class), row.get("arxiv_id", String.class)))
+						row.get("id", UUID.class), row.get("arxiv_id", String.class),
+						java.util.Arrays.asList(row.get("author_names", String[].class))))
 				.all();
 	}
 
@@ -107,7 +113,11 @@ public final class SourceExtractionRepository {
 						row.get("id", UUID.class), row.get("status", String.class))).one();
 	}
 
-	public record PaperTarget(UUID paperId, String arxivId) { }
+	public record PaperTarget(UUID paperId, String arxivId, List<String> authorNames) {
+		public PaperTarget {
+			authorNames = List.copyOf(authorNames);
+		}
+	}
 
 	public record Command(
 			UUID jobId,

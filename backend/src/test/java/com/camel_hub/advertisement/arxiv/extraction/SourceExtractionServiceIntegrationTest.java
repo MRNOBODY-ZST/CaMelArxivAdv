@@ -73,7 +73,8 @@ class SourceExtractionServiceIntegrationTest {
 		assertThat(text("SELECT type FROM jobs WHERE id = '" + result.jobId() + "'"))
 				.isEqualTo("ARXIV_FETCH_AND_PARSE_SOURCE");
 		assertThat(text("SELECT payload::text FROM outbox_messages LIMIT 1"))
-				.contains("ARXIV_FETCH_AND_PARSE_SOURCE", "2608.00001", "2608.00002", "paperId")
+				.contains("ARXIV_FETCH_AND_PARSE_SOURCE", "2608.00001", "2608.00002",
+						"paperId", "metadataAuthors", "Alice Example")
 				.doesNotContain("Paper title", "abstract", "email", "password");
 	}
 
@@ -135,6 +136,15 @@ class SourceExtractionServiceIntegrationTest {
 				        'https://arxiv.org/pdf/2608.00002')
 				""").bind("one", PAPER_ONE).bind("two", PAPER_TWO)
 				.fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				WITH author AS (
+				  INSERT INTO authors (normalized_name, display_name)
+				  VALUES ('alice example', 'Alice Example') RETURNING id
+				)
+				INSERT INTO paper_authors (
+				  paper_id, author_id, author_order, raw_name, affiliation_data)
+				SELECT :paper, id, 1, 'Alice Example', '[]'::jsonb FROM author
+				""").bind("paper", PAPER_ONE).fetch().rowsUpdated().block();
 	}
 
 	private long count(String table) {

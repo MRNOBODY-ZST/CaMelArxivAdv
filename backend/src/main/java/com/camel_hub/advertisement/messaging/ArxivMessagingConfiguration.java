@@ -10,6 +10,7 @@ import com.camel_hub.advertisement.arxiv.taxonomy.TaxonomySnapshotLoader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -19,11 +20,13 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.reactive.TransactionalOperator;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 
 @Configuration
 @EnableScheduling
+@EnableConfigurationProperties(ArxivMessagingProperties.class)
 public class ArxivMessagingConfiguration {
 
 	static List<NewTopic> topics() {
@@ -110,5 +113,14 @@ public class ArxivMessagingConfiguration {
 			ArxivResultHandler handler, KafkaDeadLetterPublisher deadLetters
 	) {
 		return new ArxivResultConsumer(handler, deadLetters);
+	}
+
+	@Bean
+	@Profile("api")
+	SourceCompletionReconciliationJob sourceCompletionReconciliationJob(
+			ArxivResultRepository repository,
+			ArxivMessagingProperties properties
+	) {
+		return new SourceCompletionReconciliationJob(repository, properties, Clock.systemUTC());
 	}
 }

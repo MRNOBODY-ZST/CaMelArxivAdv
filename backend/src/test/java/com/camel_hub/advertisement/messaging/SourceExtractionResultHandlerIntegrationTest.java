@@ -18,8 +18,13 @@ import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.UUID;
 
@@ -128,20 +133,219 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
-	void refusesSourceCompletionUntilEveryItemResultWasPersisted() {
+	void defersSourceCompletionUntilTheLateItemResultArrives() {
 		String premature = completionMessage(UUID.randomUUID());
 
-		assertThatThrownBy(() -> handler.handle(premature).block())
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessageContaining("item results");
+		handler.handle(premature).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("AWAITING_ITEM_RESULTS");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(flag("SELECT ended_at IS NULL FROM jobs WHERE id = '" + jobId + "'"))
+				.isTrue();
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_COMPLETION_DEFERRED'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isZero();
+
+		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("SUCCEEDED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("COMPLETED");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id = '" + jobId + "'"))
+				.isTrue();
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("SUCCEEDED");
+		assertThat(count("contacts")).isEqualTo(1);
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_COMPLETED'"))
+				.isEqualTo(1);
+	}
+
+	@Test
+	void deferredSourceJobIgnoresInflatedProgressAndRefreshesExactLateItemTotals() {
+		UUID secondItem = UUID.randomUUID();
+		databaseClient.sql("""
+				INSERT INTO job_items (job_id, external_key, status)
+				VALUES (:jobId, :externalKey, 'RUNNING')
+				""").bind("jobId", jobId).bind("externalKey", secondItem.toString())
+				.fetch().rowsUpdated().block();
+		databaseClient.sql("UPDATE jobs SET total_count = 2 WHERE id = :jobId")
+				.bind("jobId", jobId).fetch().rowsUpdated().block();
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+
+		handler.handle(progressMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("AWAITING_ITEM_RESULTS");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(2);
+
+		String inflatedItem = resultMessage(UUID.randomUUID(), "al***@university.edu")
+				.replace("\"processedCount\":1,", "\"processedCount\":2,")
+				.replace("\"successCount\":1,", "\"successCount\":2,")
+				.replace("\"totalCount\":1,", "\"totalCount\":2,");
+		handler.handle(inflatedItem).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("AWAITING_ITEM_RESULTS");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(2);
+		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(50);
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_COMPLETED'"))
+				.isZero();
+	}
+
+	@Test
+	void staleDeferredCompletionFailsOnlyAfterTheReconciliationGracePeriod() {
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+		Instant now = Instant.parse("2026-09-02T08:00:00Z");
+		var repository = new ArxivResultRepository(databaseClient);
+		var reconciliation = new SourceCompletionReconciliationJob(
+				repository, new ArxivMessagingProperties(Duration.ofMinutes(15)),
+				Clock.fixed(now, ZoneOffset.UTC));
+
+		databaseClient.sql("UPDATE jobs SET last_message_at = :lastMessage WHERE id = :jobId")
+				.bind("lastMessage", now.minus(Duration.ofMinutes(14))).bind("jobId", jobId)
+				.fetch().rowsUpdated().block();
+		assertThat(reconciliation.reconcileNow().block()).isZero();
 		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo("RUNNING");
 
+		databaseClient.sql("UPDATE jobs SET last_message_at = :lastMessage WHERE id = :jobId")
+				.bind("lastMessage", now.minus(Duration.ofMinutes(16))).bind("jobId", jobId)
+				.fetch().rowsUpdated().block();
+		var competingReconciliation = new SourceCompletionReconciliationJob(
+				new ArxivResultRepository(databaseClient),
+				new ArxivMessagingProperties(Duration.ofMinutes(15)),
+				Clock.fixed(now, ZoneOffset.UTC));
+		var outcomes = Mono.zip(
+				reconciliation.reconcileNow(), competingReconciliation.reconcileNow()).block();
+		assertThat(outcomes.getT1() + outcomes.getT2()).isEqualTo(1);
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id = '" + jobId + "'"))
+				.isTrue();
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(text("SELECT details->>'errorCode' FROM job_events WHERE job_id = '"
+				+ jobId + "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isEqualTo("SOURCE_RESULTS_INCOMPLETE");
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isEqualTo(1);
+		assertThat(reconciliation.reconcileNow().block()).isZero();
+	}
+
+	@Test
+	void staleDeferredCompletionWithNoItemsFailsAfterTheReconciliationGracePeriod() {
+		databaseClient.sql("DELETE FROM job_items WHERE job_id = :jobId")
+				.bind("jobId", jobId).fetch().rowsUpdated().block();
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+		Instant now = Instant.parse("2026-09-02T08:00:00Z");
+		databaseClient.sql("UPDATE jobs SET last_message_at = :lastMessage WHERE id = :jobId")
+				.bind("lastMessage", now.minus(Duration.ofMinutes(16))).bind("jobId", jobId)
+				.fetch().rowsUpdated().block();
+		var reconciliation = new SourceCompletionReconciliationJob(
+				new ArxivResultRepository(databaseClient),
+				new ArxivMessagingProperties(Duration.ofMinutes(15)),
+				Clock.fixed(now, ZoneOffset.UTC));
+
+		assertThat(reconciliation.reconcileNow().block()).isEqualTo(1);
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(text("SELECT details->>'errorCode' FROM job_events WHERE job_id = '"
+				+ jobId + "' AND event_type = 'ARXIV_JOB_FAILED'"))
+				.isEqualTo("SOURCE_RESULTS_INCOMPLETE");
+	}
+
+	@Test
+	void canceledDeferredJobRejectsBothWatchdogAndLateItemMutations() {
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+		Instant now = Instant.parse("2026-09-02T08:00:00Z");
+		databaseClient.sql("""
+				UPDATE jobs SET status = 'CANCELED', current_stage = 'CANCELED_BY_USER',
+				  cancel_requested = true, ended_at = :endedAt, last_message_at = :lastMessage
+				WHERE id = :jobId
+				""").bind("endedAt", now.minusSeconds(60))
+				.bind("lastMessage", now.minus(Duration.ofMinutes(16))).bind("jobId", jobId)
+				.fetch().rowsUpdated().block();
+		var reconciliation = new SourceCompletionReconciliationJob(
+				new ArxivResultRepository(databaseClient),
+				new ArxivMessagingProperties(Duration.ofMinutes(15)),
+				Clock.fixed(now, ZoneOffset.UTC));
+
+		assertThat(reconciliation.reconcileNow().block()).isZero();
 		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED_BY_USER");
+		assertThat(count("contacts")).isZero();
+		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
+				.isEqualTo("RUNNING");
+		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type IN ('ARXIV_JOB_FAILED','ARXIV_JOB_COMPLETED')"))
+				.isZero();
+	}
+
+	@Test
+	void sourceCompletionUsesPersistedItemTotalsInsteadOfInflatedProgress() {
+		handler.handle(resultMessage(UUID.randomUUID(), "al***@university.edu")).block();
+		databaseClient.sql("""
+				UPDATE jobs SET processed_count = 52, success_count = 52, total_count = 100,
+				  progress_percent = 52 WHERE id = :jobId
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
+
 		handler.handle(completionMessage(UUID.randomUUID())).block();
 
 		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo("SUCCEEDED");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(100);
 	}
 
 	@Test
@@ -163,15 +367,38 @@ class SourceExtractionResultHandlerIntegrationTest {
 				.isEqualTo("Worker stopped before the source batch completed");
 		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id = '" + jobId + "'"))
 				.isTrue();
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
+		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
 		assertThat(number("SELECT count(*) FROM job_items WHERE job_id = '" + jobId
 				+ "' AND status = 'PENDING'"))
-				.isEqualTo(48);
+				.isEqualTo(49);
 		assertThat(number("SELECT count(*) FROM job_events WHERE job_id = '" + jobId
 				+ "' AND event_type = 'ARXIV_JOB_FAILED'"))
 				.isEqualTo(1);
 		assertThat(text("SELECT details->>'errorCode' FROM job_events WHERE job_id = '"
 				+ jobId + "' AND event_type = 'ARXIV_JOB_FAILED'"))
 				.isEqualTo("WORKER_RETRY_EXHAUSTED");
+	}
+
+	@Test
+	void lateCanceledCompletionCannotRewriteFailedSourceItems() {
+		seedPartiallyProcessedItems();
+		handler.handle(failureMessage(UUID.randomUUID())).block();
+
+		handler.handle(canceledCompletionMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(number("SELECT count(*) FROM job_items WHERE job_id = '" + jobId
+				+ "' AND status = 'PENDING'"))
+				.isEqualTo(49);
+		assertThat(number("SELECT count(*) FROM job_items WHERE job_id = '" + jobId
+				+ "' AND status = 'CANCELED'"))
+				.isZero();
 	}
 
 	@Test
@@ -227,6 +454,27 @@ class SourceExtractionResultHandlerIntegrationTest {
 				.isTrue();
 		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
 				.isEqualTo("CANCELED");
+	}
+
+	@Test
+	void canceledSourceCompletionUsesExactPersistedItemTotals() {
+		seedPartiallyProcessedItems();
+
+		handler.handle(canceledCompletionMessage(UUID.randomUUID())).block();
+
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(100);
+		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(51);
+		assertThat(number("SELECT count(*) FROM job_items WHERE job_id = '" + jobId
+				+ "' AND status = 'CANCELED'"))
+				.isEqualTo(49);
 	}
 
 	@Test
@@ -370,6 +618,17 @@ class SourceExtractionResultHandlerIntegrationTest {
 				""".formatted(messageId, jobId, messageId);
 	}
 
+	private String progressMessage(UUID messageId) {
+		return """
+				{"version":1,"messageId":"%s","type":"ARXIV_JOB_PROGRESS","jobId":"%s",
+				 "idempotencyKey":"source-progress:%s","traceId":"0123456789abcdef",
+				 "occurredAt":"2026-08-06T01:00:01Z","payload":{
+				 "status":"RUNNING","stage":"EXTRACTING_CONTACTS","processedCount":2,
+				 "successCount":2,"skippedCount":0,"failedCount":0,"totalCount":2,
+				 "progressPercent":100,"checkpoint":{},"papers":[],"extractions":[]}}
+				""".formatted(messageId, jobId, messageId);
+	}
+
 	private String failureMessage(UUID messageId) {
 		return """
 				{"version":1,"messageId":"%s","type":"ARXIV_JOB_FAILED","jobId":"%s",
@@ -391,8 +650,8 @@ class SourceExtractionResultHandlerIntegrationTest {
 		databaseClient.sql("""
 				INSERT INTO job_items (job_id, external_key, status, completed_at)
 				SELECT :jobId, 'checkpoint-item-' || value,
-				       CASE WHEN value <= 51 THEN 'SUCCEEDED' ELSE 'PENDING' END,
-				       CASE WHEN value <= 51 THEN now() ELSE NULL END
+				       CASE WHEN value <= 50 THEN 'SUCCEEDED' ELSE 'PENDING' END,
+				       CASE WHEN value <= 50 THEN now() ELSE NULL END
 				FROM generate_series(1, 99) AS value
 				""").bind("jobId", jobId).fetch().rowsUpdated().block();
 		databaseClient.sql("""

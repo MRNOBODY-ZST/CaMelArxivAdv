@@ -67,6 +67,9 @@ springdoc:
 
 app:
   live-smtp-allowed: ${ALLOW_LIVE_SMTP:false}
+  messaging:
+    source-completion-grace: ${SOURCE_COMPLETION_GRACE:PT15M}
+    source-completion-reconcile-delay-ms: ${SOURCE_COMPLETION_RECONCILE_DELAY_MS:60000}
   persistence:
     enabled: ${APP_PERSISTENCE_ENABLED:true}
   personalization:

@@ -107,6 +107,12 @@ if [[ $(jq -r '.services["backend-api"].environment.TRACKING_PUBLIC_BASE_URL' <<
   exit 1
 fi
 
+if [[ $(jq -r '.services["backend-api"].environment.SOURCE_COMPLETION_GRACE' <<<"$compose_json") != "PT15M" ]] \
+  || [[ $(jq -r '.services["backend-api"].environment.SOURCE_COMPLETION_RECONCILE_DELAY_MS' <<<"$compose_json") != "60000" ]]; then
+  echo "backend-api must receive the durable Source completion reconciliation window" >&2
+  exit 1
+fi
+
 if [[ $(jq -r '.services["backend-api"].environment.SMTP_LOCAL_ALLOWED_HOSTS' <<<"$compose_json") != *"mailpit"* ]]; then
   echo "backend-api local SMTP allowlist must include Mailpit" >&2
   exit 1

@@ -12,6 +12,9 @@ import io.r2dbc.spi.ConnectionFactories;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -69,6 +72,10 @@ class JobServiceIntegrationTest {
 	@Test
 	void pausesResumesAndCancelsWithVersionedEvents() {
 		UUID jobId = insertJob(JobStatus.RUNNING, false);
+		databaseClient.sql("""
+				INSERT INTO job_items (job_id, external_key, status)
+				VALUES (:jobId, 'metadata-page-1', 'PENDING')
+				""").bind("jobId", jobId).fetch().rowsUpdated().block();
 
 		var paused = service.control(jobId, JobAction.PAUSE, ACTOR_ID, context()).block();
 		var resumed = service.control(jobId, JobAction.RESUME, ACTOR_ID, context()).block();
@@ -81,6 +88,11 @@ class JobServiceIntegrationTest {
 		assertThat(canceled.endedAt()).isNotNull();
 		assertThat(service.events(jobId, 0, 20).block()).extracting(JobService.JobEventView::eventType)
 				.containsExactly("JOB_PAUSED", "JOB_RESUMED", "JOB_CANCELED");
+		assertThat(databaseClient.sql("""
+				SELECT status FROM job_items WHERE job_id = :jobId
+				""").bind("jobId", jobId)
+				.map((row, metadata) -> row.get("status", String.class)).one().block())
+				.isEqualTo("PENDING");
 	}
 
 	@Test
@@ -122,6 +134,98 @@ class JobServiceIntegrationTest {
 				""").bind("jobId", retry.id())
 				.map((row, metadata) -> row.get(0, String.class)).one().block())
 				.isEqualTo(retry.id().toString());
+	}
+
+	@ParameterizedTest
+	@EnumSource(value = JobStatus.class, names = {"FAILED", "CANCELED"})
+	void sourceRetryRecreatesPendingItemsThatMatchEveryRepublishedTarget(JobStatus terminalStatus) {
+		SourceJob original = insertSourceJob(terminalStatus);
+
+		JobService.JobView retry = service.control(
+				original.jobId(), JobAction.RETRY, ACTOR_ID, context()).block();
+
+		assertThat(retry.status()).isEqualTo(JobStatus.PENDING);
+		assertThat(retry.totalCount()).isEqualTo(2);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total
+				FROM job_items item
+				JOIN outbox_messages message ON message.aggregate_id = item.job_id
+				CROSS JOIN LATERAL jsonb_array_elements(
+				  message.payload->'payload'->'targets') target
+				WHERE item.job_id = :jobId
+				  AND item.status = 'PENDING'
+				  AND item.external_key = target->>'paperId'
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isEqualTo(2L);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM job_items
+				WHERE job_id = :jobId AND external_key = ANY(:externalKeys)
+				""").bind("jobId", retry.id())
+				.bind("externalKeys", original.paperIds().stream()
+						.map(UUID::toString).toArray(String[]::new))
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isEqualTo(2L);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM job_items
+				WHERE job_id = :jobId AND status <> 'PENDING'
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isZero();
+	}
+
+	@Test
+	void sourceRetryRebuildsItemsFromStoredTargetsWhenALegacyRetryHasNoItems() {
+		SourceJob original = insertSourceJob(JobStatus.FAILED);
+		databaseClient.sql("DELETE FROM job_items WHERE job_id = :jobId")
+				.bind("jobId", original.jobId()).fetch().rowsUpdated().block();
+
+		JobService.JobView retry = service.control(
+				original.jobId(), JobAction.RETRY, ACTOR_ID, context()).block();
+
+		assertThat(databaseClient.sql("""
+				SELECT coalesce(array_agg(external_key ORDER BY external_key), ARRAY[]::text[]) AS keys
+				FROM job_items WHERE job_id = :jobId AND status = 'PENDING'
+				""").bind("jobId", retry.id())
+				.map((row, metadata) -> List.of(row.get("keys", String[].class))).one().block())
+				.containsExactlyElementsOf(original.paperIds().stream()
+						.map(UUID::toString).sorted().toList());
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"PENDING", "RUNNING"})
+	void cancelingASourceJobClosesOpenItemsAndUsesExactPersistedCounters(String openStatus) {
+		SourceJob source = insertSourceJob(JobStatus.FAILED);
+		databaseClient.sql("""
+				UPDATE jobs SET status = 'RUNNING', ended_at = NULL, current_stage = 'EXTRACTING',
+				  processed_count = 2, success_count = 2, failed_count = 0,
+				  progress_percent = 100
+				WHERE id = :jobId
+				""").bind("jobId", source.jobId()).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				UPDATE job_items SET status = CASE
+				  WHEN external_key = :firstPaper THEN 'SUCCEEDED' ELSE :openStatus END,
+				  completed_at = CASE WHEN external_key = :firstPaper THEN now() ELSE NULL END
+				WHERE job_id = :jobId
+				""").bind("firstPaper", source.paperIds().getFirst().toString())
+				.bind("openStatus", openStatus)
+				.bind("jobId", source.jobId()).fetch().rowsUpdated().block();
+
+		JobService.JobView canceled = service.control(
+				source.jobId(), JobAction.CANCEL, ACTOR_ID, context()).block();
+
+		assertThat(canceled.status()).isEqualTo(JobStatus.CANCELED);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM job_items
+				WHERE job_id = :jobId AND status = 'CANCELED' AND completed_at IS NOT NULL
+				""").bind("jobId", source.jobId())
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isEqualTo(1L);
+		assertThat(databaseClient.sql("""
+				SELECT processed_count, success_count, skipped_count, failed_count,
+				       total_count, progress_percent::bigint AS progress
+				FROM jobs WHERE id = :jobId
+				""").bind("jobId", source.jobId()).map((row, metadata) -> List.of(
+						row.get("processed_count", Long.class), row.get("success_count", Long.class),
+						row.get("skipped_count", Long.class), row.get("failed_count", Long.class),
+						row.get("total_count", Long.class), row.get("progress", Long.class)))
+				.one().block()).containsExactly(1L, 1L, 0L, 0L, 2L, 50L);
 	}
 
 	@Test
@@ -168,6 +272,34 @@ class JobServiceIntegrationTest {
 		return id;
 	}
 
+	private SourceJob insertSourceJob(JobStatus status) {
+		UUID jobId = UUID.randomUUID();
+		List<UUID> paperIds = List.of(UUID.randomUUID(), UUID.randomUUID());
+		databaseClient.sql("""
+				INSERT INTO jobs (
+				  id, type, status, created_by, parameters, idempotency_key,
+				  total_count, processed_count, success_count, failed_count,
+				  current_stage, started_at, ended_at)
+				VALUES (
+				  :id, 'ARXIV_FETCH_AND_PARSE_SOURCE', :status, :actor,
+				  jsonb_build_object(
+				    'parserVersion', '0.1.0',
+				    'targets', jsonb_build_array(
+				      jsonb_build_object('paperId', :firstPaper, 'arxivId', '2609.00001'),
+				      jsonb_build_object('paperId', :secondPaper, 'arxivId', '2609.00002'))),
+				  :key, 2, 2, 1, 1, 'FAILED', now(), now())
+				""").bind("id", jobId).bind("status", status.name()).bind("actor", ACTOR_ID)
+				.bind("firstPaper", paperIds.get(0)).bind("secondPaper", paperIds.get(1))
+				.bind("key", "source-retry-test:" + jobId).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO job_items (job_id, external_key, status, attempt_count, completed_at)
+				VALUES (:jobId, :firstPaper, 'SUCCEEDED', 2, now()),
+				       (:jobId, :secondPaper, 'FAILED', 3, now())
+				""").bind("jobId", jobId).bind("firstPaper", paperIds.get(0).toString())
+				.bind("secondPaper", paperIds.get(1).toString()).fetch().rowsUpdated().block();
+		return new SourceJob(jobId, paperIds);
+	}
+
 	private AuthenticationRequestContext context() {
 		return new AuthenticationRequestContext("192.0.2.5", "job-test", "0123456789abcdef");
 	}
@@ -177,4 +309,6 @@ class JobServiceIntegrationTest {
 				+ "@" + POSTGRES.getHost() + ":" + POSTGRES.getFirstMappedPort()
 				+ "/" + POSTGRES.getDatabaseName();
 	}
+
+	private record SourceJob(UUID jobId, List<UUID> paperIds) { }
 }

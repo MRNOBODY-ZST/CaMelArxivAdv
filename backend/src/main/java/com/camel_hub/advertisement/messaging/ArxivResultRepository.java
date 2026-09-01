@@ -27,6 +27,7 @@ public class ArxivResultRepository {
 		return databaseClient.sql("""
 				SELECT id, type, status FROM jobs
 				WHERE id = :jobId AND type LIKE 'ARXIV_%'
+				FOR UPDATE
 				""").bind("jobId", jobId)
 				.map((row, metadata) -> new JobRecord(
 						row.get("id", UUID.class), row.get("type", String.class),
@@ -129,6 +130,172 @@ public class ArxivResultRepository {
 				.fetch().rowsUpdated().map(rows -> rows == 1);
 	}
 
+	public Mono<Boolean> applySourceTerminalExact(
+			UUID jobId,
+			ArxivResultMessage.Payload payload
+	) {
+		String status = terminalStatus(payload.status());
+		return databaseClient.sql("""
+				UPDATE jobs SET
+				  status = :status, current_stage = :stage,
+				  processed_count = :processed, success_count = :success,
+				  skipped_count = :skipped, failed_count = :failed, total_count = :total,
+				  progress_percent = :progress,
+				  error_summary = nullif(:errorSummary, ''),
+				  heartbeat_at = now(), last_message_at = now(),
+				  ended_at = coalesce(ended_at, now()), updated_at = now(), version = version + 1
+				WHERE id = :jobId
+				  AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED','CANCELED')
+				""").bind("status", status).bind("stage", safeStage(payload.stage()))
+				.bind("processed", nonNegative(payload.processedCount()))
+				.bind("success", nonNegative(payload.successCount()))
+				.bind("skipped", nonNegative(payload.skippedCount()))
+				.bind("failed", nonNegative(payload.failedCount()))
+				.bind("total", nonNegative(payload.totalCount()))
+				.bind("progress", boundedProgress(payload.progressPercent()))
+				.bind("errorSummary", valueOrEmpty(safeError(payload.errorSummary())))
+				.bind("jobId", jobId).fetch().rowsUpdated().map(rows -> rows == 1);
+	}
+
+	public Mono<Void> applySourceWaitingExact(
+			UUID jobId,
+			ArxivResultMessage.Payload payload
+	) {
+		return databaseClient.sql("""
+				UPDATE jobs SET
+				  current_stage = :stage,
+				  processed_count = :processed, success_count = :success,
+				  skipped_count = :skipped, failed_count = :failed, total_count = :total,
+				  progress_percent = :progress,
+				  heartbeat_at = now(), last_message_at = now(),
+				  updated_at = now(), version = version + 1
+				WHERE id = :jobId
+				  AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED','CANCELED')
+				""").bind("stage", safeStage(payload.stage()))
+				.bind("processed", nonNegative(payload.processedCount()))
+				.bind("success", nonNegative(payload.successCount()))
+				.bind("skipped", nonNegative(payload.skippedCount()))
+				.bind("failed", nonNegative(payload.failedCount()))
+				.bind("total", nonNegative(payload.totalCount()))
+				.bind("progress", boundedProgress(payload.progressPercent()))
+				.bind("jobId", jobId).fetch().rowsUpdated().then();
+	}
+
+	public Mono<Boolean> applySourceCanceledExact(
+			UUID jobId,
+			ArxivResultMessage.Payload payload
+	) {
+		return databaseClient.sql("""
+				UPDATE jobs SET
+				  status = 'CANCELED',
+				  current_stage = CASE WHEN status = 'CANCELED' THEN current_stage ELSE :stage END,
+				  processed_count = :processed, success_count = :success,
+				  skipped_count = :skipped, failed_count = :failed, total_count = :total,
+				  progress_percent = :progress,
+				  error_summary = CASE WHEN status = 'CANCELED' THEN error_summary
+				                       ELSE nullif(:errorSummary, '') END,
+				  heartbeat_at = now(), last_message_at = now(),
+				  ended_at = coalesce(ended_at, now()), updated_at = now(), version = version + 1
+				WHERE id = :jobId
+				  AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED')
+				""").bind("stage", safeStage(payload.stage()))
+				.bind("processed", nonNegative(payload.processedCount()))
+				.bind("success", nonNegative(payload.successCount()))
+				.bind("skipped", nonNegative(payload.skippedCount()))
+				.bind("failed", nonNegative(payload.failedCount()))
+				.bind("total", nonNegative(payload.totalCount()))
+				.bind("progress", boundedProgress(payload.progressPercent()))
+				.bind("errorSummary", valueOrEmpty(safeError(payload.errorSummary())))
+				.bind("jobId", jobId).fetch().rowsUpdated().map(rows -> rows == 1);
+	}
+
+	public Mono<Boolean> hasDeferredSourceCompletion(UUID jobId) {
+		return databaseClient.sql("""
+				SELECT EXISTS (
+				  SELECT 1 FROM job_events
+				  WHERE job_id = :jobId AND event_type = 'ARXIV_JOB_COMPLETION_DEFERRED'
+				) AS deferred
+				""").bind("jobId", jobId)
+				.map((row, metadata) -> Boolean.TRUE.equals(row.get("deferred", Boolean.class))).one();
+	}
+
+	public Mono<Long> reconcileStaleDeferredSourceCompletions(
+			Instant cutoff,
+			Instant completedAt
+	) {
+		return databaseClient.sql("""
+				WITH item_totals AS (
+				  SELECT job_id, count(*) AS total,
+				         count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded,
+				         count(*) FILTER (WHERE status = 'SKIPPED') AS skipped,
+				         count(*) FILTER (WHERE status = 'FAILED') AS failed
+				  FROM job_items
+				  GROUP BY job_id
+				), candidates AS (
+				  SELECT j.id,
+				         coalesce(totals.total, 0) AS total,
+				         coalesce(totals.succeeded, 0) AS succeeded,
+				         coalesce(totals.skipped, 0) AS skipped,
+				         coalesce(totals.failed, 0) AS failed,
+				         coalesce(totals.succeeded, 0) + coalesce(totals.skipped, 0)
+				           + coalesce(totals.failed, 0) AS processed
+				  FROM jobs j
+				  LEFT JOIN item_totals totals ON totals.job_id = j.id
+				  WHERE j.type IN ('ARXIV_FETCH_AND_PARSE_SOURCE', 'ARXIV_REEXTRACT_CONTACTS')
+				    AND j.status IN ('PENDING','QUEUED','RUNNING','PAUSED')
+				    AND coalesce(j.last_message_at, j.updated_at, j.created_at) < :cutoff
+				    AND (coalesce(totals.total, 0) = 0
+				      OR coalesce(totals.succeeded, 0) + coalesce(totals.skipped, 0)
+				        + coalesce(totals.failed, 0) <> totals.total)
+				    AND EXISTS (
+				      SELECT 1 FROM job_events event
+				      WHERE event.job_id = j.id
+				        AND event.event_type = 'ARXIV_JOB_COMPLETION_DEFERRED'
+				    )
+				  ORDER BY coalesce(j.last_message_at, j.updated_at, j.created_at), j.id
+				  FOR UPDATE OF j SKIP LOCKED
+				  LIMIT 100
+				), updated AS (
+				  UPDATE jobs job SET
+				    status = 'FAILED', current_stage = 'FAILED',
+				    processed_count = candidate.processed,
+				    success_count = candidate.succeeded,
+				    skipped_count = candidate.skipped,
+				    failed_count = candidate.failed,
+				    total_count = candidate.total,
+				    progress_percent = CASE WHEN candidate.total = 0 THEN 0
+				      ELSE candidate.processed * 100.0 / candidate.total END,
+				    error_summary = 'Source extraction completion timed out while waiting for item results',
+				    heartbeat_at = :completedAt, last_message_at = :completedAt,
+				    ended_at = :completedAt, updated_at = :completedAt, version = version + 1
+				  FROM candidates candidate
+				  WHERE job.id = candidate.id
+				    AND job.status IN ('PENDING','QUEUED','RUNNING','PAUSED')
+				    AND coalesce(job.last_message_at, job.updated_at, job.created_at) < :cutoff
+				  RETURNING job.id, candidate.total, candidate.succeeded, candidate.skipped,
+				            candidate.failed, candidate.processed
+				), events AS (
+				  INSERT INTO job_events (
+				    job_id, event_type, stage, message, details, occurred_at
+				  )
+				  SELECT id, 'ARXIV_JOB_FAILED', 'FAILED',
+				         'Source extraction completion timed out while waiting for item results',
+				         jsonb_build_object(
+				           'processedCount', processed, 'successCount', succeeded,
+				           'skippedCount', skipped, 'failedCount', failed,
+				           'totalCount', total,
+				           'progressPercent', CASE WHEN total = 0 THEN 0
+				             ELSE processed * 100.0 / total END,
+				           'errorCode', 'SOURCE_RESULTS_INCOMPLETE'),
+				         :completedAt
+				  FROM updated
+				  RETURNING id
+				)
+				SELECT count(*) AS total FROM events
+				""").bind("cutoff", cutoff).bind("completedAt", completedAt)
+				.map((row, metadata) -> value(row.get("total", Long.class))).one();
+	}
+
 	public Mono<Void> cancelOpenExtractionItems(UUID jobId) {
 		return databaseClient.sql("""
 				UPDATE job_items SET status = 'CANCELED', completed_at = coalesce(completed_at, now())
@@ -136,10 +303,7 @@ public class ArxivResultRepository {
 				""").bind("jobId", jobId).fetch().rowsUpdated().then();
 	}
 
-	public Mono<Void> assertExtractionItemsTerminal(
-			UUID jobId,
-			ArxivResultMessage.Payload payload
-	) {
+	public Mono<ItemTotals> extractionItemTotals(UUID jobId) {
 		return databaseClient.sql("""
 				SELECT count(*) AS total,
 				       count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded,
@@ -152,16 +316,7 @@ public class ArxivResultRepository {
 						value(row.get("succeeded", Long.class)),
 						value(row.get("skipped", Long.class)),
 						value(row.get("failed", Long.class)),
-						value(row.get("pending", Long.class)))).one()
-				.flatMap(totals -> totals.total() > 0 && totals.pending() == 0
-						&& totals.total() == payload.totalCount()
-						&& totals.total() == payload.processedCount()
-						&& totals.succeeded() == payload.successCount()
-						&& totals.skipped() == payload.skippedCount()
-						&& totals.failed() == payload.failedCount()
-						? Mono.empty()
-						: Mono.error(new IllegalArgumentException(
-								"Source job cannot complete before all item results are persisted")));
+						value(row.get("pending", Long.class)))).one();
 	}
 
 	public Mono<Void> upsertSyncCursor(UUID jobId, String checkpointJson) {
@@ -257,6 +412,8 @@ public class ArxivResultRepository {
 			case "ARXIV_EXTRACTION_RESULT" -> "Worker returned a Source extraction result";
 			case "ARXIV_JOB_PROGRESS" -> "Worker reported arXiv job progress";
 			case "ARXIV_JOB_COMPLETED" -> "Worker completed the arXiv job";
+			case "ARXIV_JOB_COMPLETION_DEFERRED" ->
+					"Worker completed the arXiv job before every item result arrived";
 			case "ARXIV_JOB_FAILED" -> "Worker reported an arXiv job failure";
 			default -> "Worker reported an arXiv job event";
 		};
@@ -265,5 +422,9 @@ public class ArxivResultRepository {
 	public record JobRecord(UUID id, String type, String status) {
 	}
 
-	private record ItemTotals(long total, long succeeded, long skipped, long failed, long pending) { }
+	public record ItemTotals(long total, long succeeded, long skipped, long failed, long pending) {
+		public long processed() {
+			return succeeded + skipped + failed;
+		}
+	}
 }

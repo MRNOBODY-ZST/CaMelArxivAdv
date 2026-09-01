@@ -118,12 +118,18 @@ public class JobService {
 		boolean canceled = target == JobStatus.CANCELED;
 		return repository.updateStatus(original.id(), original.version(), target, paused, canceled)
 				.flatMap(rows -> rows == 1
-						? repository.appendEvent(
-								original.id(), eventType(action), stage(target), eventMessage(action))
+						? cancelSourceItems(original, target).then(repository.appendEvent(
+								original.id(), eventType(action), stage(target), eventMessage(action)))
 						: Mono.error(new JobConflictException("Job changed while the command was being applied")))
 				.then(audit(original.id(), action, original.status(), target, actorUserId, context))
 				.then(repository.find(original.id()))
 				.map(this::view);
+	}
+
+	private Mono<Void> cancelSourceItems(JobRepository.JobRecord original, JobStatus target) {
+		return target == JobStatus.CANCELED && Set.of(
+				"ARXIV_FETCH_AND_PARSE_SOURCE", "ARXIV_REEXTRACT_CONTACTS").contains(original.type())
+				? repository.cancelOpenItems(original.id()) : Mono.empty();
 	}
 
 	private Mono<JobView> retry(
