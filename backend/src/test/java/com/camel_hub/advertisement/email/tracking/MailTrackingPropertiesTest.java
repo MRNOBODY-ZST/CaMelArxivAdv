@@ -48,6 +48,21 @@ class MailTrackingPropertiesTest {
 		assertThat(new MailTrackingProperties(true, "http://localhost:8080", KEY, Duration.ofDays(90)).tokenTtl()).isEqualTo(Duration.ofDays(90));
 	}
 
+	@Test
+	void staleSendingWindowDefaultsToFifteenMinutesAndHasSafeBounds() {
+		assertThat(new MailTrackingProperties(false, "http://localhost:8080", "", null, null).staleSendingAfter())
+				.isEqualTo(Duration.ofMinutes(15));
+		assertThat(new MailTrackingProperties(false, "http://localhost:8080", "", Duration.ofDays(30),
+				Duration.ofMinutes(5)).staleSendingAfter()).isEqualTo(Duration.ofMinutes(5));
+		assertThat(new MailTrackingProperties(false, "http://localhost:8080", "", Duration.ofDays(30),
+				Duration.ofDays(1)).staleSendingAfter()).isEqualTo(Duration.ofDays(1));
+		for (Duration window : new Duration[] {Duration.ofMinutes(5).minusSeconds(1), Duration.ofDays(1).plusSeconds(1),
+				Duration.ofMinutes(15).plusNanos(1)}) {
+			assertThatThrownBy(() -> new MailTrackingProperties(false, "http://localhost:8080", "",
+					Duration.ofDays(30), window)).isInstanceOf(IllegalArgumentException.class);
+		}
+	}
+
 	private MailTrackingProperties properties(String origin) {
 		return new MailTrackingProperties(true, origin, KEY, Duration.ofDays(30));
 	}

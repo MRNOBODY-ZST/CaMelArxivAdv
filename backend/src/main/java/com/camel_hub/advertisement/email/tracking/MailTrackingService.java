@@ -6,6 +6,7 @@ import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -26,10 +27,18 @@ public final class MailTrackingService {
 	private final MailOpenClassifier classifier;
 	private final MailLinkRewriter linkRewriter;
 	private final Clock clock;
+	private final TransactionalOperator transactions;
 
 	public MailTrackingService(
 			MailTrackingRepository repository, MailTrackingProperties properties, MailTrackingSigner signer,
 			MailOpenClassifier classifier, Clock clock
+	) {
+		this(repository, properties, signer, classifier, clock, null);
+	}
+
+	public MailTrackingService(
+			MailTrackingRepository repository, MailTrackingProperties properties, MailTrackingSigner signer,
+			MailOpenClassifier classifier, Clock clock, TransactionalOperator transactions
 	) {
 		this.repository = repository;
 		this.properties = properties;
@@ -37,6 +46,7 @@ public final class MailTrackingService {
 		this.classifier = classifier;
 		this.linkRewriter = signer == null ? null : new MailLinkRewriter(signer, properties.publicBaseUrl());
 		this.clock = clock;
+		this.transactions = transactions;
 	}
 
 	public TrackingStatus status() {
@@ -76,20 +86,23 @@ public final class MailTrackingService {
 					: new MailLinkRewriter.RewriteResult(message.html(), java.util.List.of());
 			SmtpTransport.OutboundMessage rewritten = withHtml(message, rewrite.html());
 			SmtpTransport.OutboundMessage outbound = trackOpens ? withPixel(rewritten, token) : message;
-			return repository.insert(id, actorId, accountId, source, mask(message.recipient()), message.subject(),
+			Mono<Void> preparation = repository.insert(id, actorId, accountId, source, mask(message.recipient()), message.subject(),
 					createdAt, expiresAt, token == null ? null : MailTrackingSigner.digest(token))
-					.then(repository.insertLinks(id, rewrite.links(), createdAt))
-					.then(Mono.fromRunnable(() -> smtpAttempt.accept(outbound)).subscribeOn(Schedulers.boundedElastic())
-							.thenReturn(new Outcome(Status.SMTP_ACCEPTED, null))
-							.onErrorResume(error -> Mono.just(outcome(error))))
+					.then(repository.insertLinks(id, rewrite.links(), createdAt));
+			if (transactions != null) preparation = preparation.as(transactions::transactional);
+			Mono<Outcome> durableAttempt = Mono.fromRunnable(() -> smtpAttempt.accept(outbound))
+					.subscribeOn(Schedulers.boundedElastic()).thenReturn(new Outcome(Status.SMTP_ACCEPTED, null))
+					.onErrorResume(error -> Mono.just(outcome(error)))
 					.flatMap(outcome -> repository.complete(id, outcome.status(), outcome.failure() == null ? null
 							: outcome.failure().category().name(), clock.instant())
 							.onErrorResume(error -> {
 								// Outcome persistence must never cause a resend or downgrade an accepted attempt.
 								LOGGER.warn("Mail send outcome persistence unavailable recordId={} outcome={}", id, outcome.status());
 								return Mono.empty();
-							})
-							.then(outcome.failure() == null ? Mono.empty() : Mono.error(outcome.failure())));
+							}).thenReturn(outcome))
+					.cache();
+			return preparation.then(Mono.defer(() -> durableAttempt.flatMap(outcome -> outcome.failure() == null
+					? Mono.empty() : Mono.error(outcome.failure()))));
 		});
 	}
 

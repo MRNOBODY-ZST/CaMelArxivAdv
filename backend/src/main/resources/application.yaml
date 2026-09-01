@@ -127,6 +127,7 @@ app:
     public-base-url: ${TRACKING_PUBLIC_BASE_URL:${PUBLIC_BASE_URL:http://localhost:8080}}
     signing-key-base64: ${TRACKING_SIGNING_KEY_BASE64:}
     token-ttl: ${TRACKING_TOKEN_TTL:PT720H}
+    stale-sending-after: ${TRACKING_STALE_SENDING_AFTER:PT15M}
   smtp:
     live-allowed: ${ALLOW_LIVE_SMTP:false}
     local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}

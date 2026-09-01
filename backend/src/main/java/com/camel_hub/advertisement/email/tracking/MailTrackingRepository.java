@@ -46,6 +46,14 @@ public final class MailTrackingRepository {
 				: Mono.error(new IllegalStateException("Mail send outcome could not be recorded")));
 	}
 
+	public Mono<Long> reconcileStale(Instant cutoff, Instant completedAt) {
+		return database.sql("""
+				UPDATE mail_send_records
+				SET status = 'UNKNOWN', failure_category = 'SEND_OUTCOME_MISSING', completed_at = :completed
+				WHERE status = 'SENDING' AND created_at < :cutoff
+				""").bind("cutoff", cutoff).bind("completed", completedAt).fetch().rowsUpdated();
+	}
+
 	public Mono<Void> observe(
 			MailTrackingSigner.VerifiedToken token, MailOpenClassifier.Observation observation, Instant occurredAt
 	) {

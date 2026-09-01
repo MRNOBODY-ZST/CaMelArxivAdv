@@ -60,6 +60,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -628,6 +630,74 @@ class MailTrackingApiIntegrationTest {
 			String expected = table.equals("mail_send_records") ? "SENDING" : "SMTP_ACCEPTED";
 			assertThat(detail(result.path("correlationId").asText()).at("/record/status").asText()).isEqualTo(expected);
 		});
+	}
+
+	@Test
+	void cancelingTheRequestAfterSmtpStartsCannotAbandonTheAcceptedOutcome() throws Exception {
+		UUID id = UUID.randomUUID();
+		CountDownLatch started = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		var subscription = tracking.send(ACTOR, accountId, MailTrackingModels.Source.SMTP_DIAGNOSTIC,
+				new SmtpTransport.OutboundMessage("qa@example.invalid", "Canceled request", "Research Team",
+						"reply@example.invalid", "<p>body</p>", "body", id.toString()), false, message -> {
+					started.countDown();
+					boolean released = false;
+					while (!released) {
+						try {
+							released = release.await(5, TimeUnit.SECONDS);
+						}
+						catch (InterruptedException ignored) {
+							// Simulate an SMTP client that completes independently of the canceled HTTP subscriber.
+						}
+					}
+				}).subscribe(ignored -> { }, ignored -> { });
+		assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+		assertThat(trackingRepository.find(id).block().status()).isEqualTo(MailTrackingModels.Status.SENDING);
+		subscription.dispose();
+		release.countDown();
+
+		MailTrackingModels.MailSendRecord terminal = reactor.core.publisher.Flux.interval(Duration.ZERO, Duration.ofMillis(20))
+				.concatMap(ignored -> trackingRepository.find(id))
+				.filter(record -> record.status() != MailTrackingModels.Status.SENDING).next().block(Duration.ofSeconds(5));
+		assertThat(terminal).isNotNull();
+		assertThat(terminal.status()).isEqualTo(MailTrackingModels.Status.SMTP_ACCEPTED);
+		assertThat(terminal.completedAt()).isNotNull();
+	}
+
+	@Test
+	void clickLinkPersistenceFailureRollsBackTheRecordBeforeSmtp() {
+		withRejectedWrites("mail_click_links", "INSERT", () -> {
+			assertThatThrownBy(() -> tracking.send(ACTOR, accountId, MailTrackingModels.Source.TEMPLATE_TEST,
+					new SmtpTransport.OutboundMessage("qa@example.invalid", "Link insert failure", "Research Team",
+							"reply@example.invalid", "<a href=\"https://example.invalid/paper\">Paper</a>",
+							"Paper", UUID.randomUUID().toString()), true, outbound::add).block())
+					.isInstanceOf(RuntimeException.class);
+			assertThat(outbound).isEmpty();
+			assertThat(count("mail_send_records")).isZero();
+			assertThat(count("mail_click_links")).isZero();
+		});
+	}
+
+	@Test
+	void staleSendingReconciliationIsTruthfulBoundedAndIdempotent() {
+		Instant now = Instant.parse("2026-09-01T08:00:00Z");
+		UUID stale = UUID.randomUUID();
+		UUID recent = UUID.randomUUID();
+		trackingRepository.insert(stale, ACTOR, accountId, MailTrackingModels.Source.SMTP_DIAGNOSTIC,
+				"q***@example.invalid", "Stale", now.minus(Duration.ofMinutes(16)), null, null).block();
+		trackingRepository.insert(recent, ACTOR, accountId, MailTrackingModels.Source.SMTP_DIAGNOSTIC,
+				"q***@example.invalid", "Recent", now.minus(Duration.ofMinutes(14)), null, null).block();
+		MailSendReconciliationJob job = new MailSendReconciliationJob(trackingRepository,
+				new MailTrackingProperties(true, "http://localhost:8080", TRACKING_KEY, Duration.ofDays(30),
+						Duration.ofMinutes(15)), new MutableClock(now));
+
+		assertThat(job.reconcileNow().block()).isEqualTo(1);
+		MailTrackingModels.MailSendRecord reconciled = trackingRepository.find(stale).block();
+		assertThat(reconciled.status()).isEqualTo(MailTrackingModels.Status.UNKNOWN);
+		assertThat(reconciled.failureCategory()).isEqualTo("SEND_OUTCOME_MISSING");
+		assertThat(reconciled.completedAt()).isEqualTo(now);
+		assertThat(trackingRepository.find(recent).block().status()).isEqualTo(MailTrackingModels.Status.SENDING);
+		assertThat(job.reconcileNow().block()).isZero();
 	}
 
 	@Test

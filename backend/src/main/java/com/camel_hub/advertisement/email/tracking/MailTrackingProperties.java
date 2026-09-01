@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.email.tracking;
 
 import io.netty.util.NetUtil;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 import java.net.InetAddress;
 import java.net.URI;
@@ -12,19 +13,29 @@ import java.util.Locale;
 
 @ConfigurationProperties("app.mail-tracking")
 public record MailTrackingProperties(
-		boolean enabled, String publicBaseUrl, String signingKeyBase64, Duration tokenTtl
+		boolean enabled, String publicBaseUrl, String signingKeyBase64, Duration tokenTtl, Duration staleSendingAfter
 ) {
+	@ConstructorBinding
 	public MailTrackingProperties {
 		if (tokenTtl == null) tokenTtl = Duration.ofDays(30);
+		if (staleSendingAfter == null) staleSendingAfter = Duration.ofMinutes(15);
 		if (tokenTtl.compareTo(Duration.ofMinutes(1)) < 0 || tokenTtl.compareTo(Duration.ofDays(90)) > 0
 				|| tokenTtl.getNano() != 0) {
 			throw new IllegalArgumentException("Tracking token TTL must be whole seconds between one minute and 90 days");
+		}
+		if (staleSendingAfter.compareTo(Duration.ofMinutes(5)) < 0
+				|| staleSendingAfter.compareTo(Duration.ofDays(1)) > 0 || staleSendingAfter.getNano() != 0) {
+			throw new IllegalArgumentException("Stale mail send window must be whole seconds between five minutes and one day");
 		}
 		publicBaseUrl = validateOrigin(publicBaseUrl);
 		if (enabled) {
 			byte[] key = decodeKey(signingKeyBase64);
 			Arrays.fill(key, (byte) 0);
 		}
+	}
+
+	public MailTrackingProperties(boolean enabled, String publicBaseUrl, String signingKeyBase64, Duration tokenTtl) {
+		this(enabled, publicBaseUrl, signingKeyBase64, tokenTtl, null);
 	}
 
 	public MailTrackingModels.CallbackScope callbackScope() {

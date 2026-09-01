@@ -8,6 +8,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.core.env.Environment;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.transaction.reactive.TransactionalOperator;
 
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -18,6 +20,7 @@ import java.util.Base64;
 @Profile("api")
 @ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(MailTrackingProperties.class)
+@EnableScheduling
 public class MailTrackingConfiguration {
 	@Bean
 	MailTrackingRepository mailTrackingRepository(DatabaseClient database) {
@@ -32,12 +35,20 @@ public class MailTrackingConfiguration {
 	@Bean
 	MailTrackingService mailTrackingService(
 			MailTrackingRepository repository, MailTrackingProperties properties, @Qualifier("mailTrackingClock") Clock clock,
-			Environment environment
+			Environment environment, TransactionalOperator transactions
 	) {
 		if (properties.enabled()) validateIndependentKey(properties, environment);
 		return new MailTrackingService(repository, properties,
 				properties.enabled() ? new MailTrackingSigner(properties.signingKeyBase64()) : null,
-				new MailOpenClassifier(), clock);
+				new MailOpenClassifier(), clock, transactions);
+	}
+
+	@Bean
+	MailSendReconciliationJob mailSendReconciliationJob(
+			MailTrackingRepository repository, MailTrackingProperties properties,
+			@Qualifier("mailTrackingClock") Clock clock
+	) {
+		return new MailSendReconciliationJob(repository, properties, clock);
 	}
 
 	private void validateIndependentKey(MailTrackingProperties properties, Environment environment) {
