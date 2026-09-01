@@ -265,3 +265,54 @@ def test_result_payload_error_summary_rejects_email_like_content() -> None:
             stage="FAILED",
             error_summary="Contact alice@example.edu",
         )
+
+
+def test_source_contact_rejects_a_non_public_dns_domain() -> None:
+    with pytest.raises(ValidationError):
+        SourceContact(
+            normalized_email="alice@localhost",
+            display_email="alice@localhost",
+            domain="localhost",
+            syntax_valid=True,
+            confidence="LOW",
+            evidence=(
+                SourceEvidence(
+                    source_relative_path="main.tex",
+                    rule_name="PAPER_LEVEL_FRONT_MATTER_EMAIL",
+                    line_number=1,
+                    logical_location="AUTHOR_FRONT_MATTER",
+                    masked_context="[email redacted]",
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("local", [".alice", "alice.", "alice..x"])
+def test_contact_models_reject_illegal_dot_local_parts(local: str) -> None:
+    evidence_kwargs = {
+        "source_relative_path": "main.tex",
+        "rule_name": "PAPER_LEVEL_FRONT_MATTER_EMAIL",
+        "line_number": 1,
+        "logical_location": "AUTHOR_FRONT_MATTER",
+        "masked_context": "[email redacted]",
+    }
+    address = f"{local}@example.edu"
+
+    with pytest.raises(ValidationError):
+        ExtractedContact(
+            normalized_email=address,
+            display_email=address,
+            domain="example.edu",
+            syntax_valid=True,
+            confidence=Confidence.LOW,
+            evidence=(ExtractionEvidence(**evidence_kwargs),),
+        )
+    with pytest.raises(ValidationError):
+        SourceContact(
+            normalized_email=address,
+            display_email=address,
+            domain="example.edu",
+            syntax_valid=True,
+            confidence="LOW",
+            evidence=(SourceEvidence(**evidence_kwargs),),
+        )

@@ -82,7 +82,7 @@ public class JobRepository {
 		UUID newId = UUID.randomUUID();
 		UUID messageId = UUID.randomUUID();
 		UUID rootId = original.rootJobId() == null ? original.id() : original.rootJobId();
-		String idempotencyKey = original.idempotencyKey() + ":retry:" + newId;
+		String idempotencyKey = "job-retry:" + rootId + ":" + newId;
 		String routingKey = routingKey(original.type());
 		return databaseClient.sql("""
 				INSERT INTO jobs (

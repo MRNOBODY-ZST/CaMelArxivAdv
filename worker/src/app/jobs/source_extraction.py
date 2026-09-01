@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from multiprocessing import get_context
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Literal, Protocol
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app.arxiv.source_downloader import (
     DownloadedSource,
     SourceDownloadSecurityError,
     SourceUnavailableError,
 )
-from app.extraction.archive_guard import ArchiveLimits, ArchiveSecurityError, extract_source
+from app.extraction.archive_guard import (
+    ArchiveLimits,
+    ArchiveReport,
+    ArchiveSecurityError,
+    extract_source,
+)
 from app.extraction.contact_extractor import extract_contacts
+from app.extraction.models import ExtractionDocument
 from app.extraction.tex_discovery import TexDiscoveryError, discover_tex
 from app.messaging.contracts import (
     SourceAuthor,
@@ -28,6 +39,25 @@ from app.messaging.contracts import (
 
 class Downloader(Protocol):
     async def download(self, arxiv_id: str, destination: Path) -> DownloadedSource: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSource:
+    report: ArchiveReport
+    document: ExtractionDocument
+
+
+class SourceParser(Protocol):
+    async def parse(
+        self,
+        source_path: Path,
+        extracted_dir: Path,
+        *,
+        limits: ArchiveLimits,
+        maximum_include_depth: int,
+        maximum_files: int,
+        metadata_authors: tuple[str, ...],
+    ) -> ParsedSource: ...
 
 
 class SourceContentValidationError(Exception):
@@ -48,6 +78,203 @@ _SOURCE_CONTENT_VALIDATION_TYPES = {
     "value_error",
 }
 _MAXIMUM_SOURCE_RESULT_BYTES = 768 * 1024
+_MAXIMUM_PARSE_RESPONSE_BYTES = 768 * 1024
+
+
+class _ParseSuccess(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["OK"] = "OK"
+    source_format: str
+    extracted_bytes: int
+    file_count: int
+    document: ExtractionDocument
+
+
+class _ParseFailure(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal[
+        "ARCHIVE_SECURITY",
+        "TEX_DISCOVERY",
+        "CONTENT_INVALID",
+        "INFRASTRUCTURE_TIMEOUT",
+        "UNEXPECTED",
+    ]
+    error_type: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
+
+
+_PARSE_RESPONSE: TypeAdapter[_ParseSuccess | _ParseFailure] = TypeAdapter(
+    _ParseSuccess | _ParseFailure
+)
+type ParseProcessTarget = Callable[
+    [Path, Path, Path, ArchiveLimits, int, int, tuple[str, ...]], None
+]
+
+
+class SubprocessSourceParser:
+    def __init__(
+        self,
+        *,
+        start_method: str = "spawn",
+        process_target: ParseProcessTarget | None = None,
+    ) -> None:
+        self._context = get_context(start_method)
+        self._process_target = process_target or _parse_source_process
+
+    async def parse(
+        self,
+        source_path: Path,
+        extracted_dir: Path,
+        *,
+        limits: ArchiveLimits,
+        maximum_include_depth: int,
+        maximum_files: int,
+        metadata_authors: tuple[str, ...],
+    ) -> ParsedSource:
+        response_path = extracted_dir.parent / "parse-response.json"
+        process: BaseProcess = self._context.Process(  # type: ignore[attr-defined]
+            target=self._process_target,
+            args=(
+                source_path,
+                extracted_dir,
+                response_path,
+                limits,
+                maximum_include_depth,
+                maximum_files,
+                metadata_authors,
+            ),
+            daemon=True,
+        )
+        process.start()
+        join_task = asyncio.create_task(asyncio.to_thread(process.join))
+        try:
+            await asyncio.shield(join_task)
+        except asyncio.CancelledError:
+            await _terminate_process(process, join_task)
+            process.close()
+            raise
+        exit_code = process.exitcode
+        process.close()
+        if exit_code != 0 or not response_path.is_file():
+            raise RuntimeError("Source parsing subprocess exited without a valid result")
+        try:
+            response = _PARSE_RESPONSE.validate_json(response_path.read_bytes())
+        except (OSError, ValidationError, ValueError) as exception:
+            raise RuntimeError(
+                "Source parsing subprocess returned an invalid result"
+            ) from exception
+        if isinstance(response, _ParseSuccess):
+            return ParsedSource(
+                ArchiveReport(
+                    response.source_format,
+                    response.extracted_bytes,
+                    response.file_count,
+                ),
+                response.document,
+            )
+        if response.status == "ARCHIVE_SECURITY":
+            raise ArchiveSecurityError("Source archive was rejected")
+        if response.status == "TEX_DISCOVERY":
+            raise TexDiscoveryError("Source TeX discovery failed")
+        if response.status == "CONTENT_INVALID":
+            raise SourceContentValidationError
+        if response.status == "INFRASTRUCTURE_TIMEOUT":
+            raise TimeoutError("Source parsing dependency timed out")
+        raise RuntimeError(
+            "Source parsing subprocess failed: " + (response.error_type or "Exception")
+        )
+
+
+async def _terminate_process(
+    process: BaseProcess, join_task: asyncio.Task[None]
+) -> None:
+    if process.is_alive():
+        process.terminate()
+    try:
+        await asyncio.wait_for(asyncio.shield(join_task), timeout=2.0)
+    except TimeoutError:
+        if process.is_alive():
+            process.kill()
+        await join_task
+    if process.is_alive():
+        raise RuntimeError("Source parsing subprocess could not be terminated")
+
+
+def _parse_source_process(
+    source_path: Path,
+    extracted_dir: Path,
+    response_path: Path,
+    limits: ArchiveLimits,
+    maximum_include_depth: int,
+    maximum_files: int,
+    metadata_authors: tuple[str, ...],
+) -> None:
+    response: _ParseSuccess | _ParseFailure
+    try:
+        report = extract_source(source_path, extracted_dir, limits)
+        corpus = discover_tex(
+            extracted_dir,
+            maximum_include_depth=maximum_include_depth,
+            maximum_files=maximum_files,
+        )
+        document = (
+            extract_contacts(corpus, metadata_authors)
+            if metadata_authors
+            else extract_contacts(corpus)
+        )
+        response = _ParseSuccess(
+            source_format=report.source_format,
+            extracted_bytes=report.extracted_bytes,
+            file_count=report.file_count,
+            document=document,
+        )
+    except ArchiveSecurityError:
+        response = _ParseFailure(status="ARCHIVE_SECURITY")
+    except TexDiscoveryError:
+        response = _ParseFailure(status="TEX_DISCOVERY")
+    except ValidationError as exception:
+        response = _ParseFailure(
+            status=(
+                "CONTENT_INVALID"
+                if _is_source_content_validation(exception)
+                else "UNEXPECTED"
+            ),
+            error_type=None if _is_source_content_validation(exception) else "ValidationError",
+        )
+    except TimeoutError:
+        response = _ParseFailure(status="INFRASTRUCTURE_TIMEOUT")
+    except Exception as exception:
+        error_type = type(exception).__name__
+        response = _ParseFailure(
+            status="UNEXPECTED",
+            error_type=(
+                error_type
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", error_type)
+                else "Exception"
+            ),
+        )
+    _write_parse_response(response_path, response)
+
+
+def _write_parse_response(
+    response_path: Path, response: _ParseSuccess | _ParseFailure
+) -> None:
+    encoded = response.model_dump_json().encode("utf-8")
+    if len(encoded) > _MAXIMUM_PARSE_RESPONSE_BYTES:
+        encoded = _ParseFailure(status="CONTENT_INVALID").model_dump_json().encode(
+            "utf-8"
+        )
+    temporary = response_path.with_suffix(".tmp")
+    temporary.write_bytes(encoded)
+    temporary.replace(response_path)
+
+
+def _is_source_content_validation(exception: ValidationError) -> bool:
+    errors = exception.errors()
+    return bool(errors) and all(
+        error["type"] in _SOURCE_CONTENT_VALIDATION_TYPES for error in errors
+    )
 
 
 class SourceExtractionRunner:
@@ -60,6 +287,7 @@ class SourceExtractionRunner:
         maximum_parse_seconds: float,
         temporary_root: Path | None,
         parser_version: str,
+        parser: SourceParser | None = None,
     ) -> None:
         if maximum_include_depth < 1 or maximum_parse_seconds < 1:
             raise ValueError("Source parsing limits must be positive")
@@ -69,6 +297,7 @@ class SourceExtractionRunner:
         self._maximum_parse_seconds = maximum_parse_seconds
         self._temporary_root = temporary_root
         self._parser_version = parser_version
+        self._parser = parser or SubprocessSourceParser()
 
     async def run(self, target: SourceTarget) -> SourceExtractionResult:
         if self._temporary_root is not None:
@@ -87,13 +316,16 @@ class SourceExtractionRunner:
                 downloaded = await self._downloader.download(
                     target.arxiv_id, download_dir
                 )
+                parse_timeout = asyncio.timeout(self._maximum_parse_seconds)
                 try:
-                    async with asyncio.timeout(self._maximum_parse_seconds):
+                    async with parse_timeout:
                         result = await self._extract(
                             target, work_path, started, downloaded
                         )
                 except TimeoutError as exception:
-                    raise SourceParseTimeoutError from exception
+                    if parse_timeout.expired():
+                        raise SourceParseTimeoutError from exception
+                    raise
             except SourceUnavailableError:
                 result = self._failure(
                     target,
@@ -156,31 +388,21 @@ class SourceExtractionRunner:
         downloaded: DownloadedSource,
     ) -> SourceExtractionResult:
         extracted_dir = work / "extracted"
-        report = await asyncio.to_thread(
-            extract_source, downloaded.path, extracted_dir, self._limits
-        )
         try:
-            corpus = await asyncio.to_thread(
-                discover_tex,
+            parsed = await self._parser.parse(
+                downloaded.path,
                 extracted_dir,
+                limits=self._limits,
                 maximum_include_depth=self._maximum_include_depth,
                 maximum_files=self._limits.maximum_file_count,
-            )
-            document = await (
-                asyncio.to_thread(
-                    extract_contacts, corpus, target.metadata_authors
-                )
-                if target.metadata_authors
-                else asyncio.to_thread(extract_contacts, corpus)
+                metadata_authors=target.metadata_authors,
             )
         except ValidationError as exception:
-            errors = exception.errors()
-            if errors and all(
-                error["type"] in _SOURCE_CONTENT_VALIDATION_TYPES
-                for error in errors
-            ):
+            if _is_source_content_validation(exception):
                 raise SourceContentValidationError from exception
             raise
+        report = parsed.report
+        document = parsed.document
         authors = tuple(
             SourceAuthor(
                 order=item.order,

@@ -119,13 +119,18 @@ async def forward_retry(
     *,
     default_topic: str,
     now_epoch_ms: int | None = None,
+    maximum_delay_ms: int = 300_000,
+    clock_skew_tolerance_ms: int = 5_000,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
+    if maximum_delay_ms <= 0 or clock_skew_tolerance_ms < 0:
+        raise ValueError("Retry delay limits are invalid")
     headers = _headers(incoming.headers)
     current_ms = int(time.time() * 1_000) if now_epoch_ms is None else now_epoch_ms
     due_ms = _epoch_millis(headers.get("camelNotBeforeEpochMs"), current_ms)
-    if due_ms > current_ms:
-        await sleep((due_ms - current_ms) / 1_000)
+    delay_ms = due_ms - current_ms
+    if 0 < delay_ms <= maximum_delay_ms + clock_skew_tolerance_ms:
+        await sleep(delay_ms / 1_000)
     forwarded = {
         name: value
         for name, value in headers.items()

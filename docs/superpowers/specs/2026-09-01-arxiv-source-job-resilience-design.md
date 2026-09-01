@@ -40,7 +40,7 @@ All Python string limits that cross into the Java result handler are measured in
 
 `SourceExtractionRunner` converts a Pydantic error into `SOURCE_CONTENT_INVALID` only when every error is a known content-boundary type. Missing fields and model-shape errors still propagate as programming failures. No source text or address is copied into a public error.
 
-The Source downloader runs outside the local parsing deadline and retains its own HTTP timeout and retry semantics. Only archive extraction, TeX discovery, and contact parsing are wrapped by the parse deadline. A downloader timeout therefore propagates for command retry, while a genuine parsing timeout becomes the bounded `SOURCE_PARSE_TIMEOUT` item result.
+The Source downloader runs outside the local parsing deadline and retains its own HTTP timeout and retry semantics. Archive extraction, TeX discovery, and contact parsing run in a fresh `spawn` subprocess inside the parse deadline. On deadline expiry or cancellation, the parent terminates the subprocess, escalates to kill after two seconds if necessary, joins it, and only then allows the temporary directory to be cleaned or returns an item result. A timed-out parser therefore cannot keep a background thread alive or recreate deleted TeX files. The runner also checks the timeout context's own expired state, so downloader timeouts and unrelated storage/library `TimeoutError` responses propagate for command retry, while only an expired parsing deadline becomes the bounded `SOURCE_PARSE_TIMEOUT` item result.
 
 ## Messaging size boundaries
 
@@ -54,7 +54,9 @@ Redis stores a versioned document at `camel:worker:source-progress:<command-key>
 
 A Lua compare-and-set accepts only a strictly advancing canonical checkpoint. Competing or stale workers cannot overwrite a later index. A failed advance defers the command instead of acknowledging it. The checkpoint expires after 32 days, survives pause and retry, and is cleared only after terminal publication and the processed marker. A crash before the checkpoint write can repeat at most one item; deterministic result idempotency makes the repeat harmless.
 
-While any metadata, OAI, or Source operation runs, the consumer pauses assigned partitions and calls Kafka `getmany` at the configured heartbeat interval. This resets aiokafka's fetcher-idle timer without delivering another command concurrently. Assignment changes are paused as well; a polling failure cancels the operation and enters normal retry settlement. The maximum poll interval remains a backstop rather than the primary liveness mechanism.
+While any metadata, OAI, or Source operation runs, the consumer pauses assigned partitions and calls Kafka `getmany` at the configured heartbeat interval. This resets aiokafka's fetcher-idle timer without delivering another command concurrently. Assignment changes are paused as well. A polling failure cancels the operation, leaves the source offset uncommitted, shuts down the worker, and relies on the process supervisor to restart it so Kafka replays the record. The maximum poll interval remains a backstop rather than the primary liveness mechanism.
+
+Retry-topic waiting uses the same active-poll wrapper. A not-before timestamp may delay forwarding only up to the configured retry delay plus five seconds of clock skew; a malformed, past, or farther-future value is forwarded immediately after its scheduling headers are removed. An otherwise syntactically valid year-3000 timestamp therefore cannot suspend the only worker or exceed the consumer group's poll interval.
 
 ## Retry exhaustion and poison commands
 
@@ -70,7 +72,9 @@ When a completion arrives with pending items, the backend keeps the job nontermi
 
 A scheduled reconciler selects stale deferred completions with `FOR UPDATE SKIP LOCKED`, including defensive zero-item records, updates at most a bounded batch, and records `ARXIV_JOB_FAILED` with `SOURCE_RESULTS_INCOMPLETE`. The grace period is configurable and bounded from five minutes to one day. A single-flight guard prevents overlap in one process; row locks make multiple backend instances safe. Explicit worker failure and user cancellation still take precedence immediately, and late nonterminal messages cannot change a terminal job.
 
-Source retry creation derives the new total from the original stored `parameters.targets`, copies those identities into new `PENDING job_items`, and verifies the inserted batch against that stored target count before publishing the retry outbox record. It never trusts a terminal job counter that earlier reconciliation may have corrected to zero. Both API cancellation and worker cancellation close open items and replace displayed counters with exact succeeded, skipped, failed, attempted, and total counts; canceled items are terminal but are not reported as attempted work.
+An OAI progress event with an empty checkpoint still advances visible progress but does not overwrite the last durable opaque resumption token. Retry, pause, and failure messages without a newer cursor therefore preserve database observability and disaster-recovery state.
+
+Source retry creation derives the new total from the original stored `parameters.targets`, copies those identities into new `PENDING job_items`, and verifies the inserted batch against that stored target count before publishing the retry outbox record. It never trusts a terminal job counter that earlier reconciliation may have corrected to zero. Retry idempotency keys are rebuilt from the stable root job ID and new job ID instead of recursively appending to the parent key, so an unlimited retry lineage remains unique and within the database limit. Both API cancellation and worker cancellation close open items and replace displayed counters with exact succeeded, skipped, failed, attempted, and total counts; canceled items are terminal but are not reported as attempted work.
 
 ## Production recovery
 

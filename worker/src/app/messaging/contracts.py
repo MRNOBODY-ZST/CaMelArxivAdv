@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -16,6 +17,9 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from app.source_safety import contains_email_like_text, unsafe_bounded_text
+
+_SOURCE_LOCAL_PART = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}")
+_SOURCE_DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 class MessageType(StrEnum):
@@ -160,7 +164,25 @@ class SourceContact(ContractModel):
 
     @model_validator(mode="after")
     def no_plaintext_evidence(self) -> SourceContact:
-        if unsafe_bounded_text(self.display_email, 320):
+        if self.normalized_email.count("@") != 1:
+            raise ValueError("Source contact normalized email is invalid")
+        local, actual_domain = self.normalized_email.rsplit("@", 1)
+        if (
+            self.normalized_email != self.normalized_email.lower()
+            or _SOURCE_LOCAL_PART.fullmatch(local) is None
+            or local.startswith(".")
+            or local.endswith(".")
+            or ".." in local
+            or self.domain != actual_domain
+            or len(self.domain) > 255
+            or "." not in self.domain
+            or any(
+                _SOURCE_DOMAIN_LABEL.fullmatch(label) is None
+                for label in self.domain.split(".")
+            )
+            or unsafe_bounded_text(self.display_email, 320)
+            or not self.syntax_valid
+        ):
             raise ValueError("Source contact display email is unsafe")
         for item in self.evidence:
             context = item.masked_context.casefold()

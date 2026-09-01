@@ -30,6 +30,7 @@
 - [x] Irreversibly redact email-like author-adjacent text from affiliations, evidence context, and source paths; reject residual at-signs in worker and backend public fields.
 - [x] Match Java UTF-16 length limits for every Source result string boundary.
 - [x] Keep downloader timeout/retry semantics outside the bounded parsing deadline.
+- [x] Run archive/TeX/contact parsing in a killable subprocess and join it before cleanup on timeout.
 - [x] Convert only known Pydantic content-boundary errors to `SOURCE_CONTENT_INVALID`; let shape and infrastructure errors retry.
 - [x] Verify a failed paper does not stop the following target.
 
@@ -49,6 +50,7 @@
 - [x] Use a Lua compare-and-set that rejects stale/equal progress from competing workers.
 - [x] Defer rather than acknowledge when checkpoint advancement loses a race.
 - [x] Pause all assigned Kafka partitions and call `getmany` periodically while command work continues.
+- [x] Bound retry-topic not-before delays and keep polling while a valid retry delay elapses.
 - [x] Cancel and retry the operation if the poll-heartbeat task fails.
 - [x] Keep `max.poll.interval` as a backstop at least ten heartbeat periods long.
 
@@ -68,8 +70,10 @@
 - [x] Let the transaction that persists the last late item complete the job from authoritative totals.
 - [x] Add a single-flight, multi-instance-safe reconciler using `FOR UPDATE SKIP LOCKED` to fail stale incomplete completions after a bounded grace.
 - [x] Ignore cumulative progress after a deferred completion and refresh exact database totals after every late extraction result.
+- [x] Preserve the last OAI cursor when a retry or pause progress event has no checkpoint.
 - [x] Include zero-item historical anomalies in timeout reconciliation.
 - [x] Derive retry totals and new `PENDING job_items` from stored Source targets rather than corrected terminal counters.
+- [x] Keep repeated retry idempotency keys fixed-length and unique across the full lineage.
 - [x] Close open Source items and synchronize exact counters for both API and worker cancellation paths.
 - [x] Pass grace/reconcile settings through Compose and document defaults.
 - [x] Test completion-before-item, inflated late progress, zero-item timeout, retry, duplicate, explicit failure, cancellation, and late-message paths.

@@ -198,6 +198,14 @@ class ArxivResultHandlerIntegrationTest {
 				 "checkpoint":{"resumptionToken":"opaque-token","responseDate":"2026-08-05T00:00:00Z"},
 				 "papers":[]}
 				""")).block();
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", """
+				{"status":"RUNNING","stage":"RETRYING_OAI","processedCount":1,
+				 "successCount":1,"failedCount":0,"totalCount":0,"progressPercent":0,
+				 "checkpoint":{},"papers":[]}
+				""")).block();
+		assertThat(text("SELECT resumption_token FROM arxiv_sync_cursors WHERE last_job_id = '"
+				+ jobId + "'"))
+				.isEqualTo("opaque-token");
 
 		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_FAILED", """
 				{"status":"FAILED","stage":"FAILED","processedCount":1,

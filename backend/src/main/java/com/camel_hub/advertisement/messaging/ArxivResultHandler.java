@@ -301,8 +301,10 @@ public class ArxivResultHandler {
 	private Mono<Void> applyOaiProgress(UUID jobId, ArxivResultMessage.Payload payload) {
 		String checkpointJson = checkpoint(payload.checkpoint());
 		validateOaiCheckpoint(payload.checkpoint());
-		return repository.applyProgress(jobId, payload, checkpointJson)
-				.then(repository.upsertSyncCursor(jobId, checkpointJson));
+		Mono<Void> progress = repository.applyProgress(jobId, payload, checkpointJson);
+		return payload.checkpoint() == null || payload.checkpoint().isNull()
+				|| payload.checkpoint().isEmpty()
+				? progress : progress.then(repository.upsertSyncCursor(jobId, checkpointJson));
 	}
 
 	private Mono<Void> applyProgressForJob(
@@ -557,10 +559,15 @@ public class ArxivResultHandler {
 				|| !email.matches("[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}@[A-Za-z0-9.-]{3,255}")) {
 			return false;
 		}
+		String local = email.substring(0, email.lastIndexOf('@'));
+		if (local.startsWith(".") || local.endsWith(".") || local.contains("..")) {
+			return false;
+		}
 		String actualDomain = email.substring(email.lastIndexOf('@') + 1);
-		return actualDomain.equals(domain) && java.util.Arrays.stream(domain.split("\\."))
-				.allMatch(label -> !label.isEmpty() && label.length() <= 63
-						&& !label.startsWith("-") && !label.endsWith("-"));
+		return actualDomain.equals(domain) && domain.contains(".")
+				&& java.util.Arrays.stream(domain.split("\\."))
+						.allMatch(label -> label.matches(
+								"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"));
 	}
 
 	private boolean unsafePath(String value) {

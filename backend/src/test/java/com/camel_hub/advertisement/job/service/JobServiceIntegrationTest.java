@@ -25,6 +25,8 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
 
@@ -233,6 +235,43 @@ class JobServiceIntegrationTest {
 				""").bind("jobId", retry.id())
 				.map((row, metadata) -> row.get("total", Integer.class)).one().block())
 				.isEqualTo(2);
+	}
+
+	@Test
+	void repeatedSourceRetriesKeepBoundedUniqueIdempotencyKeys() {
+		SourceJob original = insertSourceJob(JobStatus.FAILED);
+		UUID currentId = original.jobId();
+		List<String> keys = new ArrayList<>();
+		List<UUID> retryIds = new ArrayList<>();
+
+		for (int attempt = 0; attempt < 4; attempt++) {
+			JobService.JobView retry = service.control(
+					currentId, JobAction.RETRY, ACTOR_ID, context()).block();
+			String key = databaseClient.sql("""
+					SELECT idempotency_key FROM jobs WHERE id = :jobId
+					""").bind("jobId", retry.id())
+					.map((row, metadata) -> row.get("idempotency_key", String.class))
+					.one().block();
+			keys.add(key);
+			retryIds.add(retry.id());
+			assertThat(retry.parentJobId()).isEqualTo(currentId);
+			assertThat(retry.rootJobId()).isEqualTo(original.jobId());
+			databaseClient.sql("""
+					UPDATE jobs SET status = 'FAILED', ended_at = now(), current_stage = 'FAILED'
+					WHERE id = :jobId
+					""").bind("jobId", retry.id()).fetch().rowsUpdated().block();
+			currentId = retry.id();
+		}
+
+		assertThat(keys).allSatisfy(key -> assertThat(key).hasSizeLessThanOrEqualTo(160));
+		assertThat(new HashSet<>(keys)).hasSize(4);
+		assertThat(databaseClient.sql("""
+				SELECT count(*) AS total FROM outbox_messages
+				WHERE aggregate_id = ANY(:jobIds)
+				  AND length(idempotency_key) <= 200
+				""").bind("jobIds", retryIds.toArray(UUID[]::new))
+				.map((row, metadata) -> row.get("total", Long.class)).one().block())
+				.isEqualTo(4L);
 	}
 
 	@ParameterizedTest

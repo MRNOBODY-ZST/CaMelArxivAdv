@@ -111,6 +111,9 @@ class ExtractedContact(ExtractionModel):
         if (
             self.normalized_email != self.normalized_email.lower()
             or _LOCAL_PART.fullmatch(local) is None
+            or local.startswith(".")
+            or local.endswith(".")
+            or ".." in local
             or self.domain != actual_domain
             or len(self.domain) > 255
             or "." not in self.domain

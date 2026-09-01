@@ -314,3 +314,36 @@ async def test_due_retry_is_forwarded_to_original_topic_before_commit() -> None:
     forwarded_headers = dict(producer.calls[0]["headers"])
     assert "camelNotBeforeEpochMs" not in forwarded_headers
     assert forwarded_headers["camelRetryCount"] == b"1"
+
+
+@pytest.mark.asyncio
+async def test_far_future_retry_header_is_forwarded_without_an_unbounded_sleep() -> None:
+    events: list[str] = []
+    producer = FakeProducer(events)
+    consumer = FakeConsumer(events)
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    await forward_retry(
+        FakeRecord(
+            topic="camel.arxiv.retry.v1",
+            headers=[
+                ("camelOriginalTopic", b"camel.arxiv.jobs.v1"),
+                ("camelNotBeforeEpochMs", b"32503680000000"),
+                ("camelRetryCount", b"1"),
+            ],
+        ),  # type: ignore[arg-type]
+        producer,  # type: ignore[arg-type]
+        consumer,  # type: ignore[arg-type]
+        default_topic="camel.arxiv.jobs.v1",
+        now_epoch_ms=1_000,
+        maximum_delay_ms=30_000,
+        clock_skew_tolerance_ms=5_000,
+        sleep=sleep,
+    )
+
+    assert sleeps == []
+    assert events == ["publish:camel.arxiv.jobs.v1", "commit"]
+    assert "camelNotBeforeEpochMs" not in dict(producer.calls[0]["headers"])

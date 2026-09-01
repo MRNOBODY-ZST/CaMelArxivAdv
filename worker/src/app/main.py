@@ -156,11 +156,16 @@ async def run(settings: Settings | None = None) -> None:
                 except TimeoutError:
                     continue
                 if record.topic == active.retry_topic:
-                    await forward_retry(
-                        record,
-                        producer,
+                    await _run_with_consumer_polling(
                         consumer,
-                        default_topic=active.jobs_topic,
+                        forward_retry(
+                            record,
+                            producer,
+                            consumer,
+                            default_topic=active.jobs_topic,
+                            maximum_delay_ms=int(active.retry_delay_seconds * 1_000),
+                        ),
+                        interval_seconds=active.consumer_poll_interval_seconds,
                     )
                     continue
                 await _run_with_consumer_polling(
