@@ -1,243 +1,110 @@
 # arXiv Source Job Resilience Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** execute each task with test-first regressions, obtain an independent review, and require fresh verification before deployment.
 
-**Goal:** Make arXiv source extraction tolerate malformed individual papers, resume retried batches, and terminate visibly when unexpected retries are exhausted.
+**Goal:** Make Source extraction tolerate malformed papers, resume safely, preserve Kafka liveness and ordering semantics, and recover production job `525be8cf-860b-480f-b852-63c27c2860f9` without skipping target 26.
 
-**Architecture:** Parse nested author metadata with balanced command spans and classify document-shape validation as one failed extraction result. Persist a versioned cumulative source checkpoint in Redis after Kafka result acknowledgements. Split uncounted control deferral from counted retry, then use a post-DLT/pre-commit exhaustion callback so an idempotent `ARXIV_JOB_FAILED` result is durable before final offset commit.
-
-**Tech Stack:** Python 3.12, asyncio, Pydantic 2, Redis 8, aiokafka, pytest, Spring Boot result consumer, PostgreSQL 17, Docker Compose.
+**Architecture:** Balanced TeX parsing plus ordered metadata cross-validation; strict outbound contracts and item-level content failure; canonical monotonic Redis checkpoints; active Kafka poll heartbeats; dead-letter-before-terminal-before-commit settlement; database-derived terminal counts with durable incomplete-completion reconciliation.
 
 **Spec:** `docs/superpowers/specs/2026-09-01-arxiv-source-job-resilience-design.md`
 
-## Global Constraints
-
-- Never truncate malformed author metadata into apparently valid author records.
-- One paper's content validation failure must not requeue the other papers.
-- Unexpected infrastructure and programming failures remain retryable until the configured Kafka retry limit.
-- Checkpoints are saved only after the corresponding Kafka results are acknowledged.
-- Retry exhaustion must persist a terminal backend event before the source offset is committed.
-- Do not expose source text, email addresses, credentials, tokens, or exception values in logs or public errors.
-- Preserve existing message topics, contract version, result idempotency keys, control semantics, and unrelated services. Key job-scoped result records by job ID to preserve per-job partition ordering.
-- Do not include the assistant product name in source, branches, commits, or deployment artifacts.
-
----
-
-### Task 1: Parse nested IEEE author metadata safely
-
-**Files:**
-- Modify: `worker/src/app/extraction/contact_extractor.py:251-261`
-- Modify: `worker/tests/extraction/test_contact_extractor.py`
-
-**Interfaces:**
-- Consumes: existing `_commands`, `_plain_tex`, and author command-name sets.
-- Produces: `_author_names(argument: str) -> tuple[str, ...]` with balanced nested metadata removed and conservative comma-plus-`and` list splitting.
-
-- [ ] **Step 1: Write the failing production-shaped test**
-
-Add an IEEE fixture whose `\author` contains five comma-separated names followed by a nested `\thanks` affiliation block. Assert the literal five expected names and assert no affiliation prose appears in any name.
-
-- [ ] **Step 2: Run the test and verify RED**
-
-```bash
-cd worker
-uv run pytest tests/extraction/test_contact_extractor.py::test_nested_thanks_does_not_turn_ieee_affiliations_into_an_author -q
-```
-
-Expected: the current parser raises the 300-character Pydantic validation error.
-
-- [ ] **Step 3: Implement balanced metadata removal and conservative list splitting**
-
-Use `_commands(argument)` to collect complete spans for `email`, `ead`, `thanks`, `affiliation`, `affil`, `address`, `institute`, and `corref`; remove non-overlapping outer spans from right to left. After existing TeX separators, split a cleaned segment on commas and the final word `and` only when both forms are present and yield at least two non-empty names.
-
-- [ ] **Step 4: Run the focused extraction tests and verify GREEN**
-
-```bash
-cd worker
-uv run pytest tests/extraction/test_contact_extractor.py -q
-```
-
-Expected: all contact-extractor tests pass.
-
-- [ ] **Step 5: Commit the parser slice**
-
-```bash
-git add worker/src/app/extraction/contact_extractor.py worker/tests/extraction/test_contact_extractor.py
-git commit -m "fix: parse nested arxiv author metadata"
-```
-
-### Task 2: Isolate content validation to one source item
-
-**Files:**
-- Modify: `worker/src/app/jobs/source_extraction.py:52-110`
-- Modify: `worker/tests/jobs/test_source_extraction.py`
-- Modify: `worker/tests/jobs/test_source_command_processor.py`
-
-**Interfaces:**
-- Produces: `SourceExtractionResult(status="FAILED", error_code="SOURCE_CONTENT_INVALID")` for a Pydantic validation failure caused by one paper.
-- Consumes: the existing per-target command loop, which already persists failed item results and computes `PARTIALLY_SUCCEEDED`.
-
-- [ ] **Step 1: Write failing runner and command-loop tests**
-
-Make the real runner's extractor path raise a Pydantic `ValidationError` and assert the bounded failure result. Add a two-target command test where the first result is `SOURCE_CONTENT_INVALID` and the second succeeds; assert both targets run and the terminal status is `PARTIALLY_SUCCEEDED`.
-
-- [ ] **Step 2: Run the focused tests and verify RED**
-
-```bash
-cd worker
-uv run pytest tests/jobs/test_source_extraction.py tests/jobs/test_source_command_processor.py -q
-```
-
-Expected: validation escapes instead of becoming an item result.
-
-- [ ] **Step 3: Add the narrow validation boundary**
-
-Catch only `pydantic.ValidationError` in `SourceExtractionRunner.run` and return code `SOURCE_CONTENT_INVALID` with summary `Source metadata exceeded supported parsing boundaries`. Do not catch `Exception`, Redis errors, Kafka errors, or arbitrary runtime errors.
-
-- [ ] **Step 4: Run the focused tests and verify GREEN**
-
-Run the Step 2 command. Expected: all selected tests pass.
-
-- [ ] **Step 5: Commit the item-isolation slice**
-
-```bash
-git add worker/src/app/jobs/source_extraction.py worker/tests/jobs/test_source_extraction.py worker/tests/jobs/test_source_command_processor.py
-git commit -m "fix: isolate invalid arxiv source items"
-```
-
-### Task 3: Resume source batches from a validated Redis checkpoint
-
-**Files:**
-- Modify: `worker/src/app/jobs/job_control.py`
-- Modify: `worker/src/app/jobs/arxiv_consumer.py:58-73,241-290`
-- Modify: `worker/tests/jobs/test_job_control.py`
-- Modify: `worker/tests/jobs/test_source_command_processor.py`
-- Modify: `worker/tests/jobs/test_arxiv_consumer.py`
-
-**Interfaces:**
-- Produces: frozen `SourceProgress(next_index: int, success: int, skipped: int, failed: int)`.
-- Produces: `JobStore.source_progress_for`, `save_source_progress`, and `clear_source_progress`.
-- Consumes: source command idempotency key and target count.
-
-- [ ] **Step 1: Write failing checkpoint storage and resume tests**
-
-Assert Redis JSON round-trips under a source-specific key with a seven-day TTL. Assert malformed JSON returns no checkpoint. In the processor, seed `SourceProgress(1, 1, 0, 0)` for two targets and assert only target two runs, cumulative counts reach two, and save occurs after both result messages. Assert inconsistent counts or an index beyond the command length restart at zero.
-
-- [ ] **Step 2: Run the focused tests and verify RED**
-
-```bash
-cd worker
-uv run pytest tests/jobs/test_job_control.py tests/jobs/test_source_command_processor.py tests/jobs/test_arxiv_consumer.py -q
-```
-
-Expected: source checkpoint interfaces and resume behavior are absent.
-
-- [ ] **Step 3: Implement versioned source progress storage**
-
-Serialize literal JSON fields `version`, `nextIndex`, `success`, `skipped`, and `failed` under `camel:worker:source-progress:<idempotency-key>`. Parse strictly, reject booleans/non-integers/negative values, and return `None` on invalid data.
-
-- [x] **Step 4: Implement publish-then-checkpoint ordering**
-
-Initialize the loop from a checkpoint only when counts sum to `nextIndex` and the index is within the target list. Save cumulative progress after both per-item publishes. Preserve it on pause/retry; after terminal publication, mark the command processed before clearing the checkpoint.
-
-- [ ] **Step 5: Run the focused tests and verify GREEN**
-
-Run the Step 2 command. Expected: all selected tests pass.
-
-- [ ] **Step 6: Commit the checkpoint slice**
-
-```bash
-git add worker/src/app/jobs/job_control.py worker/src/app/jobs/arxiv_consumer.py worker/tests/jobs/test_job_control.py worker/tests/jobs/test_source_command_processor.py worker/tests/jobs/test_arxiv_consumer.py
-git commit -m "fix: resume retried arxiv source batches"
-```
-
-### Task 4: Publish a terminal failure before retry-exhausted dead-letter commit
-
-**Files:**
-- Modify: `worker/src/app/messaging/kafka.py`
-- Modify: `worker/src/app/jobs/arxiv_consumer.py`
-- Modify: `worker/src/app/main.py`
-- Modify: `worker/tests/test_kafka.py`
-- Modify: `worker/tests/jobs/test_arxiv_consumer.py`
-- Modify: `worker/tests/test_contracts.py`
-
-**Interfaces:**
-- Produces: `CommandOutcome` values `ACK`, `DEFER`, `RETRY`, and `DEAD`.
-- Produces: optional async `on_retry_exhausted` callback on `settle_delivery`.
-- Produces: `ArxivCommandProcessor.publish_retry_exhausted_failure(body: bytes)` with deterministic result idempotency.
-
-- [x] **Step 1: Write failing settlement-order and failure-envelope tests**
-
-Assert final retry event order is DLT publish, terminal callback, then source offset commit. Assert callback failure prevents commit. Assert the processor publishes `ARXIV_JOB_FAILED`, status `FAILED`, code `WORKER_RETRY_EXHAUSTED`, and no exception or source text. Assert non-final retries never call the callback, pause at retry count five remains deferred, and mid-loop cancel is acknowledged.
-
-- [ ] **Step 2: Run the focused tests and verify RED**
-
-```bash
-cd worker
-uv run pytest tests/test_kafka.py tests/jobs/test_arxiv_consumer.py tests/test_contracts.py -q
-```
-
-Expected: settlement has no callback/result and the processor has no terminal-failure method.
-
-- [x] **Step 3: Implement terminal publication before commit**
-
-On retry exhaustion, durably publish to the DLT, await `on_retry_exhausted` when provided, then commit. In the arXiv worker, capture only the exception class for logging and pass a callback that publishes the bounded terminal result through the existing result publisher. `DEFER` republishes without consuming the retry counter; `RETRY` increments it.
-
-- [ ] **Step 4: Run the focused tests and verify GREEN**
-
-Run the Step 2 command. Expected: all selected tests pass, including personalization-worker callers that ignore the return value.
-
-- [ ] **Step 5: Commit the terminal-failure slice**
-
-```bash
-git add worker/src/app/messaging/kafka.py worker/src/app/jobs/arxiv_consumer.py worker/src/app/main.py worker/tests/test_kafka.py worker/tests/jobs/test_arxiv_consumer.py worker/tests/test_contracts.py
-git commit -m "fix: terminate exhausted arxiv jobs"
-```
-
-### Task 5: Verify, deploy, and recover the production job
-
-**Files:**
-- Modify only if contracts require it: `scripts/verify-container-images.sh`
-- Runtime-only: production Compose state, Redis checkpoint, Kafka message, and database evidence.
-
-**Interfaces:**
-- Consumes: Tasks 1-4 and the existing production deployment wrapper.
-- Produces: healthy worker services and terminal job `525be8cf-860b-480f-b852-63c27c2860f9` with 100 terminal items.
-
-- [ ] **Step 1: Run complete local verification**
-
-```bash
-cd worker && uv run pytest -q && uv run ruff check . && uv run mypy src
-cd .. && bash scripts/verify-container-images.sh && bash scripts/verify-compose.sh
-cd backend && ./gradlew test
-```
-
-Expected: every command exits zero.
-
-- [ ] **Step 2: Obtain an independent code review**
-
-Review the complete branch for data loss, skipped targets, false-success states, callback ordering, leaked exception data, and compatibility with personalization-worker settlement. Resolve all Critical and Important findings and rerun Step 1.
-
-- [ ] **Step 3: Merge and push `main`**
-
-Fast-forward the reviewed branch into local `main`, verify a clean tree, and push the exact commit to GitHub without force.
-
-- [ ] **Step 4: Back up and inspect production state**
-
-Record commit/image/container IDs, dump PostgreSQL, verify the dump, capture the exact job/item/event state, inspect the matching Kafka location, and confirm whether personalization has active work before restarting shared-image services.
-
-- [ ] **Step 5: Build and deploy the worker image**
-
-Pull the exact `main` commit, set the protected runtime image tag, build the arXiv worker image, recreate only services using that image that are safe to restart, and wait for health. Preserve Nginx, backend, frontend, database, mail, and unrelated container identities.
-
-- [ ] **Step 6: Recover the exact job once**
-
-If Kafka redelivers the interrupted record, let the fixed worker resume it. If the record is already dead-lettered, verify one exact match, seed `SourceProgress(next_index=52, success=52, skipped=0, failed=0)`, and replay that command once with retry timing headers removed. Never synthesize a second job or process an ambiguous message.
-
-- [ ] **Step 7: Verify production completion**
-
-Require the job API and database to agree on a terminal status, 100 processed items, no `PENDING`/`RUNNING` items, a visible event for item 53, no residual source checkpoint, healthy/idle arXiv worker, and no new retry or DLT copy. Confirm the production job page shows the terminal state without console errors.
-
-- [ ] **Step 8: Clean up**
-
-Remove only temporary diagnostic artifacts and the merged worktree/branch, close SSH/browser sessions, and retain the database backup plus bounded deployment evidence.
+## Global constraints
+
+- Never truncate ambiguous source metadata into apparently valid author records.
+- Never turn infrastructure, persistence, or programming errors into successful items.
+- Persist a checkpoint only after both Kafka messages for that item are acknowledged.
+- Derive extraction terminal counters from `job_items`, not worker cumulative counters.
+- Stop the old worker and drain every results partition before changing result-key behavior.
+- Do not expose Source text, addresses, credentials, tokens, or exception values in logs or public errors.
+- Preserve the original production job ID, command idempotency key, target order, Nginx configuration, and unrelated services.
+- Do not include the assistant product name in source, commits, or deployment artifacts.
+
+## Task 1: Repair Source parsing and item isolation
+
+- [x] Add production-shaped tests for nested IEEE footnotes and paired TeX math addresses.
+- [x] Remove author metadata using balanced command spans.
+- [x] Split comma-separated authors only when canonical names equal ordered `metadataAuthors`.
+- [x] Validate legal local parts and strict LDH/IDNA domains.
+- [x] Revalidate canonical author merges and all outbound contract limits.
+- [x] Convert only known Pydantic content-boundary errors to `SOURCE_CONTENT_INVALID`; let shape and infrastructure errors retry.
+- [x] Verify a failed paper does not stop the following target.
+
+## Task 2: Bound backend commands
+
+- [x] Query ordered `paper_authors.raw_name` with each extraction target.
+- [x] Add `metadataAuthors` to the worker target contract.
+- [x] Give author arrays a 256 KiB aggregate UTF-8 JSON budget, including or omitting each paper's list as a whole.
+- [x] Reject a serialized command envelope over 768 KiB before creating the job/outbox row.
+- [x] Cover the 100-paper, 500-author, 300-character boundary and ordinary small lists.
+
+## Task 3: Make long and retried commands resumable
+
+- [x] Store a versioned Source checkpoint with a 32-day TTL.
+- [x] Require the exact canonical compact JSON representation and consistent integer counts.
+- [x] Use a Lua compare-and-set that rejects stale/equal progress from competing workers.
+- [x] Defer rather than acknowledge when checkpoint advancement loses a race.
+- [x] Pause all assigned Kafka partitions and call `getmany` periodically while command work continues.
+- [x] Cancel and retry the operation if the poll-heartbeat task fails.
+- [x] Keep `max.poll.interval` as a backstop at least ten heartbeat periods long.
+
+## Task 4: Guarantee terminal settlement
+
+- [x] Separate `ACK`, uncounted `DEFER`, counted `RETRY`, and immediate `DEAD` outcomes.
+- [x] On final retry or dead command, publish DLT, publish bounded terminal failure, mark processed, clean Source checkpoint, then commit.
+- [x] Recover safe failure context with an iterative top-level JSON scanner that tolerates deeply nested poison payloads.
+- [x] Bound future command types, trace/key values, and terminal result idempotency keys.
+- [x] Key new job results by job ID.
+
+## Task 5: Reconcile cross-partition completion
+
+- [x] Lock the job row in each result-handler transaction.
+- [x] Ignore nonterminal messages after a terminal state while preserving canceled-item cleanup.
+- [x] When completion arrives early, persist `ARXIV_JOB_COMPLETION_DEFERRED`, exact item totals, and `AWAITING_ITEM_RESULTS` without terminalizing.
+- [x] Let the transaction that persists the last late item complete the job from authoritative totals.
+- [x] Add a single-flight, multi-instance-safe reconciler using `FOR UPDATE SKIP LOCKED` to fail stale incomplete completions after a bounded grace.
+- [x] Ignore cumulative progress after a deferred completion and refresh exact database totals after every late extraction result.
+- [x] Include zero-item historical anomalies in timeout reconciliation.
+- [x] Rebuild new `PENDING job_items` from stored Source targets when retrying failed or canceled jobs.
+- [x] Close open Source items and synchronize exact counters for both API and worker cancellation paths.
+- [x] Pass grace/reconcile settings through Compose and document defaults.
+- [x] Test completion-before-item, inflated late progress, zero-item timeout, retry, duplicate, explicit failure, cancellation, and late-message paths.
+
+## Task 6: Complete local verification and integration
+
+- [ ] Run worker Ruff, Mypy, and the complete Pytest suite.
+- [ ] Run `./gradlew check` for the backend.
+- [ ] Run frontend unit tests, typecheck, lint, and production build.
+- [ ] Run Compose and container-image verification scripts.
+- [ ] Run `git diff --check`, secret/name scans, and verify a clean committed branch.
+- [ ] Resolve every Critical or Important independent-review finding and rerun affected suites.
+- [ ] Fast-forward local `main`, rerun a final smoke check, and push `main` without force.
+
+## Task 7: Back up and deploy production safely
+
+- [ ] Record the exact production commit, image IDs, container health, job/item state, Redis keys, DLT offsets, and all results-partition lags.
+- [ ] Create and verify a PostgreSQL custom-format backup before any mutation.
+- [ ] Stop only the old arXiv worker; require results-consumer lag zero on every partition.
+- [ ] Pull the exact pushed `main` commit.
+- [ ] Build the backend and worker images with the exact commit tag.
+- [ ] Recreate the backend first while the worker remains stopped; wait for health.
+- [ ] Recreate the arXiv worker with the new image; do not restart Nginx, frontend, mail, database, or unrelated services.
+- [ ] Recheck health and zero results lag before replay.
+
+## Task 8: Recover the original job once
+
+- [ ] Verify targets 1–25 are terminal and target 26 is the first missing item; do not trust the displayed count of 52.
+- [ ] Build one replay envelope from the original outbox command, preserving job ID, message ID, command idempotency key, trace, parser version, and target order.
+- [ ] Intentionally enrich every target with ordered current `paper_authors.raw_name`; require the five expected target-53 names and an envelope safely below 768 KiB.
+- [ ] Confirm the processed marker is absent and seed exact canonical Redis progress `{"version":1,"nextIndex":25,"success":25,"skipped":0,"failed":0}`.
+- [ ] Insert one uniquely identified replay row through the normal outbox path, with no retry headers.
+- [ ] Monitor worker, Kafka, backend events, database item totals, and API until terminal. Do not create a second job or replay twice.
+
+## Task 9: Production acceptance
+
+- [ ] Require 100 terminal `job_items`, zero pending/running items, and exact agreement between job counters and item totals.
+- [ ] Require the API and job UI to show the same terminal status and event timeline without console errors.
+- [ ] Verify target 26 persists the four valid Source addresses and target 53 persists exactly five metadata-verified authors plus its contact.
+- [ ] Verify contacts are visible through the contacts API and `/contacts` UI.
+- [ ] Verify no Source checkpoint/processed anomaly, no new retry or DLT copy, and zero jobs/results lag.
+- [ ] Verify domain HTTPS, backend health, worker health/idle state, and unchanged Nginx routing.
+- [ ] Retain the verified backup and remove only temporary diagnostic artifacts.

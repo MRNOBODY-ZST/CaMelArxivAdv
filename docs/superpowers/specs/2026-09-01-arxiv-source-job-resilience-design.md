@@ -2,62 +2,78 @@
 
 ## Goal
 
-Ensure one malformed arXiv source package cannot restart or strand an entire batch extraction job. The production case for arXiv `2510.13029` must parse its IEEE author block correctly, item-level validation failures must be persisted and skipped, retried commands must resume from a durable worker checkpoint, and retry exhaustion must produce a visible terminal job failure before dead-letter settlement.
+Make a Source extraction batch complete deterministically when one arXiv package is malformed, a command is retried, Kafka partitions are consumed out of order, or a poison command reaches the dead-letter topic. Recover production job `525be8cf-860b-480f-b852-63c27c2860f9` without skipping a paper or creating a replacement job.
 
-## Confirmed failure
+## Confirmed production failure
 
-Job `525be8cf-860b-480f-b852-63c27c2860f9` completed 52 of 100 targets. The next paper downloaded successfully, but `_author_names` removed nested `\thanks{...}` content with a non-balanced regular expression. It therefore interpreted author and affiliation prose as one 400-character name, violating the 300-character `ExtractedAuthor.name` boundary.
+The visible job counter reached 52, but the authoritative `job_items` state contains only 51 successful items. Target 26 (`2603.01042`) produced TeX math-wrapped addresses such as `$<name@example.edu$>$`; the old normalizer retained a trailing `$` in the domain. The backend rejected that extraction result while later progress messages continued to advance the display counter. Targets 27 through 52 were persisted.
 
-The validation error escaped the per-paper runner. The worker converted the unexpected exception into `REQUEUE`, replayed the command from target zero, and emitted deterministic result idempotency keys that the backend correctly ignored for the already persisted first 52 items. After retry exhaustion, the generic dead-letter path had no corresponding `ARXIV_JOB_FAILED` result, so the database could remain `RUNNING` indefinitely.
+Target 53 (`2510.13029`) exposed a second defect. A non-balanced expression removed only part of nested IEEE `\thanks` metadata, then treated author and affiliation prose as a name longer than the 300-character contract. That document validation exception escaped the per-item runner. Each command retry restarted from target zero and deterministic result idempotency caused already accepted results to be ignored. Retry exhaustion copied messages to the dead-letter topic without making the job terminal, so the job remained `RUNNING`.
 
-## Selected approach
+The safe recovery boundary is therefore the first 25 targets, not the displayed progress of 52.
 
-The fix has four cooperating boundaries:
+## Selected architecture
 
-1. Parse nested author metadata structurally. Remove balanced nested metadata commands such as `thanks`, `affiliation`, and `institute`, then conservatively split common comma-plus-final-`and` author lists. Never truncate an oversized parsed name into apparently valid data.
-2. Convert Pydantic validation caused by one source document into a `SourceExtractionResult` with status `FAILED` and code `SOURCE_CONTENT_INVALID`. The command loop persists that item and continues with the remaining targets. Unexpected infrastructure or programming exceptions still escape for retry.
-3. Persist a validated source-batch checkpoint in Redis after each result and progress pair is durably published. It contains the next target index and cumulative success, skipped, and failed counts. A replay resumes only when the checkpoint is internally consistent with the command; corrupt or incompatible data fails safe by restarting at zero.
-4. Separate user-controlled deferral from counted failure retry. A paused command is delayed without incrementing its retry counter; a canceled command is acknowledged after its terminal marker. When a transient or unexpected failure reaches the final retry, publish an idempotent `ARXIV_JOB_FAILED` result before committing the dead-letter settlement. The public error is bounded and generic; logs include a safe exception type without source content or credentials.
+The repair uses cooperating parser, worker, messaging, and backend boundaries.
 
-Simple string truncation was rejected because it would store affiliation prose as a false author. Treating every exception as an item failure was rejected because it would hide Kafka, Redis, disk, and programming failures. Directly editing the production job was rejected because it would not prevent recurrence.
+1. Parse TeX author metadata structurally and normalize addresses against the backend contract.
+2. Cross-check ambiguous comma-separated author lists against ordered arXiv metadata instead of guessing people from affiliation prose.
+3. Convert only known source-content boundary violations into a failed item and continue the batch; preserve infrastructure and programming failures for retry.
+4. Resume from a strictly canonical, monotonic Redis checkpoint written only after the corresponding Kafka result and progress messages are acknowledged.
+5. Poll Kafka during long command execution so consumer-group liveness does not depend on a large static timeout.
+6. Settle retry exhaustion in the order dead-letter publish, durable terminal failure publish, then source-offset commit.
+7. Key all new result records by job ID. Because old random-key results can still arrive from another partition, treat an incomplete completion as a durable intent, accept late item results, and terminalize from database item totals. If the missing results do not arrive within a bounded grace period, a multi-instance-safe reconciler fails the job visibly.
+8. Bound optional `metadataAuthors` and the complete command envelope below Kafka's record limit. Over-budget author lists are omitted as whole lists and the parser degrades conservatively.
+9. Rebuild Source `job_items` from stored command targets when a user retries a failed or canceled job. Cancellation closes every open item and refreshes job counters from the same item snapshot.
 
-## Parser and item semantics
+Truncating parsed names was rejected because it would persist false authors. Treating every exception as an item failure was rejected because it would hide Redis, Kafka, disk, and code failures. Trusting worker counters at completion was rejected because progress and item results can arrive on different Kafka partitions. Directly editing the production counters was rejected because it would preserve the missing item.
 
-Balanced command removal reuses the existing TeX command scanner, so nested braces do not leak into names. The author-list split applies only when a cleaned segment contains a comma-separated sequence with a final `and`; ordinary single names and existing `\and`, TeX line-break, and semicolon behavior remain unchanged.
+## Parser and outbound contract
 
-`SourceExtractionRunner.run` catches Pydantic `ValidationError` only around source discovery and contact extraction and returns a cleaned-up failure result. Outbound result-contract construction remains outside this boundary so programming defects still retry:
+The parser reuses its balanced TeX command scanner to remove complete nested metadata commands, including `thanks`, `affiliation`, `institute`, IEEE membership, and related footnotes. Explicit `\and`, TeX line breaks, and semicolon-separated names continue to work.
 
-- status: `FAILED`
-- error code: `SOURCE_CONTENT_INVALID`
-- summary: `Source metadata exceeded supported parsing boundaries`
+A cleaned comma-plus-final-`and` segment is split only when its canonical names exactly match the target's ordered `metadataAuthors`. Missing or mismatched metadata produces no author records for that ambiguous segment. Contacts may still be stored at paper level, so this conservative fallback does not lose a syntactically valid address or invent an author relationship.
 
-No raw author text is returned or logged. Other existing security, availability, discovery, timeout, and HTTP classifications remain unchanged.
+Email normalization removes only paired TeX math delimiters and validates an ASCII IDNA domain made of legal LDH labels. It preserves a legal dollar sign in the local part and rejects unmatched or illegal domain characters. Pydantic models enforce the backend limits for names, affiliations, contacts, evidence, document classes, and collection sizes. Canonical author merging constructs a new validated model, so merging cannot bypass the 100-affiliation limit.
 
-## Durable source checkpoint
+`SourceExtractionRunner` converts a Pydantic error into `SOURCE_CONTENT_INVALID` only when every error is a known content-boundary type. Missing fields and model-shape errors still propagate as programming failures. No source text or address is copied into a public error.
 
-Redis stores a versioned JSON document under a source-specific key derived from the command idempotency key. The document includes `nextIndex`, `success`, `skipped`, and `failed`; all values are non-negative, their sum equals `nextIndex`, and `nextIndex` cannot exceed the command target count. The key expires after seven days.
+## Command size boundary
 
-The worker saves the checkpoint only after both messages for an item have been acknowledged by Kafka. At command completion it publishes the terminal result, marks the command processed, and then clears the source checkpoint. This order avoids replaying the whole batch if the marker write fails; a failed checkpoint delete leaves only a seven-day TTL-bounded stale key, and redelivery observes the processed marker. Crashes before checkpoint save can repeat at most one item; deterministic result idempotency keeps that repeat harmless. Pause and transient retry preserve the checkpoint; cancellation marks the command processed before clearing it.
+The backend fetches ordered `paper_authors.raw_name` values with each target. It gives all `metadataAuthors` arrays in one command a 256 KiB UTF-8 JSON budget. A paper's list is included completely or omitted completely; lists are never truncated. The serialized command envelope has a 768 KiB hard limit, leaving space below Kafka's default one MiB record boundary for protocol overhead and headers. Size validation happens before the job and outbox row are created.
 
-## Retry exhaustion and observability
+## Durable checkpoint and consumer liveness
 
-Kafka settlement has four explicit outcomes: `ACK`, `DEFER`, `RETRY`, and `DEAD`. `DEFER` republishes after a delay without changing `camelRetryCount`, while `RETRY` increments and can exhaust. On retry exhaustion, the worker publishes the DLT copy, invokes a callback that publishes `ARXIV_JOB_FAILED`, and only then commits the source offset. If either publication fails, settlement does not commit, preserving at-least-once recovery. Both handled upstream failures and unexpected exceptions use this same exhaustion hook.
+Redis stores a versioned document at `camel:worker:source-progress:<command-key>` with `nextIndex`, `success`, `skipped`, and `failed`. The only accepted representation is the worker's exact compact JSON encoding. Values must be non-negative integers, outcome counts must sum to `nextIndex`, and the index must not exceed the command target count.
 
-The terminal result uses a deterministic idempotency key and contains:
+A Lua compare-and-set accepts only a strictly advancing canonical checkpoint. Competing or stale workers cannot overwrite a later index. A failed advance defers the command instead of acknowledging it. The checkpoint expires after 32 days, survives pause and retry, and is cleared only after terminal publication and the processed marker. A crash before the checkpoint write can repeat at most one item; deterministic result idempotency makes the repeat harmless.
 
-- status: `FAILED`
-- stage: `FAILED`
-- error code: `WORKER_RETRY_EXHAUSTED`
-- summary: `Worker exhausted retries after an unexpected processing failure`
+While any metadata, OAI, or Source operation runs, the consumer pauses assigned partitions and calls Kafka `getmany` at the configured heartbeat interval. This resets aiokafka's fetcher-idle timer without delivering another command concurrently. Assignment changes are paused as well; a polling failure cancels the operation and enters normal retry settlement. The maximum poll interval remains a backstop rather than the primary liveness mechanism.
 
-The worker log records the exception class and job ID, but not the exception value or source text. Job-scoped results use the job ID as their Kafka key so one job's events remain in partition order. The backend accepts failure with pending extraction items, preserves canceled terminal state against late failures, records the bounded error code in event details, and exposes the result through the job detail API and event timeline.
+## Retry exhaustion and poison commands
+
+Settlement has explicit `ACK`, `DEFER`, `RETRY`, and `DEAD` outcomes. Pause is an uncounted deferral. Final retry and immediate-dead paths publish the dead-letter copy, publish an idempotent `ARXIV_JOB_FAILED`, mark the command processed, clear its Source checkpoint when applicable, and only then commit the source offset. Failure in any durable step leaves the source offset uncommitted.
+
+Malformed envelopes use a bounded, iterative top-level JSON scanner to recover only a valid job ID, command type, bounded idempotency key, and safe trace ID. It skips deeply nested values without recursive decoding, rejects duplicate top-level context fields, never treats result messages as commands, and recognizes future bounded `ARXIV_*` command names. Long result idempotency keys are truncated with a digest so the terminal message remains contract-compatible.
+
+## Backend terminal reconciliation
+
+Every handler transaction locks the job row. Extraction item counts are always derived from `job_items`, not from untrusted cumulative message counters.
+
+When a completion arrives with pending items, the backend keeps the job nonterminal, stores exact authoritative counts, records `ARXIV_JOB_COMPLETION_DEFERRED`, and moves the stage to `AWAITING_ITEM_RESULTS`. Later cumulative progress cannot overwrite this state. Each late extraction result is persisted and then immediately refreshes exact counters from the database; the transaction that persists the last item observes the durable completion intent and terminalizes the job as `SUCCEEDED`, `PARTIALLY_SUCCEEDED`, or `FAILED`.
+
+A scheduled reconciler selects stale deferred completions with `FOR UPDATE SKIP LOCKED`, including defensive zero-item records, updates at most a bounded batch, and records `ARXIV_JOB_FAILED` with `SOURCE_RESULTS_INCOMPLETE`. The grace period is configurable and bounded from five minutes to one day. A single-flight guard prevents overlap in one process; row locks make multiple backend instances safe. Explicit worker failure and user cancellation still take precedence immediately, and late nonterminal messages cannot change a terminal job.
+
+Source retry creation copies target identities from the original stored parameters into new `PENDING job_items` before publishing the retry outbox record. Target count mismatches fail the transaction. Both API cancellation and worker cancellation close open items and replace displayed counters with exact succeeded, skipped, failed, attempted, and total counts; canceled items are terminal but are not reported as attempted work.
 
 ## Production recovery
 
-Deployment rebuilds the shared worker image and restarts affected worker/Ray services only after checking for active personalization work. Before deployment it captures the current job, Kafka, Redis, container, and database state. If the original command is still pending or in progress, restarting the arXiv worker allows Kafka to redeliver it to the fixed code. If it has already reached the dead-letter topic, one exact matching command is replayed after seeding a checkpoint from the verified 52 terminal job items.
+Before deployment, stop the old arXiv worker and require zero lag on every results partition. This is an additional rolling-upgrade barrier for old random-key result records. Back up PostgreSQL and record the exact commit, image, job, Kafka, and Redis state before mutation.
 
-The recovered job must reach `SUCCEEDED` or `PARTIALLY_SUCCEEDED`, have 100 terminal items, and leave no worker checkpoint. The expected result for this corpus is one item-level failure only if the parser still cannot safely interpret the paper; a successful parse is preferred and verified against the author fixture.
+The replay uses the original command identity and target order, but intentionally enriches each target with the current ordered database `metadataAuthors` so the new ambiguity rule can verify the five authors in `2510.13029`. The enriched envelope is checked against the size boundary. Seed the exact canonical checkpoint `{version:1,nextIndex:25,success:25,skipped:0,failed:0}`, ensure the processed marker is absent, and publish one clean replay through the normal outbox path. Targets 26 through 100 run; deterministic result keys make the already persisted targets 27 through 52 no-ops.
+
+Completion requires 100 terminal items, no pending item, no Source checkpoint, zero retry/results lag, no new dead-letter copy, and agreement among database, API, and job UI. Target 26 must contain the four repaired valid addresses observed in its Source package. Target 53 must contain exactly the five metadata-verified authors and its paper-level contact.
 
 ## Validation
 
-TDD covers the production-shaped IEEE author block, balanced nested-command removal, per-item validation isolation, continued processing after a failed item, checkpoint validation and resumption, checkpoint write ordering, retry-exhausted terminal publication ordering, duplicate safety, and unchanged transient retry behavior. The complete Python worker suite, backend result-handler suite, container import checks, Compose contract, and production API/UI state must pass before completion.
+Tests cover production-shaped TeX, ambiguous author rejection, metadata cross-validation, strict email domains, merged-model revalidation, item isolation, canonical Redis parsing and Lua monotonicity against real Redis, checkpoint publication order, poll heartbeats during long work, deep poison envelopes, dead-letter callback ordering, command-size boundaries, Source retry item reconstruction, cross-partition completion-before-item ordering, inflated late progress, zero-item timeout reconciliation, API/worker cancellation, exact item-derived terminal counts, and late-message guards. Full worker static checks/tests, backend checks, frontend checks, container/Compose contracts, independent review, and production API/UI verification are required before completion.
