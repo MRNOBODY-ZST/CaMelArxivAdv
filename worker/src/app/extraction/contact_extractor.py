@@ -25,6 +25,7 @@ _AFFILIATION_COMMANDS = {"affiliation", "affil", "address", "institute"}
 _AUTHOR_METADATA_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {
     "thanks",
     "corref",
+    "ieeecompsocitemizethanks",
 }
 _STOP_MARKERS = (
     "\\begin{abstract}",

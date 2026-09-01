@@ -109,12 +109,16 @@ def test_nested_thanks_does_not_turn_ieee_affiliations_into_an_author(
         tmp_path,
         r"""\documentclass{IEEEtran}
 \author{Xinlei Wang, Mingtian Tan, Jing Qiu, Junhua Zhao, and Jinjin Gu\thanks{
-Xinlei Wang and Jing Qiu are with the \textit{University of Sydney, Australia}.
-Mingtian Tan is with the \textit{Hong Kong University of Science and Technology,
-Hong Kong, China}. Junhua Zhao is with the \textit{Chinese University of Hong
+This work was supported by a bounded research grant.}
+\IEEEcompsocitemizethanks{
+\IEEEcompsocthanksitem Xinlei Wang and Jing Qiu are with the \textit{University
+of Sydney, Australia}. Mingtian Tan is with the \textit{Hong Kong University
+of Science and Technology, Hong Kong, China}.
+\IEEEcompsocthanksitem Junhua Zhao is with the \textit{Chinese University of Hong
 Kong, Shenzhen, and the Shenzhen Institute of Artificial Intelligence and
 Robotics for Society, Shenzhen, China}. Jinjin Gu is with the \textit{Institute
-for Computer Science, Artificial Intelligence and Technology, Sofia, Bulgaria}.}}
+for Computer Science, Artificial Intelligence and Technology, Sofia, Bulgaria}.
+Contact: \texttt{jinjin.gu@insait.ai}.}}
 \begin{document}\maketitle
 """,
     )
@@ -127,6 +131,9 @@ for Computer Science, Artificial Intelligence and Technology, Sofia, Bulgaria}.}
         "Jinjin Gu",
     ]
     assert all("University" not in author.name for author in result.authors)
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "jinjin.gu@insait.ai"
+    ]
 
 
 def test_body_and_bibliography_addresses_are_not_promoted_to_contacts(tmp_path: Path) -> None:
