@@ -11,10 +11,10 @@ from pydantic import (
     model_validator,
 )
 
+from app.email_validation import has_public_dns_name_syntax
 from app.source_safety import contains_email_like_text, unsafe_bounded_text
 
 _LOCAL_PART = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}")
-_DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 def _unsafe_text(value: str, maximum_length: int) -> bool:
@@ -115,11 +115,7 @@ class ExtractedContact(ExtractionModel):
             or local.endswith(".")
             or ".." in local
             or self.domain != actual_domain
-            or len(self.domain) > 255
-            or "." not in self.domain
-            or any(
-                _DOMAIN_LABEL.fullmatch(label) is None for label in self.domain.split(".")
-            )
+            or not has_public_dns_name_syntax(self.domain)
             or _unsafe_text(self.display_email, 320)
             or not self.syntax_valid
         ):

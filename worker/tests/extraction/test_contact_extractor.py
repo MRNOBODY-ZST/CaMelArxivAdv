@@ -327,6 +327,167 @@ def test_non_ldh_domain_characters_are_rejected(tmp_path: Path, domain: str) -> 
     assert result.contacts == ()
 
 
+def test_numeric_only_top_level_domain_is_rejected(tmp_path: Path) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\email{agent@2.1.7}
+\begin{document}\maketitle
+""",
+    )
+
+    assert result.contacts == ()
+
+
+def test_single_character_top_level_domain_is_rejected(tmp_path: Path) -> None:
+    result = extract(
+        tmp_path,
+        r"""\documentclass{article}
+\email{agent@example.c}
+\begin{document}\maketitle
+""",
+    )
+
+    assert result.contacts == ()
+
+
+@pytest.mark.parametrize("domain", ["example.xn--a", "example.xn--abc", "example.xn--0"])
+def test_invalid_punycode_alabel_is_rejected(tmp_path: Path, domain: str) -> None:
+    result = extract(
+        tmp_path,
+        "\\documentclass{article}\n"
+        f"\\email{{agent@{domain}}}\n"
+        "\\begin{document}\\maketitle\n",
+    )
+
+    assert result.contacts == ()
+
+
+def test_plain_version_tokens_in_an_included_appendix_are_not_contacts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.tex").write_text(
+        r"""\documentclass{article}
+\author{Alice Example}
+\input{appendices/agent_adaptation}
+\begin{document}\maketitle
+""",
+        encoding="utf-8",
+    )
+    appendix = tmp_path / "appendices"
+    appendix.mkdir()
+    (appendix / "agent_adaptation.tex").write_text(
+        r"""Pin the CLI version via \texttt{@agent@2.1.7}.
+The manifest contains JSON: "email": package@release.dev.
+The manifest note is JSON: {"note": "Correspondence: package2@release.dev"}.
+\section{Adaptation}
+""",
+        encoding="utf-8",
+    )
+
+    result = extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20)
+    )
+
+    assert result.contacts == ()
+
+
+def test_explicit_email_in_an_included_author_file_accepts_a_numeric_subdomain(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.tex").write_text(
+        r"""\documentclass{article}
+\author{Alice Example}
+\input{authors}
+\begin{document}\maketitle
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "authors.tex").write_text(
+        r"""\affil{Lab\_One\_Two\_Three\_Four\_Five\_Six\_Seven\_Eight}
+\email{alice@2026.example.edu}
+""",
+        encoding="utf-8",
+    )
+
+    result = extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20)
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "alice@2026.example.edu"
+    ]
+
+
+@pytest.mark.parametrize("command", ["affil", "address"])
+def test_included_author_metadata_commands_keep_explicit_contacts(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    (tmp_path / "main.tex").write_text(
+        r"""\documentclass{article}
+\author{Alice Example}
+\input{authors}
+\begin{document}\maketitle
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "authors.tex").write_text(
+        f"\\{command}{{Example Lab; alice@2026.example.edu}}\n",
+        encoding="utf-8",
+    )
+
+    result = extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20)
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "alice@2026.example.edu"
+    ]
+
+
+def test_plain_corresponding_author_line_in_an_included_author_file_is_kept(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.tex").write_text(
+        r"""\documentclass{article}
+\author{Alice Example}
+\input{authors}
+\begin{document}\maketitle
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "authors.tex").write_text(
+        "Corresponding author: alice@2026.example.edu\n",
+        encoding="utf-8",
+    )
+
+    result = extract_contacts(
+        discover_tex(tmp_path, maximum_include_depth=8, maximum_files=20)
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        "alice@2026.example.edu"
+    ]
+    assert result.contacts[0].corresponding is True
+
+
+@pytest.mark.parametrize("domain", ["example.xn--p1ai", "example.xn--80ak6aa92e"])
+def test_valid_punycode_top_level_domain_is_accepted(
+    tmp_path: Path, domain: str
+) -> None:
+    result = extract(
+        tmp_path,
+        "\\documentclass{article}\n"
+        f"\\email{{alice@{domain}}}\n"
+        "\\begin{document}\\maketitle\n",
+    )
+
+    assert [contact.normalized_email for contact in result.contacts] == [
+        f"alice@{domain}"
+    ]
+
+
 @pytest.mark.parametrize(
     "author_text",
     [

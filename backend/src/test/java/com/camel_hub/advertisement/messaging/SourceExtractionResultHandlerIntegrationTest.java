@@ -14,6 +14,8 @@ import io.r2dbc.spi.ConnectionFactories;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -585,6 +587,108 @@ class SourceExtractionResultHandlerIntegrationTest {
 		assertThat(count("contacts")).isZero();
 		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
 				.isEqualTo("UNKNOWN");
+	}
+
+	@Test
+	void acceptsMaximumLengthDnsDomain() {
+		String domain = "a".repeat(63) + "." + "b".repeat(63) + "."
+				+ "c".repeat(63) + "." + "d".repeat(61);
+		assertThat(domain).hasSize(253);
+		String safe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", "alice@" + domain)
+				.replace("\"domain\":\"university.edu\"", "\"domain\":\"" + domain + "\"");
+
+		handler.handle(safe).block();
+
+		assertThat(count("processed_messages")).isEqualTo(1);
+		assertThat(count("extraction_runs")).isEqualTo(1);
+		assertThat(count("contacts")).isEqualTo(1);
+		assertThat(count("paper_author_contacts")).isEqualTo(1);
+		assertThat(count("extraction_evidence")).isEqualTo(1);
+	}
+
+	@Test
+	void rejectsDomainLongerThanDnsMaximumWithoutPartialRows() {
+		String domain = "a".repeat(63) + "." + "b".repeat(63) + "."
+				+ "c".repeat(63) + "." + "d".repeat(62);
+		assertThat(domain).hasSize(254);
+		String unsafe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", "alice@" + domain)
+				.replace("\"domain\":\"university.edu\"", "\"domain\":\"" + domain + "\"");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+		assertThat(count("paper_author_contacts")).isZero();
+		assertThat(count("extraction_evidence")).isZero();
+		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
+				.isEqualTo("UNKNOWN");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"alice@2.1.7", "alice@example.c"})
+	void rejectsContactWithoutAlphabeticMultiCharacterTopLevelDomainWithoutPartialRows(
+			String normalizedEmail) {
+		String domain = normalizedEmail.substring(normalizedEmail.indexOf('@') + 1);
+		String unsafe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", normalizedEmail)
+				.replace("\"domain\":\"university.edu\"", "\"domain\":\"" + domain + "\"");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+		assertThat(count("paper_author_contacts")).isZero();
+		assertThat(count("extraction_evidence")).isZero();
+		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
+				.isEqualTo("UNKNOWN");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"alice@example.xn--a",
+			"alice@example.xn--abc",
+			"alice@example.xn--0"
+	})
+	void rejectsInvalidPunycodeLabelsWithoutPartialRows(String normalizedEmail) {
+		String domain = normalizedEmail.substring(normalizedEmail.indexOf('@') + 1);
+		String unsafe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", normalizedEmail)
+				.replace("\"domain\":\"university.edu\"", "\"domain\":\"" + domain + "\"");
+
+		assertThatThrownBy(() -> handler.handle(unsafe).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("processed_messages")).isZero();
+		assertThat(count("extraction_runs")).isZero();
+		assertThat(count("contacts")).isZero();
+		assertThat(count("paper_author_contacts")).isZero();
+		assertThat(count("extraction_evidence")).isZero();
+		assertThat(text("SELECT source_status FROM papers WHERE id = '" + PAPER + "'"))
+				.isEqualTo("UNKNOWN");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"alice@lab2.university.edu",
+			"alice@example.xn--p1ai",
+			"alice@example.xn--80ak6aa92e"
+	})
+	void acceptsNumericSubdomainsAndPunycodeLabels(String normalizedEmail) {
+		String domain = normalizedEmail.substring(normalizedEmail.indexOf('@') + 1);
+		String safe = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("alice@university.edu", normalizedEmail)
+				.replace("\"domain\":\"university.edu\"", "\"domain\":\"" + domain + "\"");
+
+		handler.handle(safe).block();
+
+		assertThat(count("processed_messages")).isEqualTo(1);
+		assertThat(count("extraction_runs")).isEqualTo(1);
+		assertThat(count("contacts")).isEqualTo(1);
+		assertThat(count("paper_author_contacts")).isEqualTo(1);
+		assertThat(count("extraction_evidence")).isEqualTo(1);
 	}
 
 	@Test

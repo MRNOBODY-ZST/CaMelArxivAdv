@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.email_validation import has_public_dns_name_syntax
 from app.extraction.models import (
     Confidence,
     ExtractedAuthor,
@@ -285,6 +286,90 @@ def test_source_contact_rejects_a_non_public_dns_domain() -> None:
                 ),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["2.1.7", "example.c", "example.xn--a", "example.xn--abc", "example.xn--0"],
+)
+def test_contact_models_reject_a_non_public_domain(domain: str) -> None:
+    evidence_kwargs = {
+        "source_relative_path": "main.tex",
+        "rule_name": "PAPER_LEVEL_FRONT_MATTER_EMAIL",
+        "line_number": 1,
+        "logical_location": "AUTHOR_FRONT_MATTER",
+        "masked_context": "[email redacted]",
+    }
+    address = f"agent@{domain}"
+
+    with pytest.raises(ValidationError):
+        ExtractedContact(
+            normalized_email=address,
+            display_email=address,
+            domain=domain,
+            syntax_valid=True,
+            confidence=Confidence.LOW,
+            evidence=(ExtractionEvidence(**evidence_kwargs),),
+        )
+    with pytest.raises(ValidationError):
+        SourceContact(
+            normalized_email=address,
+            display_email=address,
+            domain=domain,
+            syntax_valid=True,
+            confidence="LOW",
+            evidence=(SourceEvidence(**evidence_kwargs),),
+        )
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "2026.example.edu",
+        "xn--bcher-kva.example",
+        "example.xn--p1ai",
+        "example.xn--80ak6aa92e",
+    ],
+)
+def test_contact_models_accept_numeric_subdomains_and_punycode(domain: str) -> None:
+    evidence_kwargs = {
+        "source_relative_path": "main.tex",
+        "rule_name": "PAPER_LEVEL_FRONT_MATTER_EMAIL",
+        "line_number": 1,
+        "logical_location": "AUTHOR_FRONT_MATTER",
+        "masked_context": "[email redacted]",
+    }
+    address = f"agent@{domain}"
+
+    extracted = ExtractedContact(
+        normalized_email=address,
+        display_email=address,
+        domain=domain,
+        syntax_valid=True,
+        confidence=Confidence.LOW,
+        evidence=(ExtractionEvidence(**evidence_kwargs),),
+    )
+    source = SourceContact(
+        normalized_email=address,
+        display_email=address,
+        domain=domain,
+        syntax_valid=True,
+        confidence="LOW",
+        evidence=(SourceEvidence(**evidence_kwargs),),
+    )
+
+    assert extracted.domain == domain
+    assert source.domain == domain
+
+
+def test_public_dns_name_syntax_enforces_the_untrailed_wire_length() -> None:
+    maximum = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+    oversized = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 62))
+
+    assert len(maximum) == 253
+    assert len(oversized) == 254
+    assert has_public_dns_name_syntax(maximum) is True
+    assert has_public_dns_name_syntax(oversized) is False
 
 
 @pytest.mark.parametrize("local", [".alice", "alice.", "alice..x"])

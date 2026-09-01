@@ -554,7 +554,7 @@ public class ArxivResultHandler {
 	}
 
 	private boolean validNormalizedEmail(String email, String domain) {
-		if (email == null || domain == null || email.length() > 320 || domain.length() > 255
+		if (email == null || domain == null || email.length() > 320 || domain.length() > 253
 				|| !email.equals(email.toLowerCase(java.util.Locale.ROOT))
 				|| !email.matches("[A-Za-z0-9.!#$%&'*+/=?^_`|~-]{1,64}@[A-Za-z0-9.-]{3,255}")) {
 			return false;
@@ -564,10 +564,30 @@ public class ArxivResultHandler {
 			return false;
 		}
 		String actualDomain = email.substring(email.lastIndexOf('@') + 1);
+		String topLevelDomain = domain.substring(domain.lastIndexOf('.') + 1);
 		return actualDomain.equals(domain) && domain.contains(".")
 				&& java.util.Arrays.stream(domain.split("\\."))
-						.allMatch(label -> label.matches(
-								"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"));
+						.allMatch(this::validDomainLabel)
+				&& topLevelDomain.length() >= 2
+				&& topLevelDomain.chars().anyMatch(value -> value >= 'a' && value <= 'z');
+	}
+
+	private boolean validDomainLabel(String label) {
+		if (!label.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")) {
+			return false;
+		}
+		if (!label.startsWith("xn--")) {
+			return true;
+		}
+		try {
+			int flags = java.net.IDN.USE_STD3_ASCII_RULES | java.net.IDN.ALLOW_UNASSIGNED;
+			String decoded = java.net.IDN.toUnicode(label, flags);
+			return !decoded.equals(label)
+					&& java.net.IDN.toASCII(decoded, flags).equals(label);
+		}
+		catch (IllegalArgumentException exception) {
+			return false;
+		}
 	}
 
 	private boolean unsafePath(String value) {

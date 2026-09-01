@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 
+from app.email_validation import has_public_dns_name_syntax
 from app.extraction.models import (
     Confidence,
     ExtractedAuthor,
@@ -24,10 +25,14 @@ _EMAIL = re.compile(
     r"([A-Za-z0-9.!#$%&'*+/=?^_`|~-]+@[^\s{}\\<>@,;:]+)",
     re.IGNORECASE,
 )
-_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _AUTHOR_NAMES = {"author", "authors"}
 _EMAIL_COMMANDS = {"email", "ead"}
 _AFFILIATION_COMMANDS = {"affiliation", "affil", "address", "institute"}
+_NON_ROOT_CONTACT_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {"thanks"}
+_CORRESPONDENCE_LABEL = re.compile(
+    r"\b(?:corresponding\s+author|correspondence)\s*(?::|\uFF1A|[-\u2014])\s*$",
+    re.IGNORECASE,
+)
 _AUTHOR_METADATA_COMMANDS = _EMAIL_COMMANDS | _AFFILIATION_COMMANDS | {
     "thanks",
     "corref",
@@ -81,7 +86,8 @@ def extract_contacts(
     candidates: list[_Candidate] = []
     for tex_file in corpus.files:
         front = _front_matter(tex_file.text)
-        commands = _commands(front)
+        normalized_front = _front_matter_matching_view(front)
+        commands = _commands(normalized_front)
         spans: list[_AuthorSpan] = []
         for command in commands:
             if command.name.lower() not in _AUTHOR_NAMES:
@@ -144,7 +150,6 @@ def extract_contacts(
                 orders.append(order)
             if orders:
                 spans.append(_AuthorSpan(tuple(orders), command.start, command.end))
-        normalized_front = _tex_unescape(front)
         for match in _EMAIL.finditer(normalized_front):
             normalized = _normalize_email(match.group(1))
             if normalized is None:
@@ -155,11 +160,21 @@ def extract_contacts(
                     item
                     for item in commands
                     if item.start <= match.start() <= item.end
-                    and item.name.lower() in (_EMAIL_COMMANDS | {"thanks"})
+                    and item.name.lower() in _NON_ROOT_CONTACT_COMMANDS
                 ),
                 None,
             )
             span = next((item for item in spans if item.start <= match.start() <= item.end), None)
+            explicit_correspondence = _has_explicit_correspondence_label(
+                normalized_front, match.start()
+            )
+            if (
+                tex_file.relative_path != corpus.root_path
+                and container_command is None
+                and span is None
+                and not explicit_correspondence
+            ):
+                continue
             author_order = span.orders[0] if span is not None and len(span.orders) == 1 else None
             surrounding = _line_context(normalized_front, match.start(), match.end())
             corresponding = bool(
@@ -359,6 +374,11 @@ def _tex_unescape(value: str) -> str:
     return re.sub(r"\\([_#$%&{}])", r"\1", unicodedata.normalize("NFKC", value))
 
 
+def _front_matter_matching_view(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return re.sub(r"\\([_#$%&])", r"\1", normalized)
+
+
 def _safe_affiliation(value: str) -> str:
     scrubbed = redact_email_like_tokens(_tex_unescape(value), "")
     return _plain_tex(scrubbed).strip(" ,;:")
@@ -390,9 +410,7 @@ def _normalize_email(raw: str) -> tuple[str, str, bool] | None:
         domain = raw_domain.rstrip(".").encode("idna").decode("ascii").lower()
     except UnicodeError:
         return None
-    if len(domain) > 255 or "." not in domain or any(
-        _DOMAIN_LABEL.fullmatch(label) is None for label in domain.split(".")
-    ):
+    if not has_public_dns_name_syntax(domain):
         return None
     if re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`|~-]+", local) is None:
         return None
@@ -491,6 +509,12 @@ def _line_context(text: str, start: int, end: int) -> str:
     if line_end < 0:
         line_end = len(text)
     return re.sub(r"\s+", " ", text[line_start:line_end]).strip()[:500]
+
+
+def _has_explicit_correspondence_label(text: str, email_start: int) -> bool:
+    line_start = text.rfind("\n", 0, email_start) + 1
+    prefix = _plain_tex(text[line_start:email_start][-160:])
+    return _CORRESPONDENCE_LABEL.fullmatch(prefix) is not None
 
 
 def _mask_context(context: str) -> str:
