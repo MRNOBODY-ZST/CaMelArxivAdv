@@ -11,6 +11,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -245,37 +246,44 @@ class FlywayMigrationTest {
 
 	private void assertV16ConstraintDefinitions() throws SQLException {
 		Map<String, String> definitions = constraintDefinitions();
-		assertThat(definitions.keySet()).contains(
-				"ck_campaign_lock_version", "ck_campaign_review_preflight_digest", "ck_campaign_recipient_delivery_status",
-				"ck_campaign_recipient_delivery_lease", "ck_campaign_recipient_attempt_count", "ck_campaign_recipient_rfc_message_id",
-				"ck_campaign_recipient_unknown_outcome", "ck_delivery_attempt_status", "ck_delivery_attempt_stage",
-				"ck_delivery_attempt_rfc_message_id", "ck_tracking_token_type", "ck_tracking_token_link", "ck_tracking_token_hash",
-				"ck_recipient_delivery_cooldown_hmac", "uk_campaign_safety_message_recipient", "ck_campaign_safety_run_limit",
-				"ck_campaign_safety_run_status", "ck_campaign_safety_run_lock_version", "ck_campaign_safety_message_status",
-				"ck_campaign_safety_message_lease", "ck_campaign_safety_message_attempt_count", "ck_campaign_safety_message_rfc_message_id",
-				"ck_campaign_safety_attempt_number", "ck_campaign_safety_attempt_status", "ck_campaign_safety_attempt_stage",
-				"ck_campaign_safety_link_target_hash", "ck_campaign_safety_link_token_hash", "ck_campaign_safety_link_token_type",
-				"ck_campaign_safety_link_target_scheme", "ck_campaign_safety_event_type", "ck_mailbox_sync_cursor_uid_validity",
-				"ck_mailbox_sync_cursor_uid", "ck_mailbox_sync_cursor_lease", "uk_mailbox_inbound_event_uid",
-				"ck_mailbox_inbound_event_type", "ck_mailbox_inbound_event_uid", "ck_mailbox_inbound_event_match");
-		assertThat(definitions.get("ck_campaign_review_preflight_digest")).contains("octet_length(review_preflight_digest) = 32");
-		assertThat(definitions.get("ck_tracking_token_hash")).contains("octet_length(token_hash) = 32");
-		assertThat(definitions.get("ck_recipient_delivery_cooldown_hmac")).contains("octet_length(email_hmac) = 32");
-		assertThat(definitions.get("ck_campaign_recipient_delivery_status")).contains(
-				"QUEUED", "CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "BOUNCED", "SUPPRESSED",
-				"UNSUBSCRIBED", "CANCELED", "OUTCOME_UNKNOWN");
-		assertThat(definitions.get("ck_tracking_token_type")).contains("OPEN", "CLICK", "UNSUBSCRIBE");
-		assertThat(definitions.get("ck_campaign_safety_event_type")).contains(
-				"OPEN", "CLICK", "UNSUBSCRIBE", "REPLY", "AUTO_REPLY", "BOUNCE");
-		assertThat(definitions.get("ck_mailbox_inbound_event_type")).contains("REPLY", "AUTO_REPLY", "BOUNCE", "UNMATCHED");
-		for (String digestConstraint : Set.of(
-				"ck_campaign_recipient_delivery_lease", "ck_campaign_safety_message_lease", "ck_mailbox_sync_cursor_lease",
-				"ck_campaign_safety_link_target_hash", "ck_campaign_safety_link_token_hash")) {
-			assertThat(definitions.get(digestConstraint)).contains("octet_length").contains("= 32");
-		}
-		assertThat(definitions.get("uk_campaign_safety_message_recipient")).contains("UNIQUE (run_id, campaign_recipient_id)");
-		assertThat(definitions.get("uk_mailbox_inbound_event_uid"))
-				.contains("UNIQUE (mailbox_account_id, folder_name, uid_validity, remote_uid)");
+		assertDefinitions(definitions, Map.ofEntries(
+				Map.entry("ck_campaign_lock_version", List.of("lock_version >= 0")),
+				Map.entry("ck_campaign_review_preflight_digest", List.of("review_preflight_digest IS NULL", "octet_length(review_preflight_digest) = 32")),
+				Map.entry("ck_campaign_recipient_delivery_status", recipientStatuses()),
+				Map.entry("ck_campaign_recipient_delivery_lease", List.of("delivery_lease_hash IS NULL", "delivery_lease_expires_at IS NULL", "octet_length(delivery_lease_hash) = 32")),
+				Map.entry("ck_campaign_recipient_attempt_count", List.of("attempt_count >= 0", "attempt_count <= 3")),
+				Map.entry("ck_campaign_recipient_rfc_message_id", List.of("rfc_message_id", "[:space:]")),
+				Map.entry("ck_campaign_recipient_unknown_outcome", List.of("outcome_unknown_at IS NULL", "outcome_unknown_reason IS NULL", "outcome_unknown_at IS NOT NULL", "outcome_unknown_reason IS NOT NULL")),
+				Map.entry("ck_delivery_attempt_status", attemptStatuses()),
+				Map.entry("ck_delivery_attempt_stage", transportStages()),
+				Map.entry("ck_delivery_attempt_rfc_message_id", List.of("rfc_message_id", "[:space:]")),
+				Map.entry("ck_tracking_token_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE")),
+				Map.entry("ck_tracking_token_hash", List.of("octet_length(token_hash) = 32")),
+				Map.entry("ck_tracking_token_link", List.of("token_type", "OPEN", "CLICK", "UNSUBSCRIBE", "campaign_link_id IS NULL", "campaign_link_id IS NOT NULL")),
+				Map.entry("ck_recipient_delivery_cooldown_hmac", List.of("octet_length(email_hmac) = 32")),
+				Map.entry("uk_campaign_safety_message_recipient", List.of("UNIQUE (run_id, campaign_recipient_id)")),
+				Map.entry("ck_campaign_safety_run_limit", List.of("recipient_limit >= 1", "recipient_limit <= 20")),
+				Map.entry("ck_campaign_safety_run_status", List.of("QUEUED", "RUNNING", "COMPLETED", "PARTIALLY_FAILED", "FAILED", "CANCELED")),
+				Map.entry("ck_campaign_safety_run_lock_version", List.of("lock_version >= 0")),
+				Map.entry("ck_campaign_safety_message_status", List.of("QUEUED", "CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "CANCELED", "OUTCOME_UNKNOWN")),
+				Map.entry("ck_campaign_safety_message_lease", List.of("delivery_lease_hash IS NULL", "delivery_lease_expires_at IS NULL", "octet_length(delivery_lease_hash) = 32")),
+				Map.entry("ck_campaign_safety_message_attempt_count", List.of("attempt_count >= 0", "attempt_count <= 3")),
+				Map.entry("ck_campaign_safety_message_rfc_message_id", List.of("rfc_message_id", "[:space:]")),
+				Map.entry("ck_campaign_safety_attempt_number", List.of("attempt_number >= 1", "attempt_number <= 3")),
+				Map.entry("ck_campaign_safety_attempt_status", attemptStatuses()),
+				Map.entry("ck_campaign_safety_attempt_stage", transportStages()),
+				Map.entry("ck_campaign_safety_link_target_hash", List.of("octet_length(target_url_hash) = 32")),
+				Map.entry("ck_campaign_safety_link_token_hash", List.of("octet_length(token_hash) = 32")),
+				Map.entry("ck_campaign_safety_link_token_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE")),
+				Map.entry("ck_campaign_safety_link_target_scheme", List.of("target_url", "https?://")),
+				Map.entry("ck_campaign_safety_event_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE", "REPLY", "AUTO_REPLY", "BOUNCE")),
+				Map.entry("ck_mailbox_sync_cursor_uid_validity", List.of("uid_validity >= 0")),
+				Map.entry("ck_mailbox_sync_cursor_uid", List.of("last_remote_uid >= 0")),
+				Map.entry("ck_mailbox_sync_cursor_lease", List.of("lease_hash IS NULL", "lease_expires_at IS NULL", "octet_length(lease_hash) = 32")),
+				Map.entry("uk_mailbox_inbound_event_uid", List.of("UNIQUE (mailbox_account_id, folder_name, uid_validity, remote_uid)")),
+				Map.entry("ck_mailbox_inbound_event_type", List.of("REPLY", "AUTO_REPLY", "BOUNCE", "UNMATCHED")),
+				Map.entry("ck_mailbox_inbound_event_uid", List.of("uid_validity >= 0", "remote_uid >= 0")),
+				Map.entry("ck_mailbox_inbound_event_match", List.of("campaign_recipient_id", "safety_message_id", "NOT"))));
 	}
 
 	private void assertV16ForeignKeys() throws SQLException {
@@ -296,24 +304,40 @@ class FlywayMigrationTest {
 
 	private void assertV16IndexDefinitions() throws SQLException {
 		Map<String, String> definitions = indexDefinitions();
-		assertThat(definitions.keySet()).contains(
-				"ix_campaigns_mailbox_status", "ix_campaign_recipients_delivery_due", "ix_campaign_recipients_rfc_message_id",
-				"ix_recipient_delivery_cooldowns_accepted", "ix_campaign_safety_runs_campaign_created", "ix_campaign_safety_runs_status",
-				"ix_campaign_safety_messages_due", "ix_campaign_safety_messages_run_status", "ix_campaign_safety_messages_rfc_message_id",
-				"ix_campaign_safety_attempts_message_time", "ix_campaign_safety_links_message", "ix_campaign_safety_events_message_time",
-				"ix_mailbox_sync_cursors_due", "ix_mailbox_inbound_events_message_id", "ix_mailbox_inbound_events_recipient");
-		assertThat(definitions.get("ix_campaign_recipients_delivery_due"))
-				.contains("(status, next_attempt_at, id)").contains("WHERE ((status)::text = ANY");
-		assertThat(definitions.get("ix_campaign_safety_messages_due"))
-				.contains("(status, next_attempt_at, id)").contains("WHERE ((status)::text = ANY");
-		assertThat(definitions.get("ix_campaign_safety_messages_run_status")).contains("(run_id, status, id)");
-		assertThat(definitions.get("ix_campaign_safety_attempts_message_time")).contains("(safety_message_id, started_at DESC)");
-		assertThat(definitions.get("ix_campaign_safety_events_message_time")).contains("(safety_message_id, occurred_at DESC, id)");
-		assertThat(definitions.get("ix_mailbox_sync_cursors_due")).contains("(lease_expires_at, mailbox_account_id, folder_name)");
-		assertThat(definitions.get("ix_mailbox_inbound_events_message_id"))
-				.contains("(referenced_message_id)").contains("WHERE (referenced_message_id IS NOT NULL)");
-		assertThat(definitions.get("ix_mailbox_inbound_events_recipient"))
-				.contains("(campaign_recipient_id, created_at DESC)").contains("WHERE (campaign_recipient_id IS NOT NULL)");
+		assertDefinitions(definitions, Map.ofEntries(
+				Map.entry("ix_campaigns_mailbox_status", List.of("(mailbox_account_id, status, id)", "WHERE (mailbox_account_id IS NOT NULL)")),
+				Map.entry("ix_campaign_recipients_delivery_due", List.of("(status, next_attempt_at, id)", "WHERE ((status)::text = ANY", "QUEUED", "TEMPORARY_FAILURE")),
+				Map.entry("ix_campaign_recipients_rfc_message_id", List.of("(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
+				Map.entry("ix_recipient_delivery_cooldowns_accepted", List.of("(last_smtp_accepted_at DESC)")),
+				Map.entry("ix_campaign_safety_runs_campaign_created", List.of("(campaign_id, created_at DESC, id)")),
+				Map.entry("ix_campaign_safety_runs_status", List.of("(status, created_at, id)", "WHERE ((status)::text = ANY", "QUEUED", "RUNNING")),
+				Map.entry("ix_campaign_safety_messages_due", List.of("(status, next_attempt_at, id)", "WHERE ((status)::text = ANY", "QUEUED", "TEMPORARY_FAILURE")),
+				Map.entry("ix_campaign_safety_messages_run_status", List.of("(run_id, status, id)")),
+				Map.entry("ix_campaign_safety_messages_rfc_message_id", List.of("(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
+				Map.entry("ix_campaign_safety_attempts_message_time", List.of("(safety_message_id, started_at DESC)")),
+				Map.entry("ix_campaign_safety_links_message", List.of("(safety_message_id, id)")),
+				Map.entry("ix_campaign_safety_events_message_time", List.of("(safety_message_id, occurred_at DESC, id)")),
+				Map.entry("ix_mailbox_sync_cursors_due", List.of("(lease_expires_at, mailbox_account_id, folder_name)")),
+				Map.entry("ix_mailbox_inbound_events_message_id", List.of("(referenced_message_id)", "WHERE (referenced_message_id IS NOT NULL)")),
+				Map.entry("ix_mailbox_inbound_events_recipient", List.of("(campaign_recipient_id, created_at DESC)", "WHERE (campaign_recipient_id IS NOT NULL)"))));
+	}
+
+	private List<String> recipientStatuses() {
+		return List.of("QUEUED", "CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "BOUNCED",
+				"SUPPRESSED", "UNSUBSCRIBED", "CANCELED", "OUTCOME_UNKNOWN");
+	}
+
+	private List<String> attemptStatuses() {
+		return List.of("CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "CANCELED", "OUTCOME_UNKNOWN");
+	}
+
+	private List<String> transportStages() {
+		return List.of("CONNECT", "EHLO", "STARTTLS", "AUTH", "MAIL_FROM", "RCPT_TO", "DATA", "POST_DATA");
+	}
+
+	private void assertDefinitions(Map<String, String> actual, Map<String, List<String>> expected) {
+		assertThat(actual.keySet()).containsAll(expected.keySet());
+		expected.forEach((name, fragments) -> assertThat(actual.get(name)).as(name).contains(fragments.toArray(String[]::new)));
 	}
 
 	private Map<String, String> constraintDefinitions() throws SQLException {
