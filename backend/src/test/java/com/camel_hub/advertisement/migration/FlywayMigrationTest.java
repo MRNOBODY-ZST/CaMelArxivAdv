@@ -262,6 +262,10 @@ class FlywayMigrationTest {
 				Map.entry("ck_tracking_token_link", List.of("token_type", "OPEN", "CLICK", "UNSUBSCRIBE", "campaign_link_id IS NULL", "campaign_link_id IS NOT NULL")),
 				Map.entry("ck_recipient_delivery_cooldown_hmac", List.of("octet_length(email_hmac) = 32")),
 				Map.entry("uk_campaign_safety_message_recipient", List.of("UNIQUE (run_id, campaign_recipient_id)")),
+				Map.entry("uk_campaign_safety_attempt_idempotency", List.of("UNIQUE (idempotency_key)")),
+				Map.entry("uk_campaign_safety_attempt_number", List.of("UNIQUE (safety_message_id, attempt_number)")),
+				Map.entry("uk_campaign_safety_link_target", List.of("UNIQUE (safety_message_id, target_url_hash)")),
+				Map.entry("uk_campaign_safety_link_token", List.of("UNIQUE (token_hash)")),
 				Map.entry("ck_campaign_safety_run_limit", List.of("recipient_limit >= 1", "recipient_limit <= 20")),
 				Map.entry("ck_campaign_safety_run_status", List.of("QUEUED", "RUNNING", "COMPLETED", "PARTIALLY_FAILED", "FAILED", "CANCELED")),
 				Map.entry("ck_campaign_safety_run_lock_version", List.of("lock_version >= 0")),
@@ -284,6 +288,19 @@ class FlywayMigrationTest {
 				Map.entry("ck_mailbox_inbound_event_type", List.of("REPLY", "AUTO_REPLY", "BOUNCE", "UNMATCHED")),
 				Map.entry("ck_mailbox_inbound_event_uid", List.of("uid_validity >= 0", "remote_uid >= 0")),
 				Map.entry("ck_mailbox_inbound_event_match", List.of("campaign_recipient_id", "safety_message_id", "NOT"))));
+		assertExactSqlStringSets(definitions, Map.ofEntries(
+				Map.entry("ck_campaign_recipient_delivery_status", recipientStatuses()),
+				Map.entry("ck_delivery_attempt_status", attemptStatuses()),
+				Map.entry("ck_delivery_attempt_stage", transportStages()),
+				Map.entry("ck_tracking_token_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE")),
+				Map.entry("ck_tracking_token_link", List.of("OPEN", "CLICK", "UNSUBSCRIBE")),
+				Map.entry("ck_campaign_safety_run_status", List.of("QUEUED", "RUNNING", "COMPLETED", "PARTIALLY_FAILED", "FAILED", "CANCELED")),
+				Map.entry("ck_campaign_safety_message_status", List.of("QUEUED", "CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "CANCELED", "OUTCOME_UNKNOWN")),
+				Map.entry("ck_campaign_safety_attempt_status", attemptStatuses()),
+				Map.entry("ck_campaign_safety_attempt_stage", transportStages()),
+				Map.entry("ck_campaign_safety_link_token_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE")),
+				Map.entry("ck_campaign_safety_event_type", List.of("OPEN", "CLICK", "UNSUBSCRIBE", "REPLY", "AUTO_REPLY", "BOUNCE")),
+				Map.entry("ck_mailbox_inbound_event_type", List.of("REPLY", "AUTO_REPLY", "BOUNCE", "UNMATCHED"))));
 	}
 
 	private void assertV16ForeignKeys() throws SQLException {
@@ -320,6 +337,16 @@ class FlywayMigrationTest {
 				Map.entry("ix_mailbox_sync_cursors_due", List.of("(lease_expires_at, mailbox_account_id, folder_name)")),
 				Map.entry("ix_mailbox_inbound_events_message_id", List.of("(referenced_message_id)", "WHERE (referenced_message_id IS NOT NULL)")),
 				Map.entry("ix_mailbox_inbound_events_recipient", List.of("(campaign_recipient_id, created_at DESC)", "WHERE (campaign_recipient_id IS NOT NULL)"))));
+		assertExactSqlStringSets(definitions, Map.of(
+				"ix_campaign_recipients_delivery_due", List.of("QUEUED", "TEMPORARY_FAILURE"),
+				"ix_campaign_safety_runs_status", List.of("QUEUED", "RUNNING"),
+				"ix_campaign_safety_messages_due", List.of("QUEUED", "TEMPORARY_FAILURE")));
+		assertExactPredicates(definitions, Map.of(
+				"ix_campaigns_mailbox_status", "mailbox_account_id IS NOT NULL",
+				"ix_campaign_recipients_rfc_message_id", "rfc_message_id IS NOT NULL",
+				"ix_campaign_safety_messages_rfc_message_id", "rfc_message_id IS NOT NULL",
+				"ix_mailbox_inbound_events_message_id", "referenced_message_id IS NOT NULL",
+				"ix_mailbox_inbound_events_recipient", "campaign_recipient_id IS NOT NULL"));
 	}
 
 	private List<String> recipientStatuses() {
@@ -338,6 +365,36 @@ class FlywayMigrationTest {
 	private void assertDefinitions(Map<String, String> actual, Map<String, List<String>> expected) {
 		assertThat(actual.keySet()).containsAll(expected.keySet());
 		expected.forEach((name, fragments) -> assertThat(actual.get(name)).as(name).contains(fragments.toArray(String[]::new)));
+	}
+
+	private void assertExactSqlStringSets(Map<String, String> actual, Map<String, List<String>> expected) {
+		expected.forEach((name, values) -> assertThat(sqlStringLiterals(actual.get(name))).as(name)
+				.containsExactlyInAnyOrderElementsOf(values));
+	}
+
+	private void assertExactPredicates(Map<String, String> actual, Map<String, String> expected) {
+		expected.forEach((name, predicate) -> assertThat(normalizePredicate(indexPredicate(actual.get(name)))).as(name)
+				.isEqualTo(normalizePredicate(predicate)));
+	}
+
+	private List<String> sqlStringLiterals(String definition) {
+		java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("'((?:''|[^'])*)'").matcher(definition);
+		java.util.ArrayList<String> values = new java.util.ArrayList<>();
+		while (matcher.find()) values.add(matcher.group(1).replace("''", "'"));
+		return values;
+	}
+
+	private String indexPredicate(String indexDefinition) {
+		int predicateStart = indexDefinition.indexOf(" WHERE ");
+		return predicateStart < 0 ? "" : indexDefinition.substring(predicateStart + " WHERE ".length());
+	}
+
+	private String normalizePredicate(String predicate) {
+		String normalized = predicate.replaceAll("\\s+", " ").strip();
+		while (normalized.startsWith("(") && normalized.endsWith(")")) {
+			normalized = normalized.substring(1, normalized.length() - 1).strip();
+		}
+		return normalized;
 	}
 
 	private Map<String, String> constraintDefinitions() throws SQLException {
