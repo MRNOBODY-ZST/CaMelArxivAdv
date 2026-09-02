@@ -131,6 +131,19 @@ app:
     signing-key-base64: ${TRACKING_SIGNING_KEY_BASE64:}
     token-ttl: ${TRACKING_TOKEN_TTL:PT720H}
     stale-sending-after: ${TRACKING_STALE_SENDING_AFTER:PT15M}
+  campaign-delivery:
+    enabled: ${CAMPAIGN_DELIVERY_ENABLED:false}
+    batch-size: ${CAMPAIGN_DELIVERY_BATCH_SIZE:10}
+    lease-duration: ${CAMPAIGN_DELIVERY_LEASE_DURATION:PT2M}
+    production-cooldown: ${CAMPAIGN_DELIVERY_PRODUCTION_COOLDOWN:P180D}
+    maximum-attempts: ${CAMPAIGN_DELIVERY_MAXIMUM_ATTEMPTS:3}
+    first-retry-delay: ${CAMPAIGN_DELIVERY_FIRST_RETRY_DELAY:PT1M}
+    second-retry-delay: ${CAMPAIGN_DELIVERY_SECOND_RETRY_DELAY:PT5M}
+    poll-delay: ${CAMPAIGN_DELIVERY_POLL_DELAY:PT1S}
+  campaign-safety:
+    enabled: ${CAMPAIGN_SAFETY_ENABLED:false}
+    recipient: ${CAMPAIGN_SAFETY_RECIPIENT:}
+    maximum-recipients: ${CAMPAIGN_SAFETY_MAX_RECIPIENTS:20}
   smtp:
     live-allowed: ${ALLOW_LIVE_SMTP:false}
     local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}

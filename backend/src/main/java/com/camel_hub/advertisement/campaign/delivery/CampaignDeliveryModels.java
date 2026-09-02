@@ -1,0 +1,35 @@
+package com.camel_hub.advertisement.campaign.delivery;
+
+public final class CampaignDeliveryModels {
+	private CampaignDeliveryModels() {
+	}
+
+	public enum CampaignStatus {
+		DRAFT, READY_FOR_REVIEW, APPROVED, REJECTED, SCHEDULED, RUNNING, PAUSED, COMPLETED, CANCELED
+	}
+
+	public enum RecipientStatus {
+		QUEUED, CONNECTING, SMTP_ACCEPTED, TEMPORARY_FAILURE, PERMANENT_FAILURE, BOUNCED, SUPPRESSED,
+		UNSUBSCRIBED, CANCELED, OUTCOME_UNKNOWN
+	}
+
+	public enum AttemptStatus {
+		CONNECTING, SMTP_ACCEPTED, TEMPORARY_FAILURE, PERMANENT_FAILURE, CANCELED, OUTCOME_UNKNOWN
+	}
+
+	public enum SafetyRunStatus {
+		QUEUED, RUNNING, COMPLETED, PARTIALLY_FAILED, FAILED, CANCELED
+	}
+
+	public enum SafetyMessageStatus {
+		QUEUED, CONNECTING, SMTP_ACCEPTED, TEMPORARY_FAILURE, PERMANENT_FAILURE, CANCELED, OUTCOME_UNKNOWN
+	}
+
+	public enum InboundEventType {
+		REPLY, AUTO_REPLY, BOUNCE, UNMATCHED
+	}
+
+	public enum TransportStage {
+		CONNECT, EHLO, STARTTLS, AUTH, MAIL_FROM, RCPT_TO, DATA, POST_DATA
+	}
+}

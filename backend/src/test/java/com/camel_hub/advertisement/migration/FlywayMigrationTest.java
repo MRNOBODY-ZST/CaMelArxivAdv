@@ -125,6 +125,44 @@ class FlywayMigrationTest {
 	}
 
 	@Test
+	void addsDurableCampaignDeliveryAndSafetyIsolationSchema() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+
+		assertThat(columnNames("campaigns")).contains(
+				"lock_version", "mailbox_account_id", "review_preflight_digest", "review_preflight_at",
+				"status_changed_at", "status_changed_by");
+		assertThat(columnNames("campaign_recipients")).contains(
+				"delivery_lease_hash", "delivery_lease_expires_at", "next_attempt_at", "attempt_count",
+				"rfc_message_id", "replied_at", "outcome_unknown_at", "outcome_unknown_reason");
+		assertThat(columnNames("delivery_attempts")).contains(
+				"transport_stage", "smtp_enhanced_status_code", "rfc_message_id", "outcome_unknown_reason");
+		assertThat(columnNames("tracking_tokens")).contains("token_hash");
+		assertThat(tableNames()).contains(
+				"recipient_delivery_cooldowns", "campaign_safety_runs", "campaign_safety_messages",
+				"campaign_safety_attempts", "campaign_safety_links", "campaign_safety_events",
+				"mailbox_sync_cursors", "mailbox_inbound_events");
+		assertThat(constraintNames()).contains(
+				"ck_campaign_lock_version", "ck_campaign_review_preflight_digest",
+				"ck_campaign_recipient_delivery_lease", "ck_campaign_recipient_delivery_status",
+				"ck_delivery_attempt_stage", "ck_delivery_attempt_rfc_message_id",
+				"ck_tracking_token_type", "ck_recipient_delivery_cooldown_hmac",
+				"uk_campaign_safety_message_recipient", "ck_campaign_safety_run_status",
+				"ck_campaign_safety_message_status", "ck_campaign_safety_attempt_stage",
+				"ck_campaign_safety_event_type", "uk_mailbox_inbound_event_uid",
+				"ck_mailbox_inbound_event_type");
+		assertThat(indexNames()).contains(
+				"ix_campaign_recipients_delivery_due", "ix_campaign_safety_messages_due",
+				"ix_campaign_safety_messages_run_status", "ix_campaign_safety_attempts_message_time",
+				"ix_campaign_safety_events_message_time", "ix_mailbox_sync_cursors_due",
+				"ix_mailbox_inbound_events_message_id", "ix_mailbox_inbound_events_recipient");
+		assertThat(foreignKeyTargets("campaigns")).contains("mailbox_accounts", "users");
+		assertThat(foreignKeyTargets("campaign_safety_messages")).contains(
+				"campaign_safety_runs", "campaign_recipients", "smtp_accounts");
+		assertThat(foreignKeyTargets("mailbox_inbound_events")).contains(
+				"mailbox_accounts", "campaign_recipients", "campaign_safety_messages");
+	}
+
+	@Test
 	void upgradesAnExistingV8SchemaWithoutChangingPublishedChecksums() throws SQLException {
 		String schema = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
 		Flyway throughV8 = Flyway.configure()
@@ -143,7 +181,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-				assertThat(latest.migrate().migrationsExecuted).isEqualTo(7);
+				assertThat(latest.migrate().migrationsExecuted).isEqualTo(8);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);
@@ -188,6 +226,19 @@ class FlywayMigrationTest {
 				FROM pg_indexes
 				WHERE schemaname = 'public'
 				""");
+	}
+
+	private Set<String> foreignKeyTargets(String table) throws SQLException {
+		return queryNames("""
+				SELECT target.relname
+				FROM pg_constraint fk_constraint
+				JOIN pg_class source ON source.oid = fk_constraint.conrelid
+				JOIN pg_class target ON target.oid = fk_constraint.confrelid
+				JOIN pg_namespace namespace ON namespace.oid = source.relnamespace
+				WHERE namespace.nspname = 'public'
+				  AND source.relname = '%s'
+				  AND fk_constraint.contype = 'f'
+				""".formatted(table));
 	}
 
 	private Set<String> queryNames(String sql) throws SQLException {
