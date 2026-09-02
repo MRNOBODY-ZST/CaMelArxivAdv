@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 public final class CampaignWorkflowService {
@@ -57,7 +58,8 @@ public final class CampaignWorkflowService {
 	) {
 		return preflightMutation(id, actorId, safeContext(context), expectedLockVersion, Set.of("DRAFT"),
 				"CAMPAIGN_SUBMITTED_FOR_REVIEW",
-				digest -> repository.submitReview(id, expectedLockVersion, actorId, digest), null)
+				(digest, readiness) -> repository.submitReview(
+						id, expectedLockVersion, actorId, digest, readiness), null)
 				.as(transactions::transactional);
 	}
 
@@ -66,7 +68,8 @@ public final class CampaignWorkflowService {
 	) {
 		return preflightMutation(id, actorId, safeContext(context), expectedLockVersion,
 				Set.of("READY_FOR_REVIEW"), "CAMPAIGN_APPROVED",
-				digest -> repository.approve(id, expectedLockVersion, actorId, digest), null)
+				(digest, readiness) -> repository.approve(
+						id, expectedLockVersion, actorId, digest, readiness), null)
 				.as(transactions::transactional);
 	}
 
@@ -84,12 +87,14 @@ public final class CampaignWorkflowService {
 			UUID id, UUID actorId, AuthenticationRequestContext context, long expectedLockVersion,
 			Instant scheduledAt
 	) {
-		if (scheduledAt == null || !scheduledAt.isAfter(Instant.now())) {
-			return Mono.error(new CampaignValidationException("Campaign schedule must be in the future"));
-		}
-		return preflightMutation(id, actorId, safeContext(context), expectedLockVersion, Set.of("APPROVED"),
-				"CAMPAIGN_SCHEDULED", digest -> repository.schedule(
-						id, expectedLockVersion, actorId, scheduledAt, digest), "SCHEDULE")
+		return Mono.defer(() -> {
+			if (scheduledAt == null || !scheduledAt.isAfter(Instant.now())) {
+				return Mono.error(new CampaignValidationException("Campaign schedule must be in the future"));
+			}
+			return preflightMutation(id, actorId, safeContext(context), expectedLockVersion, Set.of("APPROVED"),
+					"CAMPAIGN_SCHEDULED", (digest, readiness) -> repository.schedule(
+							id, expectedLockVersion, actorId, scheduledAt, digest, readiness), "SCHEDULE");
+		})
 				.as(transactions::transactional);
 	}
 
@@ -98,7 +103,8 @@ public final class CampaignWorkflowService {
 	) {
 		return preflightMutation(id, actorId, safeContext(context), expectedLockVersion,
 				Set.of("APPROVED", "SCHEDULED"), "CAMPAIGN_STARTED",
-				digest -> repository.start(id, expectedLockVersion, actorId, digest), "START")
+				(digest, readiness) -> repository.start(
+						id, expectedLockVersion, actorId, digest, readiness), "START")
 				.as(transactions::transactional);
 	}
 
@@ -130,7 +136,9 @@ public final class CampaignWorkflowService {
 	private Mono<CampaignService.CampaignView> preflightMutation(
 			UUID id, UUID actorId, AuthenticationRequestContext context, long expectedLockVersion,
 			Set<String> allowedStatuses, String action,
-			Function<byte[], Mono<CampaignWorkflowRepository.StateRecord>> mutation, String wakeupAction
+			BiFunction<byte[], CampaignWorkflowRepository.ReadinessGuard,
+					Mono<CampaignWorkflowRepository.StateRecord>> mutation,
+			String wakeupAction
 	) {
 		return verifyBefore(id, expectedLockVersion, allowedStatuses)
 				.flatMap(before -> preflight.preflight(id).flatMap(result -> {
@@ -138,7 +146,8 @@ public final class CampaignWorkflowService {
 						return Mono.error(new CampaignValidationException("Campaign preflight is not ready"));
 					}
 					return applyMutation(id, actorId, context, action, before,
-							mutation.apply(preflight.digestBytes(result)), wakeupAction);
+							mutation.apply(preflight.digestBytes(result), preflight.readinessGuard(result)),
+							wakeupAction, true, expectedLockVersion, allowedStatuses);
 				}));
 	}
 
@@ -150,18 +159,33 @@ public final class CampaignWorkflowService {
 	) {
 		return verifyBefore(id, expectedLockVersion, allowedStatuses)
 				.flatMap(before -> applyMutation(id, actorId, context, action, before,
-						mutation.apply(before), wakeupAction));
+						mutation.apply(before), wakeupAction, false, expectedLockVersion, allowedStatuses));
 	}
 
 	private Mono<CampaignService.CampaignView> applyMutation(
 			UUID id, UUID actorId, AuthenticationRequestContext context, String action,
 			CampaignWorkflowRepository.StateRecord before,
-			Mono<CampaignWorkflowRepository.StateRecord> mutation, String wakeupAction
+			Mono<CampaignWorkflowRepository.StateRecord> mutation, String wakeupAction,
+			boolean readinessGuarded, long expectedLockVersion, Set<String> allowedStatuses
 	) {
-		return mutation.switchIfEmpty(Mono.error(conflict()))
+		Mono<CampaignWorkflowRepository.StateRecord> emptyResult = readinessGuarded
+				? classifyGuardedFailure(id, expectedLockVersion, allowedStatuses) : Mono.error(conflict());
+		return mutation.switchIfEmpty(emptyResult)
 				.flatMap(after -> audit(action, id, actorId, context, before, after)
 						.then(wakeupAction == null ? Mono.empty() : wakeup(id, after, context, wakeupAction))
 						.then(campaigns.get(id)));
+	}
+
+	private Mono<CampaignWorkflowRepository.StateRecord> classifyGuardedFailure(
+			UUID id, long expectedLockVersion, Set<String> allowedStatuses
+	) {
+		return repository.state(id)
+				.switchIfEmpty(Mono.error(new CampaignNotFoundException("Campaign was not found")))
+				.flatMap(state -> state.lockVersion() != expectedLockVersion
+						|| !allowedStatuses.contains(state.status())
+						? Mono.error(conflict())
+						: Mono.error(new CampaignValidationException(
+								"Campaign readiness changed; run preflight again")));
 	}
 
 	private Mono<CampaignWorkflowRepository.StateRecord> verifyBefore(

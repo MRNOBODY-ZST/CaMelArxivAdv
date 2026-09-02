@@ -45,6 +45,13 @@ public final class CampaignPreflightService {
 		return HexFormat.of().parseHex(view.digest());
 	}
 
+	CampaignWorkflowRepository.ReadinessGuard readinessGuard(PreflightView view) {
+		return new CampaignWorkflowRepository.ReadinessGuard(
+				Instant.now().minus(deliveryProperties.productionCooldown()),
+				view.checks().get("SENDER_VALID").passed(),
+				view.checks().get("TRACKING_READY").passed());
+	}
+
 	private PreflightView view(CampaignWorkflowRepository.PreflightRecord record) {
 		boolean contentReady = record.total() > 0 && record.contentReady() == record.total();
 		boolean unsubscribePresent = record.total() > 0 && record.unsubscribePresent() == record.total();
@@ -52,7 +59,8 @@ public final class CampaignPreflightService {
 				&& email(record.fromEmail()) && email(record.replyTo());
 		boolean smtpReady = record.smtpEnabled() && "SUCCEEDED".equals(record.smtpTestStatus())
 				&& record.smtpTestCurrent();
-		boolean mailboxReady = record.mailboxId() != null && record.mailboxEnabled()
+		boolean mailboxReady = record.mailboxId() != null && "IMAP".equals(record.mailboxProtocol())
+				&& record.mailboxEnabled()
 				&& "SUCCEEDED".equals(record.mailboxTestStatus()) && record.mailboxTestCurrent();
 		boolean trackingReady = trackingProperties.enabled()
 				&& trackingProperties.callbackScope() == MailTrackingModels.CallbackScope.PUBLIC_HTTPS_CONFIGURED;
@@ -96,7 +104,7 @@ public final class CampaignPreflightService {
 
 		long estimatedMinutes = estimateMinutes(record);
 		boolean ready = checks.values().stream().allMatch(PreflightCheck::passed);
-		String digest = digest(ready, checks, counts, estimatedMinutes);
+		String digest = digest(record, ready, checks, counts, estimatedMinutes);
 		return new PreflightView(ready, Map.copyOf(checks), Map.copyOf(counts), estimatedMinutes, digest);
 	}
 
@@ -135,9 +143,13 @@ public final class CampaignPreflightService {
 	}
 
 	private String digest(
-			boolean ready, Map<String, PreflightCheck> checks, Map<String, Long> counts, long estimatedMinutes
+			CampaignWorkflowRepository.PreflightRecord record, boolean ready,
+			Map<String, PreflightCheck> checks, Map<String, Long> counts, long estimatedMinutes
 	) {
 		Map<String, Object> canonical = new LinkedHashMap<>();
+		canonical.put("campaignId", record.campaignId());
+		canonical.put("campaignLockVersion", record.campaignLockVersion());
+		canonical.put("recipientFingerprint", record.recipientFingerprint());
 		canonical.put("ready", ready);
 		canonical.put("checks", checks);
 		canonical.put("counts", counts);

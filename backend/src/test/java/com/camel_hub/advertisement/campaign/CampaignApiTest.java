@@ -90,6 +90,19 @@ class CampaignApiTest {
 	}
 
 	@Test
+	void distinguishesReadinessChangeAsHttp400FromOptimisticConflict() {
+		UUID campaignId = UUID.randomUUID();
+		when(workflow.start(eq(campaignId), eq(ACTOR), any(), eq(7L)))
+				.thenReturn(Mono.error(new CampaignValidationException(
+						"Campaign readiness changed; run preflight again")));
+
+		client.post().uri("/api/v1/campaigns/{id}/start", campaignId)
+				.bodyValue(Map.of("expectedLockVersion", 7)).exchange()
+				.expectStatus().isBadRequest().expectBody()
+				.jsonPath("$.type").isEqualTo("invalid_campaign");
+	}
+
+	@Test
 	void exposesPreflightAndEveryLifecycleEndpoint() {
 		UUID campaignId = UUID.randomUUID();
 		UUID templateId = UUID.randomUUID();

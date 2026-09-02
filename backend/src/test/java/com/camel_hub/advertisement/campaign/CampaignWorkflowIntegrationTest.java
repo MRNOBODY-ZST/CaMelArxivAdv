@@ -13,6 +13,9 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -25,12 +28,21 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 class CampaignWorkflowIntegrationTest {
 
@@ -211,6 +223,60 @@ class CampaignWorkflowIntegrationTest {
 	}
 
 	@Test
+	void preflightUsesLatestCompletedSuccessfulExtractionInsteadOfMappingArrivalOrder() {
+		UUID rejectedCampaign = readyCampaign("DRAFT");
+		makeCurrentMappingOlder(rejectedCampaign, "SUCCEEDED", "now() - interval '2 days'");
+		insertEvidenceDecision(rejectedCampaign, "SUCCEEDED", "now() - interval '1 day'",
+				"now() - interval '3 days'", "MEDIUM", false, "REJECTED", true);
+
+		var rejected = preflight.preflight(rejectedCampaign).block();
+		assertThat(rejected.ready()).isFalse();
+		assertThat(rejected.counts()).containsEntry("ELIGIBLE", 0L)
+				.containsEntry("EVIDENCE_NOT_HIGH", 1L)
+				.containsEntry("EVIDENCE_UNVERIFIED", 1L)
+				.containsEntry("EVIDENCE_UNCONFIRMED", 1L);
+
+		UUID failedCampaign = readyCampaign("DRAFT");
+		makeCurrentMappingOlder(failedCampaign, "SUCCEEDED", "now() - interval '2 days'");
+		insertEvidenceDecision(failedCampaign, "FAILED", "now() - interval '1 day'", "now()",
+				"MEDIUM", false, "REJECTED", true);
+
+		var failedRunIgnored = preflight.preflight(failedCampaign).block();
+		assertThat(failedRunIgnored.ready()).isTrue();
+		assertThat(failedRunIgnored.counts()).containsEntry("ELIGIBLE", 1L);
+	}
+
+	@Test
+	void preflightRejectsPop3Mailbox() {
+		UUID campaignId = readyCampaign("DRAFT");
+		sql("UPDATE mailbox_accounts SET protocol = 'POP3' WHERE id = '" + MAILBOX + "'");
+
+		var result = preflight.preflight(campaignId).block();
+
+		assertThat(result.ready()).isFalse();
+		assertThat(result.checks().get("MAILBOX_READY").passed()).isFalse();
+	}
+
+	@Test
+	void preflightDigestBindsCampaignVersionAndOrderedContentSnapshot() {
+		UUID firstCampaign = readyCampaign("DRAFT");
+		UUID secondCampaign = readyCampaign("DRAFT");
+
+		String first = preflight.preflight(firstCampaign).block().digest();
+		String second = preflight.preflight(secondCampaign).block().digest();
+		assertThat(first).matches("[0-9a-f]{64}").isNotEqualTo(second);
+
+		sql("UPDATE campaign_recipients SET rendered_subject = 'A materially different subject' "
+				+ "WHERE campaign_id = '" + firstCampaign + "'");
+		String changedContent = preflight.preflight(firstCampaign).block().digest();
+		assertThat(changedContent).matches("[0-9a-f]{64}").isNotEqualTo(first);
+
+		sql("UPDATE campaigns SET lock_version = lock_version + 1 WHERE id = '" + firstCampaign + "'");
+		String changedVersion = preflight.preflight(firstCampaign).block().digest();
+		assertThat(changedVersion).matches("[0-9a-f]{64}").isNotEqualTo(changedContent);
+	}
+
+	@Test
 	void supportsEveryPermittedLifecycleTransitionAndWritesSafeAtomicAuditAndWakeups() throws Exception {
 		UUID campaignId = readyCampaign("DRAFT");
 		var updated = workflow.update(campaignId, ACTOR, CONTEXT, 0,
@@ -348,6 +414,24 @@ class CampaignWorkflowIntegrationTest {
 	}
 
 	@Test
+	void revalidatesScheduleTimeAtSubscriptionAndInTheStateUpdate() throws Exception {
+		UUID campaignId = readyCampaign("DRAFT");
+		workflow.submitReview(campaignId, ACTOR, CONTEXT, 0).block();
+		workflow.approve(campaignId, ACTOR, CONTEXT, 1).block();
+		long auditBefore = count("audit_logs");
+		Mono<CampaignService.CampaignView> delayed = workflow.schedule(
+				campaignId, ACTOR, CONTEXT, 2, Instant.now().plusMillis(400));
+
+		Thread.sleep(700);
+
+		assertThatThrownBy(delayed::block).isInstanceOf(CampaignValidationException.class);
+		assertThat(text("SELECT status FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo("APPROVED");
+		assertThat(count("audit_logs")).isEqualTo(auditBefore);
+		assertThat(count("outbox_messages")).isZero();
+	}
+
+	@Test
 	void recomputesEligibilityWhenSuppressionAppearsAfterEarlierPreflight() {
 		UUID submitCampaign = readyCampaign("DRAFT");
 		assertThat(preflight.preflight(submitCampaign).block().ready()).isTrue();
@@ -371,6 +455,184 @@ class CampaignWorkflowIntegrationTest {
 		assertThat(count("outbox_messages")).isZero();
 	}
 
+	@Test
+	void concurrentSuppressionBetweenPreflightAndMutationAbortsSubmitAndStart() throws Exception {
+		UUID submitCampaign = readyCampaign("DRAFT");
+		assertConcurrentSuppressionRejected(submitCampaign, "submit");
+
+		UUID approveCampaign = readyCampaign("READY_FOR_REVIEW");
+		assertConcurrentSuppressionRejected(approveCampaign, "approve");
+
+		UUID scheduleCampaign = readyCampaign("APPROVED");
+		assertConcurrentSuppressionRejected(scheduleCampaign, "schedule");
+
+		UUID startCampaign = readyCampaign("APPROVED");
+		assertConcurrentSuppressionRejected(startCampaign, "start");
+	}
+
+	@ParameterizedTest(name = "{0} cannot {1}")
+	@MethodSource("illegalTransitions")
+	void rejectsLiteralIllegalTransitionMatrixWithoutSideEffects(String status, String action) {
+		UUID campaignId = readyCampaign(status);
+		long auditBefore = count("audit_logs");
+		long outboxBefore = count("outbox_messages");
+
+		assertThatThrownBy(() -> invoke(action, campaignId, 0).block())
+				.isInstanceOf(CampaignConflictException.class);
+		assertThat(text("SELECT status FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(status);
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isZero();
+		assertThat(count("audit_logs")).isEqualTo(auditBefore);
+		assertThat(count("outbox_messages")).isEqualTo(outboxBefore);
+	}
+
+	@Test
+	void concurrentSameVersionSubmitAllowsExactlyOneWriter() throws Exception {
+		UUID campaignId = readyCampaign("DRAFT");
+		CountDownLatch bothPreflightsRead = new CountDownLatch(2);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		CampaignWorkflowService concurrentWorkflow = workflowWithGatedPreflight(bothPreflightsRead, release);
+
+		var first = concurrentWorkflow.submitReview(campaignId, ACTOR, CONTEXT, 0)
+				.materialize().subscribeOn(Schedulers.boundedElastic()).toFuture();
+		var second = concurrentWorkflow.submitReview(campaignId, ACTOR, CONTEXT, 0)
+				.materialize().subscribeOn(Schedulers.boundedElastic()).toFuture();
+		assertThat(bothPreflightsRead.await(5, TimeUnit.SECONDS)).isTrue();
+		release.complete(null);
+
+		var outcomes = List.of(first.get(5, TimeUnit.SECONDS), second.get(5, TimeUnit.SECONDS));
+		assertThat(outcomes).filteredOn(signal -> signal.isOnNext()).hasSize(1);
+		assertThat(outcomes).filteredOn(signal -> signal.isOnError()
+				&& signal.getThrowable() instanceof CampaignConflictException).hasSize(1);
+		assertThat(text("SELECT status FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo("READY_FOR_REVIEW");
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(1);
+		assertThat(count("audit_logs")).isEqualTo(1);
+		assertThat(count("outbox_messages")).isZero();
+	}
+
+	private static Stream<Arguments> illegalTransitions() {
+		return Stream.of(
+				Arguments.of("READY_FOR_REVIEW", "start"),
+				Arguments.of("APPROVED", "submit"),
+				Arguments.of("SCHEDULED", "approve"),
+				Arguments.of("COMPLETED", "start"),
+				Arguments.of("COMPLETED", "pause"),
+				Arguments.of("COMPLETED", "cancel"),
+				Arguments.of("CANCELED", "update"),
+				Arguments.of("CANCELED", "submit"),
+				Arguments.of("CANCELED", "resume")
+		);
+	}
+
+	private Mono<CampaignService.CampaignView> invoke(String action, UUID campaignId, long version) {
+		return switch (action) {
+			case "update" -> workflow.update(campaignId, ACTOR, CONTEXT, version,
+					new CampaignWorkflowService.CampaignUpdateCommand(
+							"Updated", "Updated purpose", MAILBOX, "Research Team",
+							"reply@example.org", false, false));
+			case "submit" -> workflow.submitReview(campaignId, ACTOR, CONTEXT, version);
+			case "approve" -> workflow.approve(campaignId, ACTOR, CONTEXT, version);
+			case "start" -> workflow.start(campaignId, ACTOR, CONTEXT, version);
+			case "pause" -> workflow.pause(campaignId, ACTOR, CONTEXT, version);
+			case "resume" -> workflow.resume(campaignId, ACTOR, CONTEXT, version);
+			case "cancel" -> workflow.cancel(campaignId, ACTOR, CONTEXT, version);
+			default -> throw new IllegalArgumentException("Unknown test action " + action);
+		};
+	}
+
+	private void assertConcurrentSuppressionRejected(UUID campaignId, String action) throws Exception {
+		CountDownLatch preflightRead = new CountDownLatch(1);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		CampaignWorkflowService gatedWorkflow = workflowWithGatedPreflight(preflightRead, release);
+		long auditBefore = count("audit_logs");
+		long outboxBefore = count("outbox_messages");
+		var result = invokePreflightMutation(gatedWorkflow, action, campaignId)
+				.materialize().subscribeOn(Schedulers.boundedElastic()).toFuture();
+
+		assertThat(preflightRead.await(5, TimeUnit.SECONDS)).isTrue();
+		insertSuppression(campaignId);
+		release.complete(null);
+		var outcome = result.get(5, TimeUnit.SECONDS);
+
+		assertThat(outcome.isOnError()).isTrue();
+		assertThat(outcome.getThrowable()).isInstanceOf(CampaignValidationException.class);
+		assertThat(text("SELECT status FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(switch (action) {
+					case "submit" -> "DRAFT";
+					case "approve" -> "READY_FOR_REVIEW";
+					default -> "APPROVED";
+				});
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isZero();
+		assertThat(count("audit_logs")).isEqualTo(auditBefore);
+		assertThat(count("outbox_messages")).isEqualTo(outboxBefore);
+	}
+
+	private Mono<CampaignService.CampaignView> invokePreflightMutation(
+			CampaignWorkflowService service, String action, UUID campaignId
+	) {
+		return switch (action) {
+			case "submit" -> service.submitReview(campaignId, ACTOR, CONTEXT, 0);
+			case "approve" -> service.approve(campaignId, ACTOR, CONTEXT, 0);
+			case "schedule" -> service.schedule(
+					campaignId, ACTOR, CONTEXT, 0, Instant.now().plus(Duration.ofHours(1)));
+			case "start" -> service.start(campaignId, ACTOR, CONTEXT, 0);
+			default -> throw new IllegalArgumentException("Unknown preflight action " + action);
+		};
+	}
+
+	private CampaignWorkflowService workflowWithGatedPreflight(
+			CountDownLatch preflightRead, CompletableFuture<Void> release
+	) {
+		CampaignPreflightService gated = spy(preflight);
+		doAnswer(invocation -> preflight.preflight(invocation.getArgument(0))
+				.doOnNext(ignored -> preflightRead.countDown())
+				.flatMap(view -> Mono.fromFuture(release).thenReturn(view)))
+				.when(gated).preflight(any(UUID.class));
+		return new CampaignWorkflowService(
+				new CampaignWorkflowRepository(databaseClient), gated, campaigns,
+				new AuditService(databaseClient, objectMapper), mockHasher(), objectMapper,
+				TransactionalOperator.create(new R2dbcTransactionManager(ConnectionFactories.get(r2dbcUrl()))));
+	}
+
+	private SensitiveValueHasher mockHasher() {
+		SensitiveValueHasher hasher = mock(SensitiveValueHasher.class);
+		when(hasher.hash(anyString())).thenReturn(new byte[32]);
+		return hasher;
+	}
+
+	private void makeCurrentMappingOlder(UUID campaignId, String runStatus, String completedAt) {
+		sql("UPDATE extraction_runs SET status = '" + runStatus + "', completed_at = " + completedAt
+				+ " WHERE id = (SELECT pac.extraction_run_id FROM paper_author_contacts pac "
+				+ "JOIN campaign_recipients r ON r.contact_id = pac.contact_id "
+				+ "WHERE r.campaign_id = '" + campaignId + "' LIMIT 1)");
+		sql("UPDATE paper_author_contacts SET created_at = now() WHERE contact_id = "
+				+ "(SELECT contact_id FROM campaign_recipients WHERE campaign_id = '" + campaignId + "')");
+	}
+
+	private void insertEvidenceDecision(
+			UUID campaignId, String runStatus, String completedAt, String createdAt,
+			String confidence, boolean humanVerified, String verificationStatus, boolean evidencePresent
+	) {
+		UUID runId = UUID.randomUUID();
+		UUID mappingId = UUID.randomUUID();
+		sql("INSERT INTO extraction_runs (id, paper_id, parser_version, status, started_at, completed_at) "
+				+ "VALUES ('" + runId + "', '" + PAPER + "', 'review', '" + runStatus + "', "
+				+ completedAt + ", " + completedAt + ")");
+		sql("INSERT INTO paper_author_contacts (id, paper_author_id, paper_id, contact_id, extraction_run_id, "
+				+ "confidence, corresponding_author, human_verified, verification_status, created_at) "
+				+ "SELECT '" + mappingId + "', '" + PAPER_AUTHOR + "', '" + PAPER + "', contact_id, '"
+				+ runId + "', '" + confidence + "', true, " + humanVerified + ", '" + verificationStatus
+				+ "', " + createdAt + " FROM campaign_recipients WHERE campaign_id = '" + campaignId + "'");
+		if (evidencePresent) {
+			sql("INSERT INTO extraction_evidence (paper_author_contact_id, source_relative_path, rule_name, masked_context) "
+					+ "VALUES ('" + mappingId + "', 'review.tex', 'review-decision', 'masked')");
+		}
+	}
+
 	private UUID readyCampaign(String status) {
 		UUID campaignId = insertCampaign(status);
 		insertRecipient(campaignId, "eligible-" + campaignId, "HIGH", true, false, "ACTIVE", true,
@@ -385,12 +647,13 @@ class CampaignWorkflowIntegrationTest {
 				    id, name, purpose, status, template_id, template_version_id, segment_id,
 				    smtp_account_id, mailbox_account_id, from_name, from_email, reply_to,
 				    tracking_opens_enabled, tracking_clicks_enabled, unsubscribe_enabled,
-				    created_by, updated_by
+				    scheduled_at, created_by, updated_by
 				)
 				VALUES ('%s', 'Workflow campaign', 'A concrete research discussion purpose', '%s',
 				        '%s', '%s', '%s', '%s', '%s', 'Research Team', 'research@example.org',
-				        'reply@example.org', false, false, true, '%s', '%s')
-				""".formatted(id, status, TEMPLATE, TEMPLATE_VERSION, SEGMENT, SMTP, MAILBOX, ACTOR, ACTOR));
+				        'reply@example.org', false, false, true, %s, '%s', '%s')
+				""".formatted(id, status, TEMPLATE, TEMPLATE_VERSION, SEGMENT, SMTP, MAILBOX,
+				"SCHEDULED".equals(status) ? "now() + interval '1 hour'" : "NULL", ACTOR, ACTOR));
 		return id;
 	}
 
