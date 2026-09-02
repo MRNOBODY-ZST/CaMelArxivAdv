@@ -234,22 +234,43 @@ public final class CampaignRepository {
 		return """
 				SELECT c.id, c.name, c.purpose, c.status, c.template_id, template.name AS template_name,
 				       version.version_number, c.segment_id, segment.name AS segment_name,
-				       c.smtp_account_id, smtp.name AS smtp_name, c.from_name, c.from_email, c.reply_to,
+				       c.smtp_account_id, smtp.name AS smtp_name, c.mailbox_account_id,
+				       c.from_name, c.from_email, c.reply_to,
+				       c.tracking_opens_enabled, c.tracking_clicks_enabled, c.lock_version,
+				       c.submitted_for_review_at, c.approved_at, c.approved_by,
+				       c.rejected_at, c.rejected_by, c.rejection_reason, c.scheduled_at,
+				       c.started_at, c.completed_at, c.canceled_at, c.status_changed_at, c.status_changed_by,
 				       c.generation_status, c.generation_provider, c.generation_model, c.generation_job_id,
 				       c.created_at, c.updated_at,
-				       (SELECT count(*) FROM campaign_recipients r
-				        WHERE r.campaign_id = c.id AND r.personalization_status = 'QUEUED') AS queued_count,
-				       (SELECT count(*) FROM campaign_recipients r
-				        WHERE r.campaign_id = c.id AND r.personalization_status = 'RUNNING') AS running_count,
-				       (SELECT count(*) FROM campaign_recipients r
-				        WHERE r.campaign_id = c.id AND r.personalization_status = 'GENERATED') AS generated_count,
-				       (SELECT count(*) FROM campaign_recipients r
-				        WHERE r.campaign_id = c.id AND r.personalization_status = 'FAILED') AS failed_count
+				       recipient_counts.queued_count, recipient_counts.running_count,
+				       recipient_counts.generated_count, recipient_counts.failed_count,
+				       recipient_counts.delivery_queued, recipient_counts.delivery_connecting,
+				       recipient_counts.delivery_smtp_accepted, recipient_counts.delivery_temporary_failure,
+				       recipient_counts.delivery_permanent_failure, recipient_counts.delivery_bounced,
+				       recipient_counts.delivery_suppressed, recipient_counts.delivery_unsubscribed,
+				       recipient_counts.delivery_canceled, recipient_counts.delivery_outcome_unknown
 				FROM campaigns c
 				JOIN email_templates template ON template.id = c.template_id
 				JOIN email_template_versions version ON version.id = c.template_version_id
 				LEFT JOIN segments segment ON segment.id = c.segment_id
 				JOIN smtp_accounts smtp ON smtp.id = c.smtp_account_id
+				LEFT JOIN LATERAL (
+				  SELECT count(*) FILTER (WHERE r.personalization_status = 'QUEUED') AS queued_count,
+				         count(*) FILTER (WHERE r.personalization_status = 'RUNNING') AS running_count,
+				         count(*) FILTER (WHERE r.personalization_status = 'GENERATED') AS generated_count,
+				         count(*) FILTER (WHERE r.personalization_status = 'FAILED') AS failed_count,
+				         count(*) FILTER (WHERE r.status = 'QUEUED') AS delivery_queued,
+				         count(*) FILTER (WHERE r.status = 'CONNECTING') AS delivery_connecting,
+				         count(*) FILTER (WHERE r.status = 'SMTP_ACCEPTED') AS delivery_smtp_accepted,
+				         count(*) FILTER (WHERE r.status = 'TEMPORARY_FAILURE') AS delivery_temporary_failure,
+				         count(*) FILTER (WHERE r.status = 'PERMANENT_FAILURE') AS delivery_permanent_failure,
+				         count(*) FILTER (WHERE r.status = 'BOUNCED') AS delivery_bounced,
+				         count(*) FILTER (WHERE r.status = 'SUPPRESSED') AS delivery_suppressed,
+				         count(*) FILTER (WHERE r.status = 'UNSUBSCRIBED') AS delivery_unsubscribed,
+				         count(*) FILTER (WHERE r.status = 'CANCELED') AS delivery_canceled,
+				         count(*) FILTER (WHERE r.status = 'OUTCOME_UNKNOWN') AS delivery_outcome_unknown
+				  FROM campaign_recipients r WHERE r.campaign_id = c.id
+				) recipient_counts ON true
 				""";
 	}
 
@@ -260,17 +281,39 @@ public final class CampaignRepository {
 				row.get("template_name", String.class), number(row, "version_number"),
 				row.get("segment_id", UUID.class), row.get("segment_name", String.class),
 				row.get("smtp_account_id", UUID.class), row.get("smtp_name", String.class),
-				row.get("from_name", String.class), row.get("from_email", String.class),
+				row.get("mailbox_account_id", UUID.class), row.get("from_name", String.class), row.get("from_email", String.class),
 				row.get("reply_to", String.class), row.get("generation_status", String.class),
 				row.get("generation_provider", String.class), row.get("generation_model", String.class),
 				row.get("generation_job_id", UUID.class), number(row, "queued_count"), number(row, "running_count"),
-				number(row, "generated_count"), number(row, "failed_count"),
+				number(row, "generated_count"), number(row, "failed_count"), number(row, "delivery_queued"),
+				number(row, "delivery_connecting"), number(row, "delivery_smtp_accepted"),
+				number(row, "delivery_temporary_failure"), number(row, "delivery_permanent_failure"),
+				number(row, "delivery_bounced"), number(row, "delivery_suppressed"),
+				number(row, "delivery_unsubscribed"), number(row, "delivery_canceled"),
+				number(row, "delivery_outcome_unknown"), longNumber(row, "lock_version"),
+				row.get("submitted_for_review_at", Instant.class), row.get("approved_at", Instant.class),
+				row.get("approved_by", UUID.class), row.get("rejected_at", Instant.class),
+				row.get("rejected_by", UUID.class), row.get("rejection_reason", String.class),
+				row.get("scheduled_at", Instant.class), row.get("started_at", Instant.class),
+				row.get("completed_at", Instant.class), row.get("canceled_at", Instant.class),
+				row.get("status_changed_at", Instant.class), row.get("status_changed_by", UUID.class),
+				bool(row, "tracking_opens_enabled"), bool(row, "tracking_clicks_enabled"),
 				row.get("created_at", Instant.class), row.get("updated_at", Instant.class));
 	}
 
 	private int number(io.r2dbc.spi.Row row, String field) {
 		Number value = row.get(field, Number.class);
 		return value == null ? 0 : value.intValue();
+	}
+
+	private long longNumber(io.r2dbc.spi.Row row, String field) {
+		Number value = row.get(field, Number.class);
+		return value == null ? 0 : value.longValue();
+	}
+
+	private boolean bool(io.r2dbc.spi.Row row, String field) {
+		Boolean value = row.get(field, Boolean.class);
+		return value != null && value;
 	}
 
 	private <T> DatabaseClient.GenericExecuteSpec bindNullable(
@@ -282,9 +325,16 @@ public final class CampaignRepository {
 	public record CampaignRecord(
 			UUID id, String name, String purpose, String status, UUID templateId, String templateName,
 			int templateVersion, UUID segmentId, String segmentName, UUID smtpAccountId, String smtpName,
-			String fromName, String fromEmail, String replyTo, String generationStatus,
+			UUID mailboxAccountId, String fromName, String fromEmail, String replyTo, String generationStatus,
 			String generationProvider, String generationModel, UUID generationJobId,
-			int queued, int running, int generated, int failed, Instant createdAt, Instant updatedAt
+			int queued, int running, int generated, int failed, int deliveryQueued, int deliveryConnecting,
+			int deliverySmtpAccepted, int deliveryTemporaryFailure, int deliveryPermanentFailure,
+			int deliveryBounced, int deliverySuppressed, int deliveryUnsubscribed, int deliveryCanceled,
+			int deliveryOutcomeUnknown, long lockVersion, Instant submittedForReviewAt, Instant approvedAt,
+			UUID approvedBy, Instant rejectedAt, UUID rejectedBy, String rejectionReason, Instant scheduledAt,
+			Instant startedAt, Instant completedAt, Instant canceledAt, Instant statusChangedAt,
+			UUID statusChangedBy, boolean trackingOpensEnabled, boolean trackingClicksEnabled,
+			Instant createdAt, Instant updatedAt
 	) { }
 
 	public record GenerationContext(

@@ -1,5 +1,9 @@
 package com.camel_hub.advertisement.campaign;
 
+import com.camel_hub.advertisement.audit.AuditService;
+import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryProperties;
+import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.camel_hub.advertisement.system.RuntimeStatusProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -12,7 +16,9 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 
 @Configuration
 @Profile("api")
-@EnableConfigurationProperties({PersonalizationProperties.class, RuntimeStatusProperties.class})
+@EnableConfigurationProperties({
+		PersonalizationProperties.class, RuntimeStatusProperties.class, CampaignDeliveryProperties.class
+})
 public class CampaignConfiguration {
 
 	@Bean
@@ -40,6 +46,32 @@ public class CampaignConfiguration {
 			ObjectMapper objectMapper, TransactionalOperator transactions
 	) {
 		return new CampaignService(repository, segments, properties, objectMapper, transactions);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	CampaignWorkflowRepository campaignWorkflowRepository(DatabaseClient databaseClient) {
+		return new CampaignWorkflowRepository(databaseClient);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	CampaignPreflightService campaignPreflightService(
+			CampaignWorkflowRepository repository, CampaignDeliveryProperties deliveryProperties,
+			MailTrackingProperties trackingProperties, ObjectMapper objectMapper
+	) {
+		return new CampaignPreflightService(repository, deliveryProperties, trackingProperties, objectMapper);
+	}
+
+	@Bean
+	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
+	CampaignWorkflowService campaignWorkflowService(
+			CampaignWorkflowRepository repository, CampaignPreflightService preflight, CampaignService campaigns,
+			AuditService auditService, SensitiveValueHasher hasher, ObjectMapper objectMapper,
+			TransactionalOperator transactions
+	) {
+		return new CampaignWorkflowService(
+				repository, preflight, campaigns, auditService, hasher, objectMapper, transactions);
 	}
 
 	@Bean

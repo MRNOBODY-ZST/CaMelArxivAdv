@@ -149,9 +149,20 @@ public class CampaignService {
 		return new CampaignView(
 				record.id(), record.name(), record.purpose(), record.status(), record.templateId(),
 				record.templateName(), record.templateVersion(), record.segmentId(), record.segmentName(),
-				record.smtpAccountId(), record.smtpName(), record.fromName(), record.fromEmail(), record.replyTo(),
+				record.smtpAccountId(), record.smtpName(), record.mailboxAccountId(),
+				record.fromName(), record.fromEmail(), record.replyTo(), record.trackingOpensEnabled(),
+				record.trackingClicksEnabled(),
 				record.generationStatus(), record.generationProvider(), record.generationModel(), record.generationJobId(),
 				new RecipientCounts(record.queued(), record.running(), record.generated(), record.failed()),
+				new DeliveryCounts(
+						record.deliveryQueued(), record.deliveryConnecting(), record.deliverySmtpAccepted(),
+						record.deliveryTemporaryFailure(), record.deliveryPermanentFailure(), record.deliveryBounced(),
+						record.deliverySuppressed(), record.deliveryUnsubscribed(), record.deliveryCanceled(),
+						record.deliveryOutcomeUnknown()),
+				record.lockVersion(), record.submittedForReviewAt(), record.approvedAt(), record.approvedBy(),
+				record.rejectedAt(), record.rejectedBy(), record.rejectionReason(), record.scheduledAt(),
+				record.startedAt(), record.completedAt(), record.canceledAt(), record.statusChangedAt(),
+				record.statusChangedBy(),
 				record.createdAt(), record.updatedAt());
 	}
 
@@ -178,12 +189,27 @@ public class CampaignService {
 		}
 	}
 
+	public record DeliveryCounts(
+			int queued, int connecting, int smtpAccepted, int temporaryFailure, int permanentFailure,
+			int bounced, int suppressed, int unsubscribed, int canceled, int outcomeUnknown
+	) {
+		public int total() {
+			return queued + connecting + smtpAccepted + temporaryFailure + permanentFailure + bounced
+					+ suppressed + unsubscribed + canceled + outcomeUnknown;
+		}
+	}
+
 	public record CampaignView(
 			UUID id, String name, String purpose, String status, UUID templateId, String templateName,
 			int templateVersion, UUID segmentId, String segmentName, UUID smtpAccountId, String smtpName,
-			String fromName, String fromEmail, String replyTo, String generationStatus,
+			UUID mailboxAccountId, String fromName, String fromEmail, String replyTo,
+			boolean trackingOpensEnabled, boolean trackingClicksEnabled, String generationStatus,
 			String generationProvider, String generationModel, UUID generationJobId,
-			RecipientCounts recipientCounts, Instant createdAt, Instant updatedAt
+			RecipientCounts recipientCounts, DeliveryCounts deliveryCounts, long lockVersion,
+			Instant submittedForReviewAt, Instant approvedAt, UUID approvedBy,
+			Instant rejectedAt, UUID rejectedBy, String rejectionReason, Instant scheduledAt,
+			Instant startedAt, Instant completedAt, Instant canceledAt, Instant statusChangedAt,
+			UUID statusChangedBy, Instant createdAt, Instant updatedAt
 	) { }
 
 	public record RecipientView(

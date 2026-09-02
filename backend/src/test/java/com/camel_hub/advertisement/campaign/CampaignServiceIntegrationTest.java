@@ -40,9 +40,12 @@ class CampaignServiceIntegrationTest {
 
 	@BeforeEach
 	void setUp() {
-		sql("TRUNCATE outbox_messages, campaign_recipients, campaigns, segments, suppression_entries, "
-				+ "unsubscribe_records, paper_author_contacts, extraction_runs, contacts, paper_authors, authors, "
-				+ "papers, arxiv_categories, arxiv_archives, arxiv_groups, smtp_accounts, "
+		sql("TRUNCATE mailbox_inbound_events, mailbox_sync_cursors, campaign_safety_events, "
+				+ "campaign_safety_links, campaign_safety_attempts, campaign_safety_messages, campaign_safety_runs, "
+				+ "recipient_delivery_cooldowns, outbox_messages, campaign_exclusions, campaign_recipients, "
+				+ "campaigns, segments, suppression_entries, unsubscribe_records, extraction_evidence, "
+				+ "paper_author_contacts, extraction_runs, contacts, paper_authors, authors, "
+				+ "papers, arxiv_categories, arxiv_archives, arxiv_groups, mailbox_accounts, smtp_accounts, "
 				+ "email_template_versions, email_templates, users CASCADE");
 		seedCampaignDependencies();
 		ConnectionFactory connectionFactory = ConnectionFactories.get(r2dbcUrl());
@@ -64,6 +67,9 @@ class CampaignServiceIntegrationTest {
 		var updated = service.get(created.id()).block();
 		assertThat(updated.generationStatus()).isEqualTo("QUEUED");
 		assertThat(updated.templateVersion()).isEqualTo(1);
+		assertThat(updated.lockVersion()).isZero();
+		assertThat(updated.mailboxAccountId()).isNull();
+		assertThat(updated.deliveryCounts().queued()).isEqualTo(1);
 		assertThat(updated.recipientCounts().queued()).isEqualTo(1);
 		assertThat(service.recipients(created.id(), 1, 20).block().items()).singleElement()
 				.satisfies(recipient -> {
@@ -124,10 +130,12 @@ class CampaignServiceIntegrationTest {
 		sql("""
 				INSERT INTO smtp_accounts
 				(id, name, host, port, tls_mode, from_email, default_from_name, reply_to,
-				 per_minute_limit, per_hour_limit, per_day_limit, per_domain_hour_limit, enabled, created_by)
+				 per_minute_limit, per_hour_limit, per_day_limit, per_domain_hour_limit, enabled,
+				 last_tested_at, last_test_status, created_by)
 				VALUES ('72000000-0000-0000-0000-000000000001', 'Internal Mailpit', 'mailpit', 1025,
 				        'PLAIN_LOCAL_ONLY', 'research@example.org', 'Research Team', 'reply@example.org',
-				        10, 100, 500, 50, true, '10000000-0000-0000-0000-000000000001')
+				        10, 100, 500, 50, true, now(), 'SUCCEEDED',
+				        '10000000-0000-0000-0000-000000000001')
 				""");
 		sql("""
 				INSERT INTO segments (id, name, description, created_by)

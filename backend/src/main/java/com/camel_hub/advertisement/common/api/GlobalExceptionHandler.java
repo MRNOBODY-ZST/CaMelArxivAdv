@@ -20,6 +20,7 @@ import com.camel_hub.advertisement.contact.ContactNotFoundException;
 import com.camel_hub.advertisement.contact.ContactValidationException;
 import com.camel_hub.advertisement.campaign.SegmentNotFoundException;
 import com.camel_hub.advertisement.campaign.SegmentValidationException;
+import com.camel_hub.advertisement.campaign.CampaignConflictException;
 import com.camel_hub.advertisement.campaign.CampaignNotFoundException;
 import com.camel_hub.advertisement.campaign.CampaignValidationException;
 import com.camel_hub.advertisement.campaign.PersonalizationUnavailableException;
@@ -298,6 +299,14 @@ public class GlobalExceptionHandler {
 	) {
 		return response(exchange, HttpStatus.BAD_REQUEST, "invalid_campaign",
 				"Campaign rejected", exception.getMessage(), Map.of());
+	}
+
+	@ExceptionHandler(CampaignConflictException.class)
+	ResponseEntity<ApiError> handleCampaignConflict(
+			CampaignConflictException exception, ServerWebExchange exchange
+	) {
+		return response(exchange, HttpStatus.CONFLICT, "campaign_conflict",
+				"Campaign conflict", exception.getMessage(), Map.of());
 	}
 
 	@ExceptionHandler(PersonalizationUnavailableException.class)
