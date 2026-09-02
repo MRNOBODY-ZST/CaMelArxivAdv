@@ -71,6 +71,7 @@ ALTER TABLE tracking_tokens
     DROP CONSTRAINT ck_tracking_token_type,
     DROP CONSTRAINT ck_tracking_token_link,
     ADD CONSTRAINT ck_tracking_token_type CHECK (token_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE')),
+    ADD CONSTRAINT ck_tracking_token_hash CHECK (octet_length(token_hash) = 32),
     ADD CONSTRAINT ck_tracking_token_link CHECK (
         (token_type = 'OPEN' AND campaign_link_id IS NULL)
         OR (token_type = 'CLICK' AND campaign_link_id IS NOT NULL)
