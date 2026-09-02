@@ -40,7 +40,7 @@
 
 **Interfaces:**
 - Produces `CampaignStatus`, `RecipientStatus`, `AttemptStatus`, `SafetyRunStatus`, `SafetyMessageStatus`, `InboundEventType`, and `TransportStage` enums in `CampaignDeliveryModels`.
-- Produces `CampaignDeliveryProperties(batchSize, leaseDuration, productionCooldown, maximumAttempts, firstRetryDelay, secondRetryDelay, pollDelay)` with defaults `10`, `PT2M`, `P180D`, `3`, `PT1M`, `PT5M`, and `PT1S`.
+- Produces `CampaignDeliveryProperties(enabled, batchSize, leaseDuration, productionCooldown, maximumAttempts, firstRetryDelay, secondRetryDelay, pollDelay)` with defaults `false`, `10`, `PT2M`, `P180D`, `3`, `PT1M`, `PT5M`, and `PT1S`.
 - Produces `CampaignSafetyProperties(enabled, recipient, maximumRecipients)` with defaults `false`, blank, and `20`; `validatedRecipient()` rejects blank/invalid email when enabled.
 - Produces the V16 schema consumed by Tasks 2–7.
 
@@ -167,6 +167,7 @@ git commit -m "feat: add campaign review workflow"
 - Modify: `backend/src/main/java/com/camel_hub/advertisement/messaging/OutboxRepository.java`
 - Create: `backend/src/main/java/com/camel_hub/advertisement/messaging/DeliveryMessagingConfiguration.java`
 - Create: `backend/src/main/java/com/camel_hub/advertisement/campaign/delivery/CampaignDeliveryRepository.java`
+- Create: `backend/src/main/java/com/camel_hub/advertisement/campaign/delivery/CampaignOutboundPreparer.java`
 - Create: `backend/src/main/java/com/camel_hub/advertisement/campaign/delivery/CampaignDeliveryExecutor.java`
 - Create: `backend/src/main/java/com/camel_hub/advertisement/campaign/delivery/CampaignDeliveryScheduler.java`
 - Create: `backend/src/main/java/com/camel_hub/advertisement/campaign/delivery/CampaignDeliveryListener.java`
@@ -180,6 +181,7 @@ git commit -m "feat: add campaign review workflow"
 **Interfaces:**
 - `SmtpTransport.sendDetailed(account, message)` returns `SmtpOutcome(status, stage, responseCode, responseSummary)` or throws a typed exception carrying the same safe metadata; existing `send` behavior remains source-compatible for diagnostic/template sends.
 - `CampaignDeliveryRepository.claimNext(Instant)` returns at most one leased `ProductionClaim` after send-time eligibility, SMTP-row locking, four-window capacity reservation, and cooldown locking.
+- `CampaignOutboundPreparer.prepare(ProductionClaim)` is the required boundary for final unsubscribe/tracking rendering. Task 3 tests inject a deterministic preparer; the real bean arrives in Task 4.
 - `CampaignDeliveryExecutor.pumpOnce()` sends at most one claim and persists one terminal/retry state.
 - `CampaignDeliveryListener` consumes `camel.mail.delivery.jobs.v1` with manual acknowledgment; payload validation failure goes to the existing DLT publisher and duplicate wake-ups are harmless.
 
@@ -212,7 +214,7 @@ Claim with `FOR UPDATE SKIP LOCKED`, lock the SMTP account, count `CONNECTING` p
 
 - [ ] **Step 5: Add Kafka topic/listener and reconciliation scheduler**
 
-Declare only `camel.mail.delivery.jobs.v1` for this flow, extend the outbox allowlist, manually acknowledge after `pumpOnce` has durably settled or found no work, and schedule the same pump every second plus lease/campaign reconciliation. The mail-worker profile must expose no management controllers.
+Declare only `camel.mail.delivery.jobs.v1` for this flow, extend the outbox allowlist, manually acknowledge after `pumpOnce` has durably settled or found no work, and schedule the same pump every second plus lease/campaign reconciliation. Create worker/listener/scheduler beans only when `app.campaign-delivery.enabled=true` and a `CampaignOutboundPreparer` bean exists; therefore Task 3 cannot send incomplete mail before Task 4 supplies final unsubscribe/tracking rendering. The mail-worker profile must expose no management controllers.
 
 - [ ] **Step 6: Run focused tests and verify GREEN**
 
@@ -245,7 +247,7 @@ git commit -m "feat: add rate limited campaign mail worker"
 
 **Interfaces:**
 - Signer formats are domain-separated as `campaign-open:v1`, `campaign-click:v1`, and `campaign-unsubscribe:v1`; verification returns canonical recipient/link/expiry values only.
-- `CampaignTrackingService.prepare(ProductionClaim)` persists token/link digests and returns final subject/HTML/text plus `List-Unsubscribe` headers before SMTP.
+- `CampaignTrackingService.prepare(ProductionClaim)` implements `CampaignOutboundPreparer`, persists token/link digests, and returns final subject/HTML/text plus `List-Unsubscribe` headers before SMTP.
 - Existing `/t/o/{token}` and `/t/c/{token}` attempt existing test-mail resolution then campaign resolution without distinguishing failure responses.
 - `GET /u/{token}` returns a no-store confirmation page; `POST /u/{token}` and one-click form encoding perform the atomic production unsubscribe.
 
@@ -471,7 +473,7 @@ bash scripts/verify-container-images.sh
 
 - [ ] **Step 2: Add minimal runtime configuration and operations documentation**
 
-Add `CAMPAIGN_SAFETY_ENABLED=false`, blank `CAMPAIGN_SAFETY_RECIPIENT`, `CAMPAIGN_SAFETY_MAX_RECIPIENTS=20`, delivery timing defaults from Task 1, and inbound polling defaults. The production runtime may set the fixed safety recipient outside Git. Document that production authors remain blocked until concrete identity/purpose and final approval exist.
+Add `CAMPAIGN_DELIVERY_ENABLED=false`, `CAMPAIGN_SAFETY_ENABLED=false`, blank `CAMPAIGN_SAFETY_RECIPIENT`, `CAMPAIGN_SAFETY_MAX_RECIPIENTS=20`, delivery timing defaults from Task 1, and inbound polling defaults. The production runtime may enable delivery and set the fixed safety recipient outside Git only after all callback components are deployed. Document that production authors remain blocked until concrete identity/purpose and final approval exist.
 
 - [ ] **Step 3: Run complete local verification**
 
