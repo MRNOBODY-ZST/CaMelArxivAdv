@@ -55,7 +55,7 @@ test('Edge exposes separate evidence tabs and truthful campaign operations', asy
   await page.goto(`/email/campaigns/${campaignId}`)
   await expect(page.getByRole('heading', { name: '从内容到回传' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '正式发送预检' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '安全实流' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '安全实流', exact: true })).toBeVisible()
   await expect(page.getByText('SAFETY_REDIRECT')).toBeVisible()
   const body = await page.locator('body').innerText()
   expect(body).not.toMatch(/\/api\/v1\/(?:t|u)\//)
