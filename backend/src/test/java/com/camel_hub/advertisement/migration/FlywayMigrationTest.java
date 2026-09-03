@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +18,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Testcontainers
 class FlywayMigrationTest {
@@ -142,6 +144,69 @@ class FlywayMigrationTest {
 	}
 
 	@Test
+	void hardensCampaignSafetyCallbackAndInboundIdentitySchema() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+
+		assertColumn("tracking_tokens", "token_type", "character varying", 20, false);
+		assertColumn("campaign_safety_links", "target_url", "character varying", 2048, true);
+		assertColumn("campaign_safety_links", "target_url_hash", "bytea", null, true);
+		assertColumn("campaign_safety_events", "fingerprint_hash", "bytea", null, true);
+		assertColumn("campaign_safety_events", "minute_bucket", "bigint", null, true);
+		assertColumn("campaign_safety_runs", "destination_hmac", "bytea", null, false);
+		assertColumn("campaign_safety_runs", "destination_masked", "character varying", 320, false);
+
+		Map<String, String> constraints = constraintDefinitions();
+		assertDefinitions(constraints, Map.ofEntries(
+				Map.entry("ck_campaign_safety_link_target_pairing", List.of("token_type", "CLICK", "OPEN", "UNSUBSCRIBE", "target_url IS NULL", "target_url_hash IS NULL", "target_url IS NOT NULL", "target_url_hash IS NOT NULL")),
+				Map.entry("ck_campaign_safety_link_target_hash", List.of("target_url_hash IS NULL", "octet_length(target_url_hash) = 32")),
+				Map.entry("ck_campaign_safety_link_target_scheme", List.of("target_url IS NULL", "https?://")),
+				Map.entry("ck_campaign_safety_event_callback_fields", List.of("OPEN", "CLICK", "UNSUBSCRIBE", "REPLY", "AUTO_REPLY", "BOUNCE", "safety_link_id IS NOT NULL", "fingerprint_hash IS NOT NULL", "octet_length(fingerprint_hash) = 32", "minute_bucket IS NOT NULL", "classification IS NOT NULL", "classification_reason IS NULL", "safety_link_id IS NULL", "fingerprint_hash IS NULL", "minute_bucket IS NULL", "classification IS NULL")),
+				Map.entry("ck_campaign_safety_run_destination_hmac", List.of("octet_length(destination_hmac) = 32"))));
+		assertExactSqlStringSets(constraints, Map.ofEntries(
+				Map.entry("ck_campaign_safety_link_target_pairing", List.of("CLICK", "OPEN", "UNSUBSCRIBE")),
+				Map.entry("ck_campaign_safety_event_callback_fields", List.of("OPEN", "CLICK", "UNSUBSCRIBE", "REPLY", "AUTO_REPLY", "BOUNCE", "UNCLASSIFIED", "LIKELY_HUMAN", "BOT", "PREFETCH", "SECURITY_SCANNER"))));
+
+		Map<String, String> indexes = indexDefinitions();
+		assertDefinitions(indexes, Map.ofEntries(
+				Map.entry("ix_campaign_recipients_rfc_message_id", List.of("CREATE UNIQUE INDEX", "(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
+				Map.entry("ix_campaign_safety_messages_rfc_message_id", List.of("CREATE UNIQUE INDEX", "(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
+				Map.entry("uk_campaign_safety_open_token", List.of("CREATE UNIQUE INDEX", "(safety_message_id)", "WHERE ((token_type)::text = 'OPEN'::text)")),
+				Map.entry("uk_campaign_safety_unsubscribe_token", List.of("CREATE UNIQUE INDEX", "(safety_message_id)", "WHERE ((token_type)::text = 'UNSUBSCRIBE'::text)")),
+				Map.entry("uk_campaign_safety_event_callback_minute", List.of("CREATE UNIQUE INDEX", "(safety_link_id, fingerprint_hash, minute_bucket)", "WHERE ((event_type)::text = ANY"))));
+		assertExactSqlStringSets(indexes, Map.of(
+				"uk_campaign_safety_open_token", List.of("OPEN"),
+				"uk_campaign_safety_unsubscribe_token", List.of("UNSUBSCRIBE"),
+				"uk_campaign_safety_event_callback_minute", List.of("OPEN", "CLICK", "UNSUBSCRIBE")));
+
+		SafetyFixture fixture = createSafetyFixture();
+		UUID openLink = insertSafetyLink(fixture, "OPEN", null, null, "1");
+		UUID clickLink = insertSafetyLink(fixture, "CLICK", "https://example.test/safety", "2", "3");
+		UUID unsubscribeLink = insertSafetyLink(fixture, "UNSUBSCRIBE", null, null, "4");
+		assertThat(openLink).isNotEqualTo(clickLink).isNotEqualTo(unsubscribeLink);
+		assertThatThrownBy(() -> insertSafetyLink(fixture, "OPEN", null, null, "5")).isInstanceOf(SQLException.class);
+		SafetyFixture invalidPairingFixture = fixture.withSafetyMessageId(newSafetyMessage(fixture));
+		assertThatThrownBy(() -> insertSafetyLink(invalidPairingFixture, "OPEN", "https://example.test/invalid", "6", "7"))
+				.isInstanceOf(SQLException.class);
+		assertThatThrownBy(() -> insertSafetyLink(fixture, "CLICK", "https://example.test/invalid", null, "8")).isInstanceOf(SQLException.class);
+
+		insertSafetyCallbackEvent(fixture, openLink, "OPEN", "9", 7, "LIKELY_HUMAN");
+		assertThatThrownBy(() -> insertSafetyCallbackEvent(fixture, openLink, "CLICK", "9", 7, "LIKELY_HUMAN"))
+				.isInstanceOf(SQLException.class);
+		assertThatThrownBy(() -> insertSafetyCallbackEvent(fixture, clickLink, "CLICK", null, 8, "LIKELY_HUMAN"))
+				.isInstanceOf(SQLException.class);
+		insertSafetyInboundEvent(fixture, "REPLY", null, null, null, null, "4.2.0");
+		assertThatThrownBy(() -> insertSafetyInboundEvent(fixture, "BOUNCE", openLink, "a", 9L, "BOT", "5.1.1"))
+				.isInstanceOf(SQLException.class);
+
+		setProductionMessageId(fixture.campaignRecipientId(), "<production@example.test>");
+		assertThatThrownBy(() -> setProductionMessageId(newCampaignRecipient(fixture.campaignId()), "<production@example.test>"))
+				.isInstanceOf(SQLException.class);
+		setSafetyMessageId(fixture.safetyMessageId(), "<safety@example.test>");
+		assertThatThrownBy(() -> setSafetyMessageId(newSafetyMessage(fixture), "<safety@example.test>"))
+				.isInstanceOf(SQLException.class);
+	}
+
+	@Test
 	void upgradesAnExistingV8SchemaWithoutChangingPublishedChecksums() throws SQLException {
 		String schema = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
 		Flyway throughV8 = Flyway.configure()
@@ -222,7 +287,7 @@ class FlywayMigrationTest {
 		assertThat(columnNames("recipient_delivery_cooldowns")).containsExactlyInAnyOrder("email_hmac", "last_smtp_accepted_at", "updated_at");
 		assertThat(columnNames("campaign_safety_runs")).containsExactlyInAnyOrder(
 				"id", "campaign_id", "smtp_account_id", "created_by", "recipient_limit", "status", "started_at", "completed_at",
-				"lock_version", "created_at");
+				"lock_version", "created_at", "destination_hmac", "destination_masked");
 		assertThat(columnNames("campaign_safety_messages")).containsExactlyInAnyOrder(
 				"id", "run_id", "campaign_recipient_id", "smtp_account_id", "status", "delivery_lease_hash", "delivery_lease_expires_at",
 				"next_attempt_at", "attempt_count", "rfc_message_id", "rendered_subject", "rendered_html", "rendered_text", "created_at",
@@ -235,7 +300,7 @@ class FlywayMigrationTest {
 				"id", "safety_message_id", "target_url", "target_url_hash", "token_type", "token_hash", "expires_at", "created_at");
 		assertThat(columnNames("campaign_safety_events")).containsExactlyInAnyOrder(
 				"id", "run_id", "safety_message_id", "safety_link_id", "event_type", "occurred_at", "classification",
-				"classification_reason", "diagnostic_code");
+				"classification_reason", "diagnostic_code", "fingerprint_hash", "minute_bucket");
 		assertThat(columnNames("mailbox_sync_cursors")).containsExactlyInAnyOrder(
 				"mailbox_account_id", "folder_name", "uid_validity", "last_remote_uid", "lease_hash", "lease_expires_at",
 				"last_synced_at", "last_error_category", "updated_at");
@@ -395,6 +460,142 @@ class FlywayMigrationTest {
 			normalized = normalized.substring(1, normalized.length() - 1).strip();
 		}
 		return normalized;
+	}
+
+	private void assertColumn(String table, String column, String type, Integer length, boolean nullable) throws SQLException {
+		try (Connection connection = connection();
+			 var statement = connection.prepareStatement("""
+					SELECT data_type, character_maximum_length, is_nullable
+					FROM information_schema.columns
+					WHERE table_schema = 'public' AND table_name = ? AND column_name = ?
+					""")) {
+			statement.setString(1, table);
+			statement.setString(2, column);
+			try (ResultSet resultSet = statement.executeQuery()) {
+				assertThat(resultSet.next()).as(table + "." + column).isTrue();
+				assertThat(resultSet.getString("data_type")).isEqualTo(type);
+				assertThat((Integer) resultSet.getObject("character_maximum_length")).isEqualTo(length);
+				assertThat(resultSet.getString("is_nullable")).isEqualTo(nullable ? "YES" : "NO");
+			}
+		}
+	}
+
+	private SafetyFixture createSafetyFixture() throws SQLException {
+		String suffix = UUID.randomUUID().toString().replace("-", "");
+		UUID smtpAccountId = queryUuid("""
+				INSERT INTO smtp_accounts (name, host, port, tls_mode, from_email, default_from_name, reply_to,
+						per_minute_limit, per_hour_limit, per_day_limit, per_domain_hour_limit)
+				VALUES ('smtp-%s', 'localhost', 2525, 'PLAIN_LOCAL_ONLY', 'from@example.test', 'Safety Test', 'reply@example.test',
+						10, 100, 1000, 100)
+				RETURNING id
+				""".formatted(suffix));
+		UUID templateId = queryUuid("""
+				INSERT INTO email_templates (name) VALUES ('template-%s') RETURNING id
+				""".formatted(suffix));
+		UUID templateVersionId = queryUuid("""
+				INSERT INTO email_template_versions (template_id, version_number, subject_template, from_name_template, reply_to,
+						html_content, text_content, content_size_bytes)
+				VALUES ('%s', 1, 'subject', 'Safety Test', 'reply@example.test', '<p>body</p>', 'body', 11)
+				RETURNING id
+				""".formatted(templateId));
+		UUID campaignId = queryUuid("""
+				INSERT INTO campaigns (name, purpose, template_id, template_version_id, smtp_account_id, from_name, from_email, reply_to)
+				VALUES ('campaign-%s', 'safety schema test', '%s', '%s', '%s', 'Safety Test', 'from@example.test', 'reply@example.test')
+				RETURNING id
+				""".formatted(suffix, templateId, templateVersionId, smtpAccountId));
+		UUID campaignRecipientId = newCampaignRecipient(campaignId);
+		UUID runId = queryUuid("""
+				INSERT INTO campaign_safety_runs (campaign_id, smtp_account_id, recipient_limit, destination_hmac, destination_masked)
+				VALUES ('%s', '%s', 1, decode(repeat('a', 64), 'hex'), 's***@example.test')
+				RETURNING id
+				""".formatted(campaignId, smtpAccountId));
+		UUID safetyMessageId = queryUuid("""
+				INSERT INTO campaign_safety_messages (run_id, campaign_recipient_id, smtp_account_id)
+				VALUES ('%s', '%s', '%s') RETURNING id
+				""".formatted(runId, campaignRecipientId, smtpAccountId));
+		return new SafetyFixture(campaignId, campaignRecipientId, runId, safetyMessageId, smtpAccountId);
+	}
+
+	private UUID newCampaignRecipient(UUID campaignId) throws SQLException {
+		String digest = UUID.randomUUID().toString().replace("-", "");
+		return queryUuid("""
+				INSERT INTO campaign_recipients (campaign_id, email_ciphertext, email_nonce, email_hmac, email_domain, confidence)
+				VALUES ('%s', decode('01', 'hex'), decode('02', 'hex'), decode('%s%s', 'hex'), 'example.test', 'HIGH')
+				RETURNING id
+				""".formatted(campaignId, digest, digest));
+	}
+
+	private UUID newSafetyMessage(SafetyFixture fixture) throws SQLException {
+		return queryUuid("""
+				INSERT INTO campaign_safety_messages (run_id, campaign_recipient_id, smtp_account_id)
+				VALUES ('%s', '%s', '%s') RETURNING id
+				""".formatted(fixture.runId(), newCampaignRecipient(fixture.campaignId()), fixture.smtpAccountId()));
+	}
+
+	private UUID insertSafetyLink(SafetyFixture fixture, String tokenType, String targetUrl, String targetHashDigit, String tokenHashDigit)
+			throws SQLException {
+		String targetUrlValue = targetUrl == null ? "NULL" : "'" + targetUrl + "'";
+		String targetHashValue = targetHashDigit == null ? "NULL" : "decode(repeat('" + targetHashDigit + "', 64), 'hex')";
+		return queryUuid("""
+				INSERT INTO campaign_safety_links (safety_message_id, target_url, target_url_hash, token_type, token_hash, expires_at)
+				VALUES ('%s', %s, %s, '%s', decode(repeat('%s', 64), 'hex'), '%s')
+				RETURNING id
+				""".formatted(fixture.safetyMessageId(), targetUrlValue, targetHashValue, tokenType, tokenHashDigit,
+				Instant.parse("2027-01-01T00:00:00Z")));
+	}
+
+	private void insertSafetyCallbackEvent(SafetyFixture fixture, UUID linkId, String eventType, String fingerprintDigit,
+			long minuteBucket, String classification) throws SQLException {
+		String fingerprintValue = fingerprintDigit == null ? "NULL" : "decode(repeat('" + fingerprintDigit + "', 64), 'hex')";
+		String classificationValue = classification == null ? "NULL" : "'" + classification + "'";
+		execute("""
+				INSERT INTO campaign_safety_events (run_id, safety_message_id, safety_link_id, event_type, fingerprint_hash, minute_bucket, classification)
+				VALUES ('%s', '%s', '%s', '%s', %s, %d, %s)
+				""".formatted(fixture.runId(), fixture.safetyMessageId(), linkId, eventType, fingerprintValue, minuteBucket, classificationValue));
+	}
+
+	private void insertSafetyInboundEvent(SafetyFixture fixture, String eventType, UUID linkId, String fingerprintDigit,
+			Long minuteBucket, String classification, String diagnosticCode) throws SQLException {
+		String linkValue = linkId == null ? "NULL" : "'" + linkId + "'";
+		String fingerprintValue = fingerprintDigit == null ? "NULL" : "decode(repeat('" + fingerprintDigit + "', 64), 'hex')";
+		String minuteValue = minuteBucket == null ? "NULL" : minuteBucket.toString();
+		String classificationValue = classification == null ? "NULL" : "'" + classification + "'";
+		execute("""
+				INSERT INTO campaign_safety_events (run_id, safety_message_id, safety_link_id, event_type, fingerprint_hash, minute_bucket, classification, diagnostic_code)
+				VALUES ('%s', '%s', %s, '%s', %s, %s, %s, '%s')
+				""".formatted(fixture.runId(), fixture.safetyMessageId(), linkValue, eventType, fingerprintValue, minuteValue,
+				classificationValue, diagnosticCode));
+	}
+
+	private void setProductionMessageId(UUID recipientId, String messageId) throws SQLException {
+		execute("UPDATE campaign_recipients SET rfc_message_id = '%s' WHERE id = '%s'".formatted(messageId, recipientId));
+	}
+
+	private void setSafetyMessageId(UUID safetyMessageId, String messageId) throws SQLException {
+		execute("UPDATE campaign_safety_messages SET rfc_message_id = '%s' WHERE id = '%s'".formatted(messageId, safetyMessageId));
+	}
+
+	private UUID queryUuid(String sql) throws SQLException {
+		try (Connection connection = connection(); var statement = connection.createStatement(); ResultSet resultSet = statement.executeQuery(sql)) {
+			assertThat(resultSet.next()).isTrue();
+			return resultSet.getObject(1, UUID.class);
+		}
+	}
+
+	private void execute(String sql) throws SQLException {
+		try (Connection connection = connection(); var statement = connection.createStatement()) {
+			statement.executeUpdate(sql);
+		}
+	}
+
+	private Connection connection() throws SQLException {
+		return DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+	}
+
+	private record SafetyFixture(UUID campaignId, UUID campaignRecipientId, UUID runId, UUID safetyMessageId, UUID smtpAccountId) {
+		private SafetyFixture withSafetyMessageId(UUID value) {
+			return new SafetyFixture(campaignId, campaignRecipientId, runId, value, smtpAccountId);
+		}
 	}
 
 	private Map<String, String> constraintDefinitions() throws SQLException {

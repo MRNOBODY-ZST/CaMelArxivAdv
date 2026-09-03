@@ -45,7 +45,7 @@ ALTER TABLE campaign_recipients
 CREATE INDEX ix_campaign_recipients_delivery_due
     ON campaign_recipients (status, next_attempt_at, id)
     WHERE status IN ('QUEUED', 'TEMPORARY_FAILURE');
-CREATE INDEX ix_campaign_recipients_rfc_message_id
+CREATE UNIQUE INDEX ix_campaign_recipients_rfc_message_id
     ON campaign_recipients (rfc_message_id)
     WHERE rfc_message_id IS NOT NULL;
 
@@ -68,6 +68,7 @@ ALTER TABLE delivery_attempts
     );
 
 ALTER TABLE tracking_tokens
+    ALTER COLUMN token_type TYPE VARCHAR(20),
     DROP CONSTRAINT ck_tracking_token_type,
     DROP CONSTRAINT ck_tracking_token_link,
     ADD CONSTRAINT ck_tracking_token_type CHECK (token_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE')),
@@ -94,6 +95,8 @@ CREATE TABLE campaign_safety_runs (
     smtp_account_id UUID NOT NULL REFERENCES smtp_accounts(id),
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
     recipient_limit INTEGER NOT NULL,
+    destination_hmac BYTEA NOT NULL,
+    destination_masked VARCHAR(320) NOT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'QUEUED',
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
@@ -103,6 +106,7 @@ CREATE TABLE campaign_safety_runs (
     CONSTRAINT ck_campaign_safety_run_status CHECK (
         status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED', 'CANCELED')
     ),
+    CONSTRAINT ck_campaign_safety_run_destination_hmac CHECK (octet_length(destination_hmac) = 32),
     CONSTRAINT ck_campaign_safety_run_lock_version CHECK (lock_version >= 0)
 );
 
@@ -149,7 +153,7 @@ CREATE INDEX ix_campaign_safety_messages_due
     WHERE status IN ('QUEUED', 'TEMPORARY_FAILURE');
 CREATE INDEX ix_campaign_safety_messages_run_status
     ON campaign_safety_messages (run_id, status, id);
-CREATE INDEX ix_campaign_safety_messages_rfc_message_id
+CREATE UNIQUE INDEX ix_campaign_safety_messages_rfc_message_id
     ON campaign_safety_messages (rfc_message_id)
     WHERE rfc_message_id IS NOT NULL;
 
@@ -188,22 +192,34 @@ CREATE INDEX ix_campaign_safety_attempts_message_time
 CREATE TABLE campaign_safety_links (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     safety_message_id UUID NOT NULL REFERENCES campaign_safety_messages(id) ON DELETE CASCADE,
-    target_url VARCHAR(2048) NOT NULL,
-    target_url_hash BYTEA NOT NULL,
+    target_url VARCHAR(2048),
+    target_url_hash BYTEA,
     token_type VARCHAR(20) NOT NULL,
     token_hash BYTEA NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uk_campaign_safety_link_target UNIQUE (safety_message_id, target_url_hash),
     CONSTRAINT uk_campaign_safety_link_token UNIQUE (token_hash),
-    CONSTRAINT ck_campaign_safety_link_target_hash CHECK (octet_length(target_url_hash) = 32),
+    CONSTRAINT ck_campaign_safety_link_target_hash CHECK (
+        target_url_hash IS NULL OR octet_length(target_url_hash) = 32
+    ),
     CONSTRAINT ck_campaign_safety_link_token_hash CHECK (octet_length(token_hash) = 32),
     CONSTRAINT ck_campaign_safety_link_token_type CHECK (token_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE')),
-    CONSTRAINT ck_campaign_safety_link_target_scheme CHECK (target_url ~* '^https?://')
+    CONSTRAINT ck_campaign_safety_link_target_scheme CHECK (target_url IS NULL OR target_url ~* '^https?://'),
+    CONSTRAINT ck_campaign_safety_link_target_pairing CHECK (
+        (token_type = 'CLICK' AND target_url IS NOT NULL AND target_url_hash IS NOT NULL)
+        OR (token_type IN ('OPEN', 'UNSUBSCRIBE') AND target_url IS NULL AND target_url_hash IS NULL)
+    )
 );
 
 CREATE INDEX ix_campaign_safety_links_message
     ON campaign_safety_links (safety_message_id, id);
+CREATE UNIQUE INDEX uk_campaign_safety_open_token
+    ON campaign_safety_links (safety_message_id)
+    WHERE token_type = 'OPEN';
+CREATE UNIQUE INDEX uk_campaign_safety_unsubscribe_token
+    ON campaign_safety_links (safety_message_id)
+    WHERE token_type = 'UNSUBSCRIBE';
 
 CREATE TABLE campaign_safety_events (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -211,17 +227,38 @@ CREATE TABLE campaign_safety_events (
     safety_message_id UUID NOT NULL REFERENCES campaign_safety_messages(id) ON DELETE CASCADE,
     safety_link_id UUID REFERENCES campaign_safety_links(id) ON DELETE SET NULL,
     event_type VARCHAR(20) NOT NULL,
+    fingerprint_hash BYTEA,
+    minute_bucket BIGINT,
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     classification VARCHAR(30),
     classification_reason VARCHAR(255),
     diagnostic_code VARCHAR(80),
     CONSTRAINT ck_campaign_safety_event_type CHECK (
         event_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE', 'REPLY', 'AUTO_REPLY', 'BOUNCE')
+    ),
+    CONSTRAINT ck_campaign_safety_event_callback_fields CHECK (
+        (event_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE')
+            AND safety_link_id IS NOT NULL
+            AND fingerprint_hash IS NOT NULL
+            AND octet_length(fingerprint_hash) = 32
+            AND minute_bucket IS NOT NULL
+            AND classification IS NOT NULL
+            AND classification IN ('UNCLASSIFIED', 'LIKELY_HUMAN', 'BOT', 'PREFETCH', 'SECURITY_SCANNER')
+            AND diagnostic_code IS NULL)
+        OR (event_type IN ('REPLY', 'AUTO_REPLY', 'BOUNCE')
+            AND safety_link_id IS NULL
+            AND fingerprint_hash IS NULL
+            AND minute_bucket IS NULL
+            AND classification IS NULL
+            AND classification_reason IS NULL)
     )
 );
 
 CREATE INDEX ix_campaign_safety_events_message_time
     ON campaign_safety_events (safety_message_id, occurred_at DESC, id);
+CREATE UNIQUE INDEX uk_campaign_safety_event_callback_minute
+    ON campaign_safety_events (safety_link_id, fingerprint_hash, minute_bucket)
+    WHERE event_type IN ('OPEN', 'CLICK', 'UNSUBSCRIBE');
 
 CREATE TABLE mailbox_sync_cursors (
     mailbox_account_id UUID NOT NULL REFERENCES mailbox_accounts(id) ON DELETE CASCADE,
