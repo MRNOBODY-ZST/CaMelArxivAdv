@@ -1,6 +1,8 @@
 package com.camel_hub.advertisement.campaign.delivery;
 
 import com.camel_hub.advertisement.campaign.CampaignConflictException;
+import com.camel_hub.advertisement.campaign.inbound.InboundMailModels;
+import com.camel_hub.advertisement.campaign.inbound.InboundMailRepository;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
@@ -302,6 +304,89 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	@Test
+	void permanentBounceFenceCommitsBeforeSameAddressClaimCanReserveSmtp() throws Exception {
+		UUID originalCampaign = insertCampaign("RUNNING");
+		UUID bouncedRecipient = insertEligibleRecipient(originalCampaign, "shared-bounce@research.test");
+		UUID candidateCampaign = insertCampaign("RUNNING");
+		UUID candidateRecipient = cloneRecipientToCampaign(bouncedRecipient, candidateCampaign);
+		String messageId = "<" + bouncedRecipient + "@delivery.camel-arxiv.invalid>";
+		databaseClient.sql("UPDATE campaign_recipients SET status = 'SMTP_ACCEPTED', "
+				+ "smtp_accepted_at = :now, rfc_message_id = :messageId WHERE id = :recipient")
+				.bind("now", NOW).bind("messageId", messageId).bind("recipient", bouncedRecipient)
+				.fetch().rowsUpdated().block();
+		sql("INSERT INTO suppression_entries (email_hmac,email_domain,reason,source,created_at,expires_at) "
+				+ "SELECT email_hmac,email_domain,'MANUAL','RACE_TEST',TIMESTAMPTZ '" + NOW.minusSeconds(120)
+				+ "',TIMESTAMPTZ '" + NOW.minusSeconds(60) + "' FROM campaign_recipients WHERE id = '"
+				+ bouncedRecipient + "'");
+		InboundMailRepository inbound = new InboundMailRepository(databaseClient, transactions);
+		InboundMailRepository.CursorLease lease = inbound.claim(MAILBOX, NOW, Duration.ofMinutes(2)).block();
+		assertThat(lease).isNotNull();
+		inbound.alignUidValidity(lease, 11, 0, NOW).block();
+
+		try (Connection gate = DriverManager.getConnection(
+				POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+			gate.setAutoCommit(false);
+			try (var statement = gate.createStatement()) {
+				statement.execute("SELECT email_hmac FROM suppression_entries WHERE email_hmac = "
+						+ "(SELECT email_hmac FROM campaign_recipients WHERE id = '" + bouncedRecipient
+						+ "') FOR UPDATE");
+			}
+			CompletableFuture<Boolean> bounce = inbound.persist(
+					lease, 11, 1,
+						new InboundMailModels.ParsedInbound(
+								InboundMailModels.InboundType.BOUNCE, List.of(messageId),
+								"smtp; 550 5.1.1", true), NOW, NOW)
+					.subscribeOn(Schedulers.boundedElastic()).toFuture();
+			assertThat(awaitBlockedClaim()).isTrue();
+			CompletableFuture<CampaignDeliveryRepository.ProductionClaim> claim = firstRepository
+					.claimNextProduction(NOW).subscribeOn(Schedulers.boundedElastic()).toFuture();
+			assertThat(awaitLockWaiters(2)).isTrue();
+
+			gate.commit();
+			assertThat(bounce.get(10, TimeUnit.SECONDS)).isTrue();
+			assertThat(claim.get(10, TimeUnit.SECONDS)).isNull();
+		}
+		inbound.complete(lease, NOW.plusSeconds(1)).block();
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + bouncedRecipient + "'"))
+				.isEqualTo("BOUNCED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + candidateRecipient + "'"))
+				.isEqualTo("SUPPRESSED");
+		assertThat(count("delivery_attempts")).isZero();
+	}
+
+	@Test
+	void claimThatLinearizesBeforePermanentBounceMayRemainConnecting() {
+		UUID originalCampaign = insertCampaign("RUNNING");
+		UUID bouncedRecipient = insertEligibleRecipient(originalCampaign, "claim-first-bounce@research.test");
+		UUID candidateCampaign = insertCampaign("RUNNING");
+		UUID candidateRecipient = cloneRecipientToCampaign(bouncedRecipient, candidateCampaign);
+		String messageId = "<" + bouncedRecipient + "@delivery.camel-arxiv.invalid>";
+		databaseClient.sql("UPDATE campaign_recipients SET status = 'SMTP_ACCEPTED', "
+				+ "smtp_accepted_at = :now, rfc_message_id = :messageId WHERE id = :recipient")
+				.bind("now", NOW).bind("messageId", messageId).bind("recipient", bouncedRecipient)
+				.fetch().rowsUpdated().block();
+
+		CampaignDeliveryRepository.ProductionClaim claim = firstRepository.claimNextProduction(NOW).block();
+		assertThat(claim).isNotNull();
+		assertThat(claim.recipientId()).isEqualTo(candidateRecipient);
+		InboundMailRepository inbound = new InboundMailRepository(databaseClient, transactions);
+		InboundMailRepository.CursorLease lease = inbound.claim(MAILBOX, NOW, Duration.ofMinutes(2)).block();
+		assertThat(lease).isNotNull();
+		inbound.alignUidValidity(lease, 11, 0, NOW).block();
+
+		assertThat(inbound.persist(
+				lease, 11, 1,
+				new InboundMailModels.ParsedInbound(
+						InboundMailModels.InboundType.BOUNCE, List.of(messageId),
+						"smtp; 550 5.1.1", true), NOW, NOW).block()).isTrue();
+
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + bouncedRecipient + "'"))
+				.isEqualTo("BOUNCED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + candidateRecipient + "'"))
+				.isEqualTo("CONNECTING");
+	}
+
+	@Test
 	void pauseThatWinsTheCampaignLockPreventsAConcurrentClaim() throws Exception {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "pause-race@research.test");
@@ -372,6 +457,10 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	private boolean awaitBlockedClaim() throws Exception {
+		return awaitLockWaiters(1);
+	}
+
+	private boolean awaitLockWaiters(int minimum) throws Exception {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 		while (System.nanoTime() < deadline) {
 			try (Connection observer = DriverManager.getConnection(
@@ -380,7 +469,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 				 var rows = statement.executeQuery("SELECT count(*) FROM pg_stat_activity "
 						 + "WHERE datname = current_database() AND wait_event_type = 'Lock'")) {
 				rows.next();
-				if (rows.getInt(1) > 0) return true;
+				if (rows.getInt(1) >= minimum) return true;
 			}
 			Thread.sleep(20);
 		}

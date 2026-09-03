@@ -97,6 +97,7 @@ class CampaignSafetyIntegrationTest {
 	private static final Instant NOW = Instant.parse("2030-04-05T10:15:30Z");
 	private static final UUID ACTOR = UUID.fromString("10000000-0000-0000-0000-000000000001");
 	private static final UUID SMTP = UUID.fromString("72000000-0000-0000-0000-000000000001");
+	private static final UUID MAILBOX = UUID.fromString("73000000-0000-0000-0000-000000000001");
 	private static final UUID CAMPAIGN = UUID.fromString("50000000-0000-0000-0000-000000000001");
 	private static final String SAFETY_KEY = Base64.getEncoder().encodeToString(
 			"campaign-safety-test-key-32-bytes!!".getBytes(StandardCharsets.US_ASCII));
@@ -121,7 +122,7 @@ class CampaignSafetyIntegrationTest {
 	void reset() {
 		database.sql("TRUNCATE campaign_safety_events, campaign_safety_links, campaign_safety_attempts, "
 				+ "campaign_safety_messages, campaign_safety_runs, campaign_recipients, campaigns, smtp_accounts, "
-				+ "email_template_versions, email_templates, outbox_messages, audit_logs, users CASCADE")
+				+ "mailbox_accounts, email_template_versions, email_templates, outbox_messages, audit_logs, users CASCADE")
 				.fetch().rowsUpdated().block();
 		seed();
 	}
@@ -148,6 +149,8 @@ class CampaignSafetyIntegrationTest {
 		assertThat(text("SELECT encode(destination_hmac, 'hex') FROM campaign_safety_runs"))
 				.isEqualTo(java.util.HexFormat.of().formatHex(destinationHmac));
 		assertThat(text("SELECT destination_masked FROM campaign_safety_runs")).isEqualTo("f***@example.test");
+		assertThat(text("SELECT mailbox_account_id::text FROM campaign_safety_runs"))
+				.isEqualTo(MAILBOX.toString());
 		assertThat(text("SELECT payload::text FROM outbox_messages WHERE message_type = 'CAMPAIGN_DELIVERY_WAKEUP'"))
 				.contains("SAFETY_START", run.id().toString()).doesNotContain("fixed@example.test", "First", "Second");
 		assertThat(integer("SELECT count(*)::int FROM delivery_attempts")).isZero();
@@ -1737,10 +1740,17 @@ class CampaignSafetyIntegrationTest {
 				+ "'sender@example.invalid','Team','reply@example.invalid',100,100,1000,100,true,TIMESTAMPTZ '" + NOW
 				+ "','SUCCEEDED','" + ACTOR + "',TIMESTAMPTZ '" + NOW.minusSeconds(1) + "')")
 				.fetch().rowsUpdated().block();
+		database.sql("INSERT INTO mailbox_accounts (id,name,protocol,host,port,tls_mode,username,password_ciphertext,"
+				+ "password_nonce,folder_name,enabled,last_tested_at,last_test_status,created_by,updated_by,updated_at) "
+				+ "VALUES ('" + MAILBOX + "','Safety IMAP','IMAP','localhost',1143,'PLAIN_LOCAL_ONLY','inbound',"
+				+ "decode('00112233445566778899aabbccddeeff','hex'),decode('00112233445566778899aabb','hex'),"
+				+ "'INBOX',true,TIMESTAMPTZ '" + NOW + "','SUCCEEDED','" + ACTOR + "','" + ACTOR
+				+ "',TIMESTAMPTZ '" + NOW.minusSeconds(1) + "')").fetch().rowsUpdated().block();
 		database.sql("INSERT INTO campaigns (id,name,purpose,status,template_id,template_version_id,smtp_account_id,"
-				+ "from_name,from_email,reply_to,unsubscribe_enabled,created_by,updated_by) VALUES ('" + CAMPAIGN
+				+ "mailbox_account_id,from_name,from_email,reply_to,unsubscribe_enabled,created_by,updated_by) VALUES ('" + CAMPAIGN
 				+ "','Safety source','Approved purpose','APPROVED','70000000-0000-0000-0000-000000000001',"
-				+ "'70100000-0000-0000-0000-000000000001','" + SMTP + "','Team','sender@example.invalid',"
+				+ "'70100000-0000-0000-0000-000000000001','" + SMTP + "','" + MAILBOX
+				+ "','Team','sender@example.invalid',"
 				+ "'reply@example.invalid',true,'" + ACTOR + "','" + ACTOR + "')").fetch().rowsUpdated().block();
 	}
 

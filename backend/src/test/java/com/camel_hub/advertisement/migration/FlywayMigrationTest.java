@@ -159,6 +159,7 @@ class FlywayMigrationTest {
 		assertColumn("campaign_safety_runs", "reply_to_snapshot", "character varying", 320, false);
 		assertColumn("campaign_safety_runs", "tracking_opens_enabled", "boolean", null, false);
 		assertColumn("campaign_safety_runs", "tracking_clicks_enabled", "boolean", null, false);
+		assertColumn("campaign_safety_runs", "mailbox_account_id", "uuid", null, true);
 
 		Map<String, String> constraints = constraintDefinitions();
 		assertDefinitions(constraints, Map.ofEntries(
@@ -201,7 +202,10 @@ class FlywayMigrationTest {
 				.isInstanceOf(SQLException.class);
 		assertThatThrownBy(() -> insertSafetyCallbackEvent(fixture, clickLink, "CLICK", null, 8, "LIKELY_HUMAN"))
 				.isInstanceOf(SQLException.class);
-		insertSafetyInboundEvent(fixture, "REPLY", null, null, null, null, "4.2.0");
+		insertSafetyInboundEvent(fixture, "REPLY", null, null, null, null, null);
+		assertThatThrownBy(() -> insertSafetyInboundEvent(
+				fixture, "REPLY", null, null, null, null, "4.2.0"))
+				.isInstanceOf(SQLException.class);
 		assertThatThrownBy(() -> insertSafetyInboundEvent(fixture, "BOUNCE", openLink, "a", 9L, "BOT", "5.1.1"))
 				.isInstanceOf(SQLException.class);
 
@@ -211,6 +215,21 @@ class FlywayMigrationTest {
 		setSafetyMessageId(fixture.safetyMessageId(), "<safety@example.test>");
 		assertThatThrownBy(() -> setSafetyMessageId(newSafetyMessage(fixture), "<safety@example.test>"))
 				.isInstanceOf(SQLException.class);
+	}
+
+	@Test
+	void constrainsInboundEventsToOneMatchedDomainAndBounceOnlyDiagnostics() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+
+		Map<String, String> constraints = constraintDefinitions();
+		assertDefinitions(constraints, Map.ofEntries(
+				Map.entry("ck_mailbox_inbound_event_semantics", List.of(
+						"UNMATCHED", "referenced_message_id IS NULL", "campaign_recipient_id IS NULL",
+						"safety_message_id IS NULL", "referenced_message_id IS NOT NULL")),
+				Map.entry("ck_mailbox_inbound_event_bounce_fields", List.of(
+						"BOUNCE", "permanent IS NOT NULL", "diagnostic_code IS NULL", "permanent IS NULL")),
+				Map.entry("ck_campaign_safety_event_inbound_diagnostics", List.of(
+						"REPLY", "AUTO_REPLY", "BOUNCE", "diagnostic_code IS NULL"))));
 	}
 
 	@Test
@@ -232,7 +251,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(9);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(10);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);
@@ -299,6 +318,63 @@ class FlywayMigrationTest {
 					assertThat(result.next()).isTrue();
 					runId = result.getObject(1, UUID.class);
 				}
+				statement.executeUpdate("""
+						INSERT INTO mailbox_accounts (
+						    id, name, protocol, host, port, tls_mode, username,
+						    password_ciphertext, password_nonce, folder_name
+						) VALUES (
+						    '73000000-0000-0000-0000-000000000017', 'V16 inbound mailbox', 'IMAP',
+						    'localhost', 1143, 'PLAIN_LOCAL_ONLY', 'fixture',
+						    decode('00112233445566778899aabbccddeeff', 'hex'),
+						    decode('00112233445566778899aabb', 'hex'), 'INBOX'
+						)
+						""");
+				statement.executeUpdate("""
+						UPDATE campaigns SET mailbox_account_id = '73000000-0000-0000-0000-000000000017'
+						WHERE id = '50000000-0000-0000-0000-000000000017'
+						""");
+				statement.executeUpdate("""
+						INSERT INTO campaign_recipients (
+						    id, campaign_id, email_ciphertext, email_nonce, email_hmac, email_domain, confidence
+						) VALUES (
+						    '74000000-0000-0000-0000-000000000017',
+						    '50000000-0000-0000-0000-000000000017', decode('01', 'hex'), decode('02', 'hex'),
+						    decode(repeat('b', 64), 'hex'), 'example.test', 'HIGH'
+						)
+						""");
+				statement.executeUpdate("""
+						INSERT INTO campaign_safety_messages (
+						    id, run_id, campaign_recipient_id, smtp_account_id
+						) VALUES (
+						    '75000000-0000-0000-0000-000000000017', '%s',
+						    '74000000-0000-0000-0000-000000000017',
+						    '72000000-0000-0000-0000-000000000017'
+						)
+						""".formatted(runId));
+				statement.executeUpdate("""
+						INSERT INTO campaign_safety_events (
+						    run_id, safety_message_id, event_type, diagnostic_code
+						) VALUES ('%s', '75000000-0000-0000-0000-000000000017', 'REPLY', 'legacy reply diagnostic')
+						""".formatted(runId));
+				statement.executeUpdate("""
+						INSERT INTO mailbox_inbound_events (
+						    mailbox_account_id, folder_name, uid_validity, remote_uid, inbound_type,
+						    referenced_message_id, campaign_recipient_id, safety_message_id,
+						    diagnostic_code, permanent
+						) VALUES
+						    ('73000000-0000-0000-0000-000000000017', 'INBOX', 1, 1, 'UNMATCHED',
+						     '<legacy-unmatched@example.test>', '74000000-0000-0000-0000-000000000017', NULL,
+						     'legacy unmatched diagnostic', true),
+						    ('73000000-0000-0000-0000-000000000017', 'INBOX', 1, 2, 'REPLY',
+						     '<legacy-reply@example.test>', '74000000-0000-0000-0000-000000000017', NULL,
+						     'legacy reply diagnostic', true),
+						    ('73000000-0000-0000-0000-000000000017', 'INBOX', 1, 3, 'BOUNCE',
+						     '<legacy-bounce@example.test>', '74000000-0000-0000-0000-000000000017', NULL,
+						     'legacy bounce diagnostic', NULL),
+						    ('73000000-0000-0000-0000-000000000017', 'INBOX', 1, 4, 'REPLY',
+						     '<legacy-safety@example.test>', NULL, '75000000-0000-0000-0000-000000000017',
+						     NULL, NULL)
+						""");
 			}
 
 			Flyway latest = Flyway.configure()
@@ -307,11 +383,12 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(2);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 			try (Connection connection = connection(schema);
 				 var statement = connection.prepareStatement("""
 						SELECT from_name_snapshot, from_email_snapshot, reply_to_snapshot,
+						       mailbox_account_id,
 						       tracking_opens_enabled, tracking_clicks_enabled
 						FROM campaign_safety_runs WHERE id = ?
 						""")) {
@@ -321,8 +398,57 @@ class FlywayMigrationTest {
 					assertThat(result.getString("from_name_snapshot")).isEqualTo("Frozen Sender");
 					assertThat(result.getString("from_email_snapshot")).isEqualTo("frozen@example.test");
 					assertThat(result.getString("reply_to_snapshot")).isEqualTo("frozen-reply@example.test");
+					assertThat(result.getObject("mailbox_account_id", UUID.class))
+							.isEqualTo(UUID.fromString("73000000-0000-0000-0000-000000000017"));
 					assertThat(result.getBoolean("tracking_opens_enabled")).isTrue();
 					assertThat(result.getBoolean("tracking_clicks_enabled")).isFalse();
+				}
+			}
+			try (Connection connection = connection(schema); var statement = connection.createStatement()) {
+				try (ResultSet result = statement.executeQuery("""
+						SELECT remote_uid, inbound_type, referenced_message_id,
+						       campaign_recipient_id, safety_message_id, diagnostic_code, permanent
+						FROM mailbox_inbound_events ORDER BY remote_uid
+						""")) {
+					assertThat(result.next()).isTrue();
+					assertThat(result.getLong("remote_uid")).isEqualTo(1);
+					assertThat(result.getString("inbound_type")).isEqualTo("UNMATCHED");
+					assertThat(result.getString("referenced_message_id")).isNull();
+					assertThat(result.getObject("campaign_recipient_id")).isNull();
+					assertThat(result.getString("diagnostic_code")).isNull();
+					assertThat(result.getObject("permanent")).isNull();
+					assertThat(result.next()).isTrue();
+					assertThat(result.getLong("remote_uid")).isEqualTo(2);
+					assertThat(result.getString("inbound_type")).isEqualTo("REPLY");
+					assertThat(result.getString("diagnostic_code")).isNull();
+					assertThat(result.getObject("permanent")).isNull();
+					assertThat(result.next()).isTrue();
+					assertThat(result.getLong("remote_uid")).isEqualTo(3);
+					assertThat(result.getString("inbound_type")).isEqualTo("BOUNCE");
+					assertThat(result.getBoolean("permanent")).isFalse();
+					assertThat(result.next()).isTrue();
+					assertThat(result.getLong("remote_uid")).isEqualTo(4);
+					assertThat(result.getObject("safety_message_id", UUID.class))
+							.isEqualTo(UUID.fromString("75000000-0000-0000-0000-000000000017"));
+					assertThat(result.next()).isFalse();
+				}
+				try (ResultSet result = statement.executeQuery("""
+						SELECT diagnostic_code FROM campaign_safety_events WHERE event_type = 'REPLY'
+						""")) {
+					assertThat(result.next()).isTrue();
+					assertThat(result.getString(1)).isNull();
+				}
+				statement.executeUpdate("""
+						DELETE FROM campaign_safety_messages
+						WHERE id = '75000000-0000-0000-0000-000000000017'
+						""");
+				statement.executeUpdate("""
+						DELETE FROM campaign_recipients
+						WHERE id = '74000000-0000-0000-0000-000000000017'
+						""");
+				try (ResultSet result = statement.executeQuery("SELECT count(*) FROM mailbox_inbound_events")) {
+					assertThat(result.next()).isTrue();
+					assertThat(result.getLong(1)).isEqualTo(1);
 				}
 			}
 			try (Connection connection = connection(schema); var statement = connection.createStatement()) {
@@ -396,7 +522,7 @@ class FlywayMigrationTest {
 				"id", "campaign_id", "smtp_account_id", "created_by", "recipient_limit", "status", "started_at", "completed_at",
 				"lock_version", "created_at", "destination_hmac", "destination_masked",
 				"from_name_snapshot", "from_email_snapshot", "reply_to_snapshot",
-				"tracking_opens_enabled", "tracking_clicks_enabled");
+				"tracking_opens_enabled", "tracking_clicks_enabled", "mailbox_account_id");
 		assertThat(columnNames("campaign_safety_messages")).containsExactlyInAnyOrder(
 				"id", "run_id", "campaign_recipient_id", "smtp_account_id", "status", "delivery_lease_hash", "delivery_lease_expires_at",
 				"next_attempt_at", "attempt_count", "rfc_message_id", "rendered_subject", "rendered_html", "rendered_text", "created_at",
@@ -483,7 +609,7 @@ class FlywayMigrationTest {
 		assertThat(foreignKeyDefinitions("campaigns")).contains(
 				"mailbox_accounts:SET NULL", "users:SET NULL");
 		assertThat(foreignKeyDefinitions("campaign_safety_runs")).containsExactlyInAnyOrder(
-				"campaigns:CASCADE", "smtp_accounts:NO ACTION", "users:SET NULL");
+				"campaigns:CASCADE", "smtp_accounts:NO ACTION", "mailbox_accounts:SET NULL", "users:SET NULL");
 		assertThat(foreignKeyDefinitions("campaign_safety_messages")).containsExactlyInAnyOrder(
 				"campaign_safety_runs:CASCADE", "campaign_recipients:NO ACTION", "smtp_accounts:NO ACTION");
 		assertThat(foreignKeyDefinitions("campaign_safety_attempts")).containsExactly("campaign_safety_messages:CASCADE");
@@ -492,7 +618,7 @@ class FlywayMigrationTest {
 				"campaign_safety_runs:CASCADE", "campaign_safety_messages:CASCADE", "campaign_safety_links:SET NULL");
 		assertThat(foreignKeyDefinitions("mailbox_sync_cursors")).containsExactly("mailbox_accounts:CASCADE");
 		assertThat(foreignKeyDefinitions("mailbox_inbound_events")).containsExactlyInAnyOrder(
-				"mailbox_accounts:CASCADE", "campaign_recipients:SET NULL", "campaign_safety_messages:SET NULL");
+				"mailbox_accounts:CASCADE", "campaign_recipients:CASCADE", "campaign_safety_messages:CASCADE");
 	}
 
 	private void assertV16IndexDefinitions() throws SQLException {
@@ -503,6 +629,8 @@ class FlywayMigrationTest {
 				Map.entry("ix_campaign_recipients_rfc_message_id", List.of("(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
 				Map.entry("ix_recipient_delivery_cooldowns_accepted", List.of("(last_smtp_accepted_at DESC)")),
 				Map.entry("ix_campaign_safety_runs_campaign_created", List.of("(campaign_id, created_at DESC, id)")),
+				Map.entry("ix_campaign_safety_runs_mailbox", List.of(
+						"(mailbox_account_id, created_at DESC, id)", "WHERE (mailbox_account_id IS NOT NULL)")),
 				Map.entry("ix_campaign_safety_runs_status", List.of("(status, created_at, id)", "WHERE ((status)::text = ANY", "QUEUED", "RUNNING")),
 				Map.entry("ix_campaign_safety_messages_due", List.of("(status, next_attempt_at, id)", "WHERE ((status)::text = ANY", "QUEUED", "TEMPORARY_FAILURE")),
 				Map.entry("ix_campaign_safety_messages_run_status", List.of("(run_id, status, id)")),
@@ -512,17 +640,20 @@ class FlywayMigrationTest {
 				Map.entry("ix_campaign_safety_events_message_time", List.of("(safety_message_id, occurred_at DESC, id)")),
 				Map.entry("ix_mailbox_sync_cursors_due", List.of("(lease_expires_at, mailbox_account_id, folder_name)")),
 				Map.entry("ix_mailbox_inbound_events_message_id", List.of("(referenced_message_id)", "WHERE (referenced_message_id IS NOT NULL)")),
-				Map.entry("ix_mailbox_inbound_events_recipient", List.of("(campaign_recipient_id, created_at DESC)", "WHERE (campaign_recipient_id IS NOT NULL)"))));
+				Map.entry("ix_mailbox_inbound_events_recipient", List.of("(campaign_recipient_id, created_at DESC)", "WHERE (campaign_recipient_id IS NOT NULL)")),
+				Map.entry("ix_mailbox_inbound_events_safety", List.of("(safety_message_id, created_at DESC)", "WHERE (safety_message_id IS NOT NULL)"))));
 		assertExactSqlStringSets(definitions, Map.of(
 				"ix_campaign_recipients_delivery_due", List.of("QUEUED", "TEMPORARY_FAILURE"),
 				"ix_campaign_safety_runs_status", List.of("QUEUED", "RUNNING"),
 				"ix_campaign_safety_messages_due", List.of("QUEUED", "TEMPORARY_FAILURE")));
 		assertExactPredicates(definitions, Map.of(
 				"ix_campaigns_mailbox_status", "mailbox_account_id IS NOT NULL",
+				"ix_campaign_safety_runs_mailbox", "mailbox_account_id IS NOT NULL",
 				"ix_campaign_recipients_rfc_message_id", "rfc_message_id IS NOT NULL",
 				"ix_campaign_safety_messages_rfc_message_id", "rfc_message_id IS NOT NULL",
 				"ix_mailbox_inbound_events_message_id", "referenced_message_id IS NOT NULL",
-				"ix_mailbox_inbound_events_recipient", "campaign_recipient_id IS NOT NULL"));
+				"ix_mailbox_inbound_events_recipient", "campaign_recipient_id IS NOT NULL",
+				"ix_mailbox_inbound_events_safety", "safety_message_id IS NOT NULL"));
 	}
 
 	private List<String> recipientStatuses() {
@@ -675,11 +806,12 @@ class FlywayMigrationTest {
 		String fingerprintValue = fingerprintDigit == null ? "NULL" : "decode(repeat('" + fingerprintDigit + "', 64), 'hex')";
 		String minuteValue = minuteBucket == null ? "NULL" : minuteBucket.toString();
 		String classificationValue = classification == null ? "NULL" : "'" + classification + "'";
+		String diagnosticValue = diagnosticCode == null ? "NULL" : "'" + diagnosticCode + "'";
 		execute("""
 				INSERT INTO campaign_safety_events (run_id, safety_message_id, safety_link_id, event_type, fingerprint_hash, minute_bucket, classification, diagnostic_code)
-				VALUES ('%s', '%s', %s, '%s', %s, %s, %s, '%s')
+				VALUES ('%s', '%s', %s, '%s', %s, %s, %s, %s)
 				""".formatted(fixture.runId(), fixture.safetyMessageId(), linkValue, eventType, fingerprintValue, minuteValue,
-				classificationValue, diagnosticCode));
+				classificationValue, diagnosticValue));
 	}
 
 	private void setProductionMessageId(UUID recipientId, String messageId) throws SQLException {

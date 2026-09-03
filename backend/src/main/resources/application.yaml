@@ -140,6 +140,11 @@ app:
     first-retry-delay: ${CAMPAIGN_DELIVERY_FIRST_RETRY_DELAY:PT1M}
     second-retry-delay: ${CAMPAIGN_DELIVERY_SECOND_RETRY_DELAY:PT5M}
     poll-delay: ${CAMPAIGN_DELIVERY_POLL_DELAY:PT1S}
+  campaign-inbound:
+    enabled: ${CAMPAIGN_INBOUND_ENABLED:false}
+    poll-delay: ${CAMPAIGN_INBOUND_POLL_DELAY:PT30S}
+    lease-duration: ${CAMPAIGN_INBOUND_LEASE_DURATION:PT2M}
+    batch-size: ${CAMPAIGN_INBOUND_BATCH_SIZE:50}
   campaign-safety:
     enabled: ${CAMPAIGN_SAFETY_ENABLED:false}
     recipient: ${CAMPAIGN_SAFETY_RECIPIENT:}

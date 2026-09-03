@@ -38,7 +38,7 @@ class MailboxImapIdentityTest {
 					"test@example.org", secret.ciphertext(), secret.nonce(), "INBOX", true,
 					null, null, null, 0, UUID.randomUUID(), UUID.randomUUID(), Instant.now(), Instant.now());
 
-			assertThat(transport.preview(account, 1)).isEmpty();
+			assertThat(transport.readSince(account, "INBOX", 0, 0, 50).uidValidity()).isEqualTo(1);
 			assertThat(identified.get(5, TimeUnit.SECONDS)).isTrue();
 		}
 	}

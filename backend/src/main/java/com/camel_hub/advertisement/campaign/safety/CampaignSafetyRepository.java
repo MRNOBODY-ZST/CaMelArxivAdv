@@ -556,7 +556,7 @@ public final class CampaignSafetyRepository {
 
 	private Mono<CampaignRow> loadCampaignSnapshot(UUID campaignId) {
 		return database.sql("""
-				SELECT c.id, c.smtp_account_id, c.status, c.lock_version,
+				SELECT c.id, c.smtp_account_id, c.mailbox_account_id, c.status, c.lock_version,
 				       c.from_name, c.from_email, c.reply_to,
 				       c.tracking_opens_enabled, c.tracking_clicks_enabled,
 				       smtp.enabled AS smtp_enabled, smtp.last_test_status,
@@ -570,6 +570,7 @@ public final class CampaignSafetyRepository {
 				WHERE c.id = :campaign
 				""").bind("campaign", campaignId).map((row, metadata) -> new CampaignRow(
 				row.get("id", UUID.class), row.get("smtp_account_id", UUID.class),
+				row.get("mailbox_account_id", UUID.class),
 				row.get("status", String.class), requiredLong(row, "lock_version"),
 				row.get("from_name", String.class), row.get("from_email", String.class),
 				row.get("reply_to", String.class),
@@ -711,13 +712,13 @@ public final class CampaignSafetyRepository {
 		UUID runId = UUID.randomUUID();
 		UUID outboxId = UUID.randomUUID();
 		List<UUID> recipientIds = drafts.stream().map(SourceDraft::id).toList();
-		Mono<Void> run = database.sql("""
+		DatabaseClient.GenericExecuteSpec runStatement = database.sql("""
 				INSERT INTO campaign_safety_runs (
-				    id, campaign_id, smtp_account_id, created_by, recipient_limit,
+				    id, campaign_id, smtp_account_id, mailbox_account_id, created_by, recipient_limit,
 				    destination_hmac, destination_masked, from_name_snapshot,
 				    from_email_snapshot, reply_to_snapshot, tracking_opens_enabled,
 				    tracking_clicks_enabled, status, created_at
-				) VALUES (:id, :campaign, :smtp, :actor, :limit, :hmac, :masked,
+				) VALUES (:id, :campaign, :smtp, :mailbox, :actor, :limit, :hmac, :masked,
 				          :fromName, :fromEmail, :replyTo, :opens, :clicks, 'QUEUED', :now)
 				""").bind("id", runId).bind("campaign", campaign.id()).bind("smtp", campaign.smtpAccountId())
 				.bind("actor", command.actorId()).bind("limit", command.recipientLimit())
@@ -725,7 +726,9 @@ public final class CampaignSafetyRepository {
 				.bind("fromName", campaign.fromName()).bind("fromEmail", campaign.fromEmail())
 				.bind("replyTo", campaign.replyTo()).bind("opens", campaign.trackingOpens())
 				.bind("clicks", campaign.trackingClicks())
-				.bind("now", command.now()).fetch().rowsUpdated().then();
+				.bind("now", command.now());
+		Mono<Void> run = bindNullable(runStatement, "mailbox", campaign.mailboxAccountId(), UUID.class)
+				.fetch().rowsUpdated().then();
 		Mono<Void> messages = Flux.fromIterable(drafts).concatMap(draft -> {
 			UUID messageId = UUID.randomUUID();
 			return database.sql("""
@@ -834,7 +837,7 @@ public final class CampaignSafetyRepository {
 	}
 
 	private record CampaignRow(
-			UUID id, UUID smtpAccountId, String status, long lockVersion,
+			UUID id, UUID smtpAccountId, UUID mailboxAccountId, String status, long lockVersion,
 			String fromName, String fromEmail, String replyTo,
 			boolean trackingOpens, boolean trackingClicks,
 			boolean smtpEnabled, String smtpHealth, Instant smtpTestedAt, Instant smtpUpdatedAt,
