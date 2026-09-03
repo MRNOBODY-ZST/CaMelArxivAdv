@@ -98,6 +98,14 @@ class PersonalizationSettings(BaseSettings):
     retry_topic: str = "camel.mail.personalization.retry.v1"
     dead_letter_topic: str = "camel.mail.personalization.dlt.v1"
     retry_delay_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    consumer_poll_interval_seconds: float = Field(default=60.0, ge=5.0, le=300.0)
+
+    @property
+    def maximum_poll_interval_ms(self) -> int:
+        return max(
+            15 * 60 * 1_000,
+            round(self.consumer_poll_interval_seconds * 10 * 1_000),
+        )
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:

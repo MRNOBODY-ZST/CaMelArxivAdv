@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
@@ -35,6 +36,16 @@ class KafkaProducer(Protocol):
 class KafkaConsumer(Protocol):
     async def commit(self, offsets: Mapping[TopicPartition, int]) -> None: ...
 
+    def assignment(self) -> set[TopicPartition]: ...
+
+    def pause(self, *partitions: TopicPartition) -> None: ...
+
+    def resume(self, *partitions: TopicPartition) -> None: ...
+
+    async def getmany(
+        self, *partitions: TopicPartition, timeout_ms: int = 0, max_records: int = 1
+    ) -> Mapping[TopicPartition, Sequence[object]]: ...
+
 
 class KafkaResultPublisher:
     def __init__(self, producer: KafkaProducer, topic: str) -> None:
@@ -49,6 +60,58 @@ class KafkaResultPublisher:
             key=str(partition_key).encode("ascii"),
             headers=contract_headers(message.type.value, message.version),
         )
+
+
+async def run_with_consumer_polling[T](
+    consumer: KafkaConsumer,
+    operation: Awaitable[T],
+    *,
+    interval_seconds: float,
+) -> T:
+    if interval_seconds <= 0:
+        raise ValueError("Consumer poll interval must be positive")
+    paused = set(consumer.assignment())
+    if paused:
+        consumer.pause(*paused)
+    finished = asyncio.Event()
+    operation_task = asyncio.ensure_future(operation)
+
+    async def keep_polling() -> None:
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                assigned = set(consumer.assignment())
+                new_partitions = assigned - paused
+                if new_partitions:
+                    consumer.pause(*new_partitions)
+                    paused.update(new_partitions)
+                records = await consumer.getmany(timeout_ms=0, max_records=1)
+                if any(records.values()):
+                    raise RuntimeError("Paused Kafka consumer returned records") from None
+
+    poll_task = asyncio.create_task(keep_polling())
+    try:
+        completed, _ = await asyncio.wait(
+            {operation_task, poll_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if poll_task in completed:
+            await poll_task
+            raise RuntimeError("Kafka poll heartbeat stopped unexpectedly")
+        return await operation_task
+    finally:
+        finished.set()
+        try:
+            if not operation_task.done():
+                operation_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await operation_task
+            if not poll_task.done():
+                await poll_task
+        finally:
+            resumable = paused.intersection(consumer.assignment())
+            if resumable:
+                consumer.resume(*resumable)
 
 
 def contract_headers(message_type: str, version: int) -> list[tuple[str, bytes]]:

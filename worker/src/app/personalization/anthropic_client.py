@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal
 
 import httpx
@@ -78,20 +79,77 @@ class AnthropicEmailClient:
         self._raise_for_status(response)
         try:
             payload: dict[str, Any] = response.json()
-            if payload.get("stop_reason") != "tool_use":
-                raise ValueError("Provider did not complete structured output")
-            blocks = [
-                block
-                for block in payload.get("content", [])
-                if isinstance(block, dict) and block.get("type") == "tool_use"
-            ]
-            if len(blocks) != 1 or blocks[0].get("name") != "personalized_email":
-                raise ValueError("Provider returned an unexpected structured output")
-            return GeneratedEmail.model_validate(blocks[0]["input"])
+            return self._generated_email(payload)
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError) as exception:
-            raise PermanentGenerationError(
+            raise TransientGenerationError(
                 "INVALID_PROVIDER_OUTPUT", "Anthropic returned an invalid structured response"
             ) from exception
+
+    def _generated_email(self, payload: dict[str, Any]) -> GeneratedEmail:
+        content = payload.get("content")
+        if not isinstance(content, list):
+            raise ValueError("Provider response content was not a list")
+        for block in content:
+            if (
+                not isinstance(block, dict)
+                or block.get("type") != "tool_use"
+                or block.get("name") != "personalized_email"
+            ):
+                continue
+            try:
+                return GeneratedEmail.model_validate(block["input"])
+            except (KeyError, TypeError, ValidationError):
+                continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if not isinstance(text, str):
+                continue
+            generated = self._text_fallback(text)
+            if generated is not None:
+                return generated
+        raise ValueError("Provider did not return a compliant email draft")
+
+    def _text_fallback(self, value: str) -> GeneratedEmail | None:
+        candidate = value.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*", "", candidate, count=1, flags=re.I)
+            candidate = re.sub(r"\s*```$", "", candidate, count=1)
+        try:
+            return GeneratedEmail.model_validate_json(candidate)
+        except (ValueError, ValidationError):
+            pass
+        subject = self._section(
+            value,
+            r"^\s*(?:\*\*)?Subject\s*:(?:\*\*)?\s*(?P<value>.+?)\s*$",
+        )
+        text = self._fenced_section(
+            value,
+            "Plain(?:\\s+text)?(?:\\s+version)?",
+            "(?:text|plaintext|txt)?",
+        )
+        html = self._fenced_section(value, "HTML(?:\\s+version)?", "html")
+        if subject is None or text is None or html is None:
+            return None
+        return GeneratedEmail(
+            subject=subject,
+            html=html,
+            text=text,
+            rationale="Normalized from the provider's structured email fallback.",
+        )
+
+    def _section(self, value: str, pattern: str) -> str | None:
+        match = re.search(pattern, value, re.I | re.M)
+        return match.group("value").strip() if match else None
+
+    def _fenced_section(self, value: str, label: str, language: str) -> str | None:
+        pattern = (
+            rf"^\s*(?:\*\*)?{label}\s*:(?:\*\*)?\s*$"
+            rf"\s*^```{language}\s*$\s*(?P<value>.*?)\s*^```\s*$"
+        )
+        match = re.search(pattern, value, re.I | re.M | re.S)
+        return match.group("value").strip() if match else None
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         if response.is_success:

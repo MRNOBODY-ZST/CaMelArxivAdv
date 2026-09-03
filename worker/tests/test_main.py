@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from aiokafka import TopicPartition
 
-from app.main import _run_with_consumer_polling
+from app.messaging.kafka import run_with_consumer_polling
 
 
 class FakePollingConsumer:
@@ -42,7 +42,7 @@ async def test_long_operation_keeps_polling_without_draining_assigned_records() 
             await asyncio.sleep(0.001)
         return "completed"
 
-    result = await _run_with_consumer_polling(
+    result = await run_with_consumer_polling(
         consumer,
         operation(),
         interval_seconds=0.001,
@@ -73,7 +73,7 @@ async def test_poll_failure_cancels_the_unsettled_operation() -> None:
             canceled.set()
 
     with pytest.raises(RuntimeError, match="poll heartbeat failed"):
-        await _run_with_consumer_polling(
+        await run_with_consumer_polling(
             consumer,
             operation(),
             interval_seconds=0.001,

@@ -145,6 +145,93 @@ async def test_compatible_gateway_can_use_bearer_auth_without_changing_messages_
 
 
 @pytest.mark.asyncio
+async def test_compatible_gateway_accepts_first_valid_named_tool_from_noisy_response() -> None:
+    from app.personalization.anthropic_client import AnthropicEmailClient
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "Preparing the requested draft."},
+                    {"type": "tool_use", "name": "other_tool", "input": generated()},
+                    {
+                        "type": "tool_use",
+                        "name": "personalized_email",
+                        "input": generated(),
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "personalized_email",
+                        "input": {**generated(), "text": "invalid"},
+                    },
+                ],
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        active = command(1)
+        output = await AnthropicEmailClient(
+            http, SecretStr("private-test-key"), "claude-opus-4-6"
+        ).generate(active, active.payload.targets[0])
+
+    assert output.model_dump() == generated()
+
+
+@pytest.mark.asyncio
+async def test_compatible_gateway_normalizes_markdown_email_fallback() -> None:
+    from app.personalization.anthropic_client import AnthropicEmailClient
+
+    fallback = """Here's the requested draft.
+
+**Subject:** A careful note about Paper 0
+
+**Plain text version:**
+
+```
+Hello Author 0,
+
+Your public abstract describes a useful result.
+
+Unsubscribe: {{unsubscribe_url}}
+```
+
+**HTML version:**
+
+```html
+<p>Hello Author 0,</p>
+<p>Your public abstract describes a useful result.</p>
+<a href="{{unsubscribe_url}}">Unsubscribe</a>
+```
+"""
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "not retained"},
+                    {"type": "text", "text": fallback},
+                ],
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        active = command(1)
+        output = await AnthropicEmailClient(
+            http, SecretStr("private-test-key"), "claude-opus-4-6"
+        ).generate(active, active.payload.targets[0])
+
+    assert output.subject == "A careful note about Paper 0"
+    assert output.html.startswith("<p>Hello Author 0")
+    assert output.text.startswith("Hello Author 0")
+    assert output.rationale == "Normalized from the provider's structured email fallback."
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [
@@ -180,7 +267,7 @@ async def test_rejects_truncated_wrong_tool_or_noncompliant_output(
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
     async with httpx.AsyncClient(transport=transport) as http:
         active = command(1)
-        with pytest.raises(PermanentGenerationError) as error:
+        with pytest.raises(TransientGenerationError) as error:
             await AnthropicEmailClient(
                 http, SecretStr("private-test-key"), "claude-opus-4-6"
             ).generate(active, active.payload.targets[0])

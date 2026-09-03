@@ -6,7 +6,7 @@ import signal
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from app.config import PersonalizationSettings
-from app.messaging.kafka import forward_retry, settle_delivery
+from app.messaging.kafka import forward_retry, run_with_consumer_polling, settle_delivery
 from app.observability.logging import configure_logging, get_logger
 from app.personalization.consumer import PersonalizationCommandProcessor
 from app.personalization.kafka import PersonalizationResultPublisher
@@ -39,7 +39,7 @@ async def run(settings: PersonalizationSettings | None = None) -> None:
         auto_offset_reset="earliest",
         isolation_level="read_committed",
         max_poll_records=1,
-        max_poll_interval_ms=900_000,
+        max_poll_interval_ms=active.maximum_poll_interval_ms,
     )
     executor = RayPersonalizationExecutor(active)
     await producer.start()
@@ -68,7 +68,11 @@ async def run(settings: PersonalizationSettings | None = None) -> None:
                     default_topic=active.jobs_topic,
                 )
                 continue
-            outcome = await processor.process(record.value)
+            outcome = await run_with_consumer_polling(
+                consumer,
+                processor.process(record.value),
+                interval_seconds=active.consumer_poll_interval_seconds,
+            )
             await settle_delivery(
                 record,
                 outcome,

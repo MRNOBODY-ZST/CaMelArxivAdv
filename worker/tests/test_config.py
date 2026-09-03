@@ -53,6 +53,12 @@ def test_anthropic_configuration_accepts_a_compatible_https_gateway() -> None:
     assert settings.api_base_url == "https://gateway.example/v1"
 
 
+def test_personalization_poll_heartbeat_has_a_bounded_group_eviction_backstop() -> None:
+    settings = PersonalizationSettings(consumer_poll_interval_seconds=90)
+
+    assert settings.maximum_poll_interval_ms == 15 * 60 * 1_000
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
