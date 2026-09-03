@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.List;
 
 @Configuration
+@Profile("!mail-worker")
 public class PersonalizationMessagingConfiguration {
 
 	static List<NewTopic> topics() {

@@ -21,6 +21,7 @@ import org.springframework.transaction.reactive.TransactionalOperator;
 import java.time.Duration;
 
 @Configuration
+@Profile("!mail-worker")
 public class JobConfiguration {
 
 	@Bean

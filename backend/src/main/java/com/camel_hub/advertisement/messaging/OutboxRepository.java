@@ -24,7 +24,8 @@ public class OutboxRepository {
 				    WHERE published_at IS NULL AND available_at <= now()
 				      AND topic_name IN (
 				          'camel.arxiv.jobs.v1', 'camel.arxiv.results.v1',
-				          'camel.mail.personalization.jobs.v1', 'camel.mail.personalization.results.v1'
+				          'camel.mail.personalization.jobs.v1', 'camel.mail.personalization.results.v1',
+				          'camel.mail.delivery.jobs.v1'
 				      )
 				    ORDER BY available_at, id
 				    FOR UPDATE SKIP LOCKED

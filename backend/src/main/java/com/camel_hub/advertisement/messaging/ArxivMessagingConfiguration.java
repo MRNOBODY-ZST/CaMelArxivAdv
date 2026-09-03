@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.List;
 
 @Configuration
+@Profile("!mail-worker")
 @EnableScheduling
 @EnableConfigurationProperties(ArxivMessagingProperties.class)
 public class ArxivMessagingConfiguration {

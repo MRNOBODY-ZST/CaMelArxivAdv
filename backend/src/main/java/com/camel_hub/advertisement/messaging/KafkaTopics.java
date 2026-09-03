@@ -16,6 +16,7 @@ public final class KafkaTopics {
 	public static final String PERSONALIZATION_RESULTS = "camel.mail.personalization.results.v1";
 	public static final String PERSONALIZATION_RETRY = "camel.mail.personalization.retry.v1";
 	public static final String PERSONALIZATION_DLT = "camel.mail.personalization.dlt.v1";
+	public static final String DELIVERY_JOBS = "camel.mail.delivery.jobs.v1";
 
 	private KafkaTopics() {
 	}

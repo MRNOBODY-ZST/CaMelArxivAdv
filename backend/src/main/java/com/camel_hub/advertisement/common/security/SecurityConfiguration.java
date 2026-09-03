@@ -8,6 +8,7 @@ import org.springframework.security.oauth2.server.resource.web.server.authentica
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -29,6 +30,7 @@ import reactor.core.publisher.Mono;
 import javax.crypto.spec.SecretKeySpec;
 
 @Configuration
+@Profile("!mail-worker")
 @EnableWebFluxSecurity
 @EnableReactiveMethodSecurity
 public class SecurityConfiguration {

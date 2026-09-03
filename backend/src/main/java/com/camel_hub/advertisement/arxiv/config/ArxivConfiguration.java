@@ -34,6 +34,7 @@ import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 
 @Configuration
+@Profile("!mail-worker")
 @EnableConfigurationProperties(ArxivProperties.class)
 public class ArxivConfiguration {
 
