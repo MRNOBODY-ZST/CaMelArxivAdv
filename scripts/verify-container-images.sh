@@ -15,6 +15,15 @@ for image in "${images[@]}"; do
   fi
 done
 
+docker run --rm --entrypoint sh camel-arxiv/backend:dev -c '
+  set -eu
+  extraction_dir=$(mktemp -d)
+  java -Djarmode=tools -jar /app/application.jar extract \
+    --launcher --destination "$extraction_dir" >/dev/null
+  test -f "$extraction_dir/BOOT-INF/classes/com/camel_hub/advertisement/campaign/delivery/CampaignDeliveryWorkerConfiguration.class"
+  test -f "$extraction_dir/BOOT-INF/classes/com/camel_hub/advertisement/campaign/inbound/InboundMailSynchronizer.class"
+'
+
 docker run --rm --entrypoint python camel-arxiv/arxiv-worker:dev \
   -c "import ray; from app.main import run; from app.arxiv.oai_client import OaiClient; from app.arxiv.source_downloader import SourceDownloader; from app.extraction.archive_guard import ArchiveLimits; from app.jobs.source_extraction import SourceExtractionRunner; from app.messaging.contracts import MessageType; from app.personalization.main import run as run_personalization; from app.personalization.ray_executor import RayPersonalizationExecutor; assert MessageType.ARXIV_SYNC_TAXONOMY.value == 'ARXIV_SYNC_TAXONOMY'; assert MessageType.ARXIV_FETCH_AND_PARSE_SOURCE.value == 'ARXIV_FETCH_AND_PARSE_SOURCE'; print('worker and Ray personalization imports verified')"
 

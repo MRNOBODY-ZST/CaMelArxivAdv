@@ -4,6 +4,7 @@ set -euo pipefail
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose_file="$project_root/docker-compose.yml"
 development_compose_file="$project_root/docker-compose.dev.yml"
+environment_example="$project_root/.env.example"
 
 # Contract rendering uses deterministic non-production values. The Compose file itself
 # must reject missing runtime authentication keys.
@@ -88,6 +89,12 @@ for topic in \
   fi
 done
 
+if [[ "$topic_init_command" != *"camel.mail.delivery.jobs.v1"* ]] \
+  || [[ "$topic_init_command" != *"retention.ms=604800000"* ]]; then
+  echo "Kafka initializer must create the three-partition delivery topic with seven-day retention" >&2
+  exit 1
+fi
+
 if [[ $(jq -r '.services["backend-api"].environment.TEMPLATE_ASSET_BUCKET' <<<"$compose_json") != "template-assets" ]]; then
   echo "backend-api must use the dedicated private template asset bucket" >&2
   exit 1
@@ -160,6 +167,33 @@ if [[ $(jq -r '.services["mail-worker"].environment.SPRING_PROFILES_ACTIVE' <<<"
   echo "mail-worker must activate only the isolated worker runtime profile" >&2
   exit 1
 fi
+
+for service in backend-api mail-worker; do
+  if [[ $(jq -r --arg service "$service" '.services[$service].environment.CAMPAIGN_DELIVERY_ENABLED' <<<"$compose_json") != "false" ]] \
+    || [[ $(jq -r --arg service "$service" '.services[$service].environment.CAMPAIGN_SAFETY_ENABLED' <<<"$compose_json") != "false" ]] \
+    || [[ $(jq -r --arg service "$service" '.services[$service].environment.CAMPAIGN_SAFETY_MAX_RECIPIENTS' <<<"$compose_json") != "20" ]] \
+    || [[ $(jq -r --arg service "$service" '.services[$service].environment.CAMPAIGN_INBOUND_ENABLED' <<<"$compose_json") != "false" ]]; then
+    echo "$service must receive disabled-by-default delivery, safety and inbound controls with safety capped at 20" >&2
+    exit 1
+  fi
+done
+
+for key in \
+  CAMPAIGN_DELIVERY_BATCH_SIZE \
+  CAMPAIGN_DELIVERY_LEASE_DURATION \
+  CAMPAIGN_DELIVERY_PRODUCTION_COOLDOWN \
+  CAMPAIGN_DELIVERY_MAXIMUM_ATTEMPTS \
+  CAMPAIGN_DELIVERY_FIRST_RETRY_DELAY \
+  CAMPAIGN_DELIVERY_SECOND_RETRY_DELAY \
+  CAMPAIGN_DELIVERY_POLL_DELAY \
+  CAMPAIGN_INBOUND_POLL_DELAY \
+  CAMPAIGN_INBOUND_LEASE_DURATION \
+  CAMPAIGN_INBOUND_BATCH_SIZE; do
+  if ! jq -e --arg key "$key" '.services["mail-worker"].environment | has($key)' <<<"$compose_json" >/dev/null; then
+    echo "mail-worker must receive $key" >&2
+    exit 1
+  fi
+done
 
 if [[ $(jq -r '.services["arxiv-worker"].environment.ARXIV_WORKER_MIN_REQUEST_INTERVAL_SECONDS' <<<"$compose_json") != "3" ]]; then
   echo "arxiv-worker must enforce the three-second official request floor" >&2
@@ -271,6 +305,18 @@ if [[ -z "$signed_asset_location" ]] || ! grep -Fq 'access_log off;' <<<"$signed
   exit 1
 fi
 
+unsubscribe_location=$(
+  sed -n '/location \^~ \/u\//,/^    }/p' \
+    "$project_root/infra/nginx/default.conf"
+)
+for directive in 'access_log off;' 'error_log /dev/null crit;' 'limit_req zone=mail_open_callbacks' \
+  'Cache-Control "no-store' 'Referrer-Policy "no-referrer"'; do
+  if [[ -z "$unsubscribe_location" ]] || ! grep -Fq "$directive" <<<"$unsubscribe_location"; then
+    echo "Edge Nginx /u/ callback boundary is missing privacy directive: $directive" >&2
+    exit 1
+  fi
+done
+
 for internal_service in postgres redis kafka kafka-init minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker mailpit mail-test; do
   if [[ $(jq -r --arg service "$internal_service" '.services[$service] | has("ports")' <<<"$compose_json") == "true" ]]; then
     echo "$internal_service must not publish production ports" >&2
@@ -286,6 +332,32 @@ fi
 for app_service in backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend; do
   if [[ $(jq -r --arg service "$app_service" '.services[$service] | has("healthcheck")' <<<"$compose_json") != "true" ]]; then
     echo "$app_service must declare a healthcheck" >&2
+    exit 1
+  fi
+done
+
+for expected in \
+  'CAMPAIGN_DELIVERY_ENABLED=false' \
+  'CAMPAIGN_SAFETY_ENABLED=false' \
+  'CAMPAIGN_SAFETY_RECIPIENT=' \
+  'CAMPAIGN_SAFETY_MAX_RECIPIENTS=20' \
+  'CAMPAIGN_INBOUND_ENABLED=false'; do
+  if ! grep -Fxq "$expected" "$environment_example"; then
+    echo ".env.example must contain the safe default: $expected" >&2
+    exit 1
+  fi
+done
+
+for secret_key in \
+  PERSONALIZATION_API_KEY \
+  APP_ENCRYPTION_KEY_BASE64 \
+  APP_EMAIL_HMAC_KEY_BASE64 \
+  TEMPLATE_ASSET_SIGNING_KEY_BASE64 \
+  JWT_SIGNING_KEY_BASE64 \
+  AUTH_FINGERPRINT_HMAC_KEY_BASE64 \
+  TRACKING_SIGNING_KEY_BASE64; do
+  if ! grep -Eq "^${secret_key}=$" "$environment_example"; then
+    echo ".env.example must keep $secret_key blank" >&2
     exit 1
   fi
 done
