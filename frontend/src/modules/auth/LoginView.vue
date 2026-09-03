@@ -59,7 +59,7 @@ async function submit(): Promise<void> {
           从 arXiv 发现到合规邮件活动，一条可审计的数据链路。
         </h1>
         <p class="mt-5 max-w-lg text-base/7 text-slate-300">
-          管理论文证据、个性化草稿、邮件账户与分析；正式活动发送流程仍在开发中。
+          集中管理论文证据、个性化草稿、邮件账户与分析；审核、安全实流与正式发送均有独立门禁。
         </p>
         <ul class="mt-10 grid gap-4 text-sm text-slate-200">
           <li class="flex items-center gap-3">
@@ -74,7 +74,7 @@ async function submit(): Promise<void> {
         </ul>
       </div>
       <p class="relative text-xs text-slate-500">
-        公网邮件强制 TLS · 个性化草稿不会自动发送
+        公网邮件强制 TLS · SMTP 接受不代表最终送达
       </p>
     </section>
 
