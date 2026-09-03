@@ -14,6 +14,7 @@ import java.util.Set;
 public final class PersonalizationResultHandler {
 
 	private static final int MAXIMUM_MESSAGE_CHARACTERS = 512 * 1024;
+	private static final String UNSUBSCRIBE_PLACEHOLDER = "{{unsubscribe_url}}";
 	private static final Set<String> STATUSES = Set.of("GENERATED", "FAILED");
 	private final CampaignRepository repository;
 	private final TemplateEngine templateEngine;
@@ -61,8 +62,15 @@ public final class PersonalizationResultHandler {
 			throw new IllegalArgumentException("Generated draft did not pass the email safety policy");
 		}
 		var draft = new CampaignRepository.GeneratedDraft(
-				prepared.subjectTemplate(), prepared.sanitizedHtml(), prepared.textContent(), payload.rationale().strip());
+				prepared.subjectTemplate(), prepared.sanitizedHtml(), canonicalText(prepared.textContent()),
+				payload.rationale().strip());
 		return repository.storeGenerated(message.campaignId(), message.recipientId(), message.jobId(), draft);
+	}
+
+	private String canonicalText(String value) {
+		int placeholder = value.indexOf(UNSUBSCRIBE_PLACEHOLDER);
+		if (placeholder < 1 || Character.isWhitespace(value.charAt(placeholder - 1))) return value;
+		return value.substring(0, placeholder) + " " + value.substring(placeholder);
 	}
 
 	private Mono<Boolean> storeFailed(PersonalizationResultMessage message) {

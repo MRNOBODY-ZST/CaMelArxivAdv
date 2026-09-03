@@ -45,7 +45,7 @@ class PersonalizationResultHandlerTest {
 		var message = message("GENERATED",
 				"A safe subject",
 				"<p>Hello Ada<script>alert(1)</script></p><a href=\"{{unsubscribe_url}}\">Unsubscribe</a>",
-				"Hello Ada {{unsubscribe_url}}", "Connected the invitation to the paper", null, null);
+				"Hello Ada：{{unsubscribe_url}}", "Connected the invitation to the paper", null, null);
 		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey()))
 				.thenReturn(Mono.just(true));
 		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
@@ -62,6 +62,7 @@ class PersonalizationResultHandlerTest {
 		verify(repository).storeGenerated(eq(CAMPAIGN), eq(RECIPIENT), eq(JOB), draft.capture());
 		assertThat(draft.getValue().html()).doesNotContain("script", "alert(1)")
 				.contains("{{unsubscribe_url}}");
+		assertThat(draft.getValue().text()).contains("Ada： {{unsubscribe_url}}");
 		assertThat(draft.getValue().rationale()).isEqualTo("Connected the invitation to the paper");
 		verify(repository).refreshGenerationState(CAMPAIGN, JOB);
 	}
