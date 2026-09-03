@@ -11,7 +11,7 @@ import DsPagination from '@/components/design-skill/DsPagination.vue'
 import DsTabs from '@/components/design-skill/DsTabs.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { campaignErrorMessage, campaignsApi } from '@/modules/campaigns/campaigns.api'
-import type { DeliveryView } from '@/modules/campaigns/campaigns.types'
+import type { DeliveryView, SafetyRunView } from '@/modules/campaigns/campaigns.types'
 import MailSendRecordsPanel from '@/modules/email/MailSendRecordsPanel.vue'
 
 const auth = useAuthStore()
@@ -19,19 +19,27 @@ const route = useRoute()
 const loading = ref(true)
 const error = ref('')
 const deliveries = ref<DeliveryView[]>([])
+const safetyRuns = ref<Array<SafetyRunView & { campaignName: string }>>([])
+const safetyLoading = ref(false)
+const safetyLoaded = ref(false)
+const safetyError = ref('')
 const page = ref(1)
 const totalPages = ref(0)
 const canReadRecords = computed(() => auth.hasPermission('smtp:read'))
 const canReadCampaignDeliveries = computed(() => auth.hasPermission('campaign:read'))
-type DeliveryTab = 'records' | 'campaigns'
+type DeliveryTab = 'records' | 'safety' | 'campaigns'
 const selectedTab = ref<DeliveryTab>(canReadRecords.value ? 'records' : 'campaigns')
 const tabs = computed(() => [
   ...(canReadRecords.value ? [{ label: '测试邮件记录', value: 'records' }] : []),
+  ...(canReadCampaignDeliveries.value ? [{ label: '安全实流', value: 'safety' }] : []),
   ...(canReadCampaignDeliveries.value ? [{ label: '活动发送记录', value: 'campaigns' }] : []),
 ])
 
 watch(() => route.query.record, (record) => {
   if (typeof record === 'string' && canReadRecords.value) selectedTab.value = 'records'
+})
+watch(selectedTab, (tab) => {
+  if (tab === 'safety' && !safetyLoaded.value) void loadSafetyRuns()
 })
 
 async function load(target = page.value): Promise<void> {
@@ -49,9 +57,28 @@ async function load(target = page.value): Promise<void> {
   }
 }
 
+async function loadSafetyRuns(): Promise<void> {
+  safetyLoading.value = true
+  safetyError.value = ''
+  try {
+    const campaignPage = await campaignsApi.listCampaigns(1, 20)
+    const runGroups = await Promise.all(campaignPage.items.map(async (campaign) => ({
+      campaignName: campaign.name,
+      runs: await campaignsApi.listSafetyRuns(campaign.id),
+    })))
+    safetyRuns.value = runGroups.flatMap((group) => group.runs.map((run) => ({ ...run, campaignName: group.campaignName })))
+    safetyLoaded.value = true
+  } catch (cause) {
+    safetyError.value = campaignErrorMessage(cause, '安全实流记录加载失败。')
+  } finally {
+    safetyLoading.value = false
+  }
+}
+
 function tone(status: string): 'neutral' | 'positive' | 'warning' | 'danger' | 'info' {
   if (status === 'SMTP_ACCEPTED' || status === 'SUCCEEDED') return 'positive'
-  if (status === 'FAILED') return 'danger'
+  if (status === 'FAILED' || status === 'PERMANENT_FAILURE' || status === 'BOUNCED') return 'danger'
+  if (status === 'OUTCOME_UNKNOWN' || status === 'TEMPORARY_FAILURE' || status === 'PARTIALLY_FAILED') return 'warning'
   if (status === 'RUNNING' || status === 'QUEUED') return 'info'
   return 'neutral'
 }
@@ -76,7 +103,7 @@ onMounted(() => {
         发送记录
       </h1>
       <p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
-        测试邮件记录与活动投递分开显示；SMTP 接受不代表最终送达，图片加载回传也不代表人工阅读。
+        测试邮件、安全实流与正式活动分开显示；SMTP 已接受不等于最终送达，回传不等于确认人工阅读。
       </p>
     </header>
     <DsTabs
@@ -89,6 +116,97 @@ onMounted(() => {
         #records
       >
         <MailSendRecordsPanel />
+      </template>
+      <template
+        v-if="canReadCampaignDeliveries"
+        #safety
+      >
+        <section
+          aria-labelledby="safety-deliveries-title"
+          class="space-y-4"
+        >
+          <div>
+            <h2
+              id="safety-deliveries-title"
+              class="text-base font-semibold text-slate-900"
+            >
+              安全实流证据
+            </h2>
+            <p class="mt-1 text-sm text-slate-500">
+              邮件由真实 SMTP 发出，但服务端强制改投固定测试邮箱，不计入正式活动指标。
+            </p>
+          </div>
+          <DsAlert
+            v-if="safetyError"
+            tone="danger"
+          >
+            {{ safetyError }}
+          </DsAlert>
+          <div
+            v-if="safetyLoading"
+            class="h-40 animate-pulse rounded-lg bg-slate-100"
+            aria-label="安全实流加载中"
+          />
+          <div
+            v-else-if="safetyRuns.length"
+            class="grid gap-4 lg:grid-cols-2"
+          >
+            <DsCard
+              v-for="run in safetyRuns"
+              :key="run.id"
+              padding="sm"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="font-semibold text-slate-900">
+                    {{ run.campaignName }}
+                  </p>
+                  <p class="mt-1 font-mono text-xs text-slate-500">
+                    {{ run.destinationMasked }}
+                  </p>
+                </div>
+                <DsBadge
+                  :tone="tone(run.status)"
+                  dot
+                >
+                  {{ run.status }}
+                </DsBadge>
+              </div>
+              <dl class="mt-4 grid grid-cols-3 gap-3 text-sm">
+                <div>
+                  <dt class="text-xs text-slate-500">
+                    SMTP 接受
+                  </dt><dd class="mt-1 font-semibold text-slate-900">
+                    {{ run.progress.smtpAccepted }}/{{ run.progress.total }}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-xs text-slate-500">
+                    回复
+                  </dt><dd class="mt-1 font-semibold text-slate-900">
+                    {{ run.events.reply }}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-xs text-slate-500">
+                    退信
+                  </dt><dd class="mt-1 font-semibold text-slate-900">
+                    {{ run.events.bounce }}
+                  </dd>
+                </div>
+              </dl>
+            </DsCard>
+          </div>
+          <DsCard
+            v-else
+            padding="none"
+          >
+            <DsEmptyState
+              title="暂无安全实流"
+              description="从具体活动的运营中心启动 1–20 封安全实流。"
+            />
+          </DsCard>
+        </section>
       </template>
       <template
         v-if="canReadCampaignDeliveries"
@@ -162,6 +280,12 @@ onMounted(() => {
                         class="mt-1 text-xs text-slate-500"
                       >
                         SMTP {{ delivery.smtpResponseCode }}
+                      </p>
+                      <p
+                        v-if="delivery.failureCategory || delivery.retryable"
+                        class="mt-1 text-xs text-slate-500"
+                      >
+                        {{ delivery.failureCategory ?? '暂时失败' }}<span v-if="delivery.retryable"> · 可重试</span>
                       </p>
                     </td>
                     <td class="whitespace-nowrap px-5 py-4 text-slate-500">

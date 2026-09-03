@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { LinkIcon } from '@heroicons/vue/24/outline'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import DsAlert from '@/components/design-skill/DsAlert.vue'
 import DsCard from '@/components/design-skill/DsCard.vue'
@@ -14,6 +14,11 @@ const error = ref('')
 const links = ref<LinkMetric[]>([])
 const page = ref(1)
 const totalPages = ref(0)
+const totals = computed(() => links.value.reduce((sum, link) => ({
+  raw: sum.raw + link.rawClicks,
+  human: sum.human + link.humanClicks,
+  automated: sum.automated + link.automatedClicks,
+}), { raw: 0, human: 0, automated: 0 }))
 
 async function load(target = page.value): Promise<void> {
   loading.value = true
@@ -46,7 +51,7 @@ onMounted(load)
       >
         链接分析
       </h1><p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
-        查看活动链接点击，并区分真人、预取、机器人和安全扫描流量。
+        查看正式活动链接点击，并区分原始、可能人工、预取、机器人和安全扫描流量；回传不等于确认人工阅读。
       </p>
     </header>
     <DsAlert
@@ -64,6 +69,29 @@ onMounted(load)
       v-else-if="links.length"
       padding="none"
     >
+      <dl class="grid grid-cols-3 divide-x divide-slate-200 border-b border-slate-200 bg-slate-50">
+        <div class="px-5 py-4">
+          <dt class="text-xs text-slate-500">
+            原始点击
+          </dt><dd class="mt-1 text-2xl font-semibold text-slate-950">
+            {{ totals.raw }}
+          </dd>
+        </div>
+        <div class="px-5 py-4">
+          <dt class="text-xs text-slate-500">
+            可能人工
+          </dt><dd class="mt-1 text-2xl font-semibold text-brand-700">
+            {{ totals.human }}
+          </dd>
+        </div>
+        <div class="px-5 py-4">
+          <dt class="text-xs text-slate-500">
+            自动化
+          </dt><dd class="mt-1 text-2xl font-semibold text-slate-600">
+            {{ totals.automated }}
+          </dd>
+        </div>
+      </dl>
       <div class="overflow-x-auto">
         <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
           <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -73,7 +101,9 @@ onMounted(load)
               </th><th class="px-5 py-3">
                 链接
               </th><th class="px-5 py-3">
-                真人点击
+                原始点击
+              </th><th class="px-5 py-3">
+                可能人工点击
               </th><th class="px-5 py-3">
                 自动化点击
               </th>
@@ -98,6 +128,9 @@ onMounted(load)
                 </p>
               </td>
               <td class="px-5 py-4 font-semibold text-emerald-700">
+                {{ link.rawClicks }}
+              </td>
+              <td class="px-5 py-4 font-semibold text-brand-700">
                 {{ link.humanClicks }}
               </td>
               <td class="px-5 py-4 text-slate-600">

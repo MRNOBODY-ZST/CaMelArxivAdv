@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
+import java.util.UUID;
+
 @RestController
 @Profile("api")
 @RequestMapping("/api/v1")
@@ -25,24 +27,27 @@ public class CampaignReportingController {
 	@GetMapping("/deliveries")
 	@PreAuthorize("hasAuthority('campaign:read')")
 	Mono<PageResponse<CampaignReportingRepository.DeliveryView>> deliveries(
+			@RequestParam(required = false) UUID campaignId,
 			@RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int pageSize
 	) {
-		return service.deliveries(page, pageSize);
+		return service.deliveries(campaignId, page, pageSize);
 	}
 
 	@GetMapping("/campaign-analytics")
 	@PreAuthorize("hasAuthority('analytics:read')")
 	Mono<PageResponse<CampaignReportingRepository.CampaignAnalyticsView>> campaigns(
+			@RequestParam(required = false) UUID campaignId,
 			@RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int pageSize
 	) {
-		return service.campaigns(page, pageSize);
+		return service.campaigns(campaignId, page, pageSize);
 	}
 
 	@GetMapping("/link-analytics")
 	@PreAuthorize("hasAuthority('analytics:read')")
 	Mono<PageResponse<CampaignReportingRepository.LinkAnalyticsView>> links(
+			@RequestParam(required = false) UUID campaignId,
 			@RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int pageSize
 	) {
-		return service.links(page, pageSize);
+		return service.links(campaignId, page, pageSize);
 	}
 }

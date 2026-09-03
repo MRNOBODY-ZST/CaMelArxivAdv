@@ -24,7 +24,11 @@ vi.mock('@/modules/campaigns/campaigns.api', () => ({
   campaignsApi: {
     listSegments: vi.fn(), previewSegment: vi.fn(), createSegment: vi.fn(),
     listCampaigns: vi.fn(), createCampaign: vi.fn(), getCampaign: vi.fn(),
-    listRecipients: vi.fn(), startPersonalization: vi.fn(),
+    listRecipients: vi.fn(), startPersonalization: vi.fn(), preflightCampaign: vi.fn(),
+    submitCampaignForReview: vi.fn(), approveCampaign: vi.fn(), rejectCampaign: vi.fn(),
+    scheduleCampaign: vi.fn(), startCampaign: vi.fn(), pauseCampaign: vi.fn(),
+    resumeCampaign: vi.fn(), cancelCampaign: vi.fn(), startSafetyRun: vi.fn(),
+    listSafetyRuns: vi.fn(), getSafetyRun: vi.fn(), cancelSafetyRun: vi.fn(),
     listDeliveries: vi.fn(), listCampaignAnalytics: vi.fn(), listLinkAnalytics: vi.fn(),
     runtimeStatus: vi.fn(),
   },
@@ -45,6 +49,8 @@ describe('campaign workspace views', () => {
     vi.mocked(campaignsApi.getCampaign).mockResolvedValue(campaign())
     vi.mocked(campaignsApi.listRecipients).mockResolvedValue(page([recipient()]))
     vi.mocked(campaignsApi.runtimeStatus).mockResolvedValue(runtime(false))
+    vi.mocked(campaignsApi.preflightCampaign).mockResolvedValue(preflight(false))
+    vi.mocked(campaignsApi.listSafetyRuns).mockResolvedValue([])
     vi.mocked(campaignsApi.listDeliveries).mockResolvedValue(page([]))
     vi.mocked(campaignsApi.listCampaignAnalytics).mockResolvedValue(page([]))
     vi.mocked(campaignsApi.listLinkAnalytics).mockResolvedValue(page([]))
@@ -70,6 +76,7 @@ describe('campaign workspace views', () => {
 
     const detail = await mountView(CampaignDetailView, '/email/campaigns/campaign-1')
     expect(detail.text()).toContain('个性化生成当前未启用')
+    expect(detail.text()).toContain('草稿不等于已发送')
     expect(detail.get('[data-testid="template-editor-link"]').attributes('href')).toBe('/email/templates/template-1')
     expect(detail.get('[data-testid="start-personalization"]').attributes()).toHaveProperty('disabled')
     expect(detail.text()).toContain('A Reliable AI Paper')
@@ -150,9 +157,15 @@ function campaign(): CampaignView {
     id: 'campaign-1', name: 'AI 作者邀约', purpose: '邀请作者了解相关研究', status: 'DRAFT',
     templateId: 'template-1', templateName: '论文邀约', templateVersion: 2,
     segmentId: 'segment-1', segmentName: 'AI 已验证作者', smtpAccountId: 'smtp-1', smtpName: 'Mailpit',
+    mailboxAccountId: null,
     fromName: 'Research Team', fromEmail: 'sender@example.org', replyTo: 'reply@example.org',
+    trackingOpensEnabled: true, trackingClicksEnabled: true,
     generationStatus: 'NOT_REQUESTED', generationProvider: null, generationModel: null, generationJobId: null,
     recipientCounts: { queued: 0, running: 0, generated: 0, failed: 0, total: 0 },
+    deliveryCounts: { queued: 0, connecting: 0, smtpAccepted: 0, temporaryFailure: 0, permanentFailure: 0, bounced: 0, suppressed: 0, unsubscribed: 0, canceled: 0, outcomeUnknown: 0, total: 0 },
+    lockVersion: 0, submittedForReviewAt: null, approvedAt: null, approvedBy: null,
+    rejectedAt: null, rejectedBy: null, rejectionReason: null, scheduledAt: null, startedAt: null,
+    completedAt: null, canceledAt: null, statusChangedAt: null, statusChangedBy: null,
     createdAt: '2026-08-10T00:00:00Z', updatedAt: '2026-08-10T00:00:00Z',
   }
 }
@@ -162,6 +175,7 @@ function recipient(): CampaignRecipient {
     id: 'recipient-1', authorName: 'Alice', paperTitle: 'A Reliable AI Paper', category: 'cs.AI',
     organization: 'Example Lab', personalizationStatus: 'PENDING', subject: null, html: null, text: null,
     rationale: null, errorCode: null, errorMessage: null, personalizedAt: null, createdAt: '2026-08-10T00:00:00Z',
+    trackingArtifactsRedacted: true,
   }
 }
 
@@ -170,5 +184,15 @@ function runtime(enabled: boolean): RuntimeStatus {
     personalizationEnabled: enabled, provider: 'openai', model: 'gpt-5.6-luna',
     rayConfigured: true, kafkaConfigured: true, liveSmtpAllowed: true,
     publicMailboxAllowed: true, generationReady: enabled,
+  }
+}
+
+function preflight(ready: boolean) {
+  return {
+    ready,
+    checks: { CONTENT_READY: { passed: ready, detail: '1 of 1 recipients have complete generated content' } },
+    counts: { TOTAL: 1, ELIGIBLE: ready ? 1 : 0, SUPPRESSED: ready ? 0 : 1 },
+    estimatedMinutes: ready ? 1 : 0,
+    digest: 'digest',
   }
 }
