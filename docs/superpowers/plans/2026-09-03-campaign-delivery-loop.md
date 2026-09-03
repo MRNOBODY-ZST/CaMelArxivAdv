@@ -408,7 +408,7 @@ git commit -m "feat: monitor campaign replies and bounces"
 
 - [ ] **Step 1: Read the frontend Tailwind/design-system skill before editing UI**
 
-Read `/Users/hades/.codex/skills/frontend-tailwind-css/SKILL.md` completely and preserve the existing `DsCard`, `DsBadge`, `DsAlert`, `DsButton`, `DsModal`, `DsTabs`, `DsPagination`, and `DsEmptyState` visual language. Do not introduce another component library.
+Follow the repository's Tailwind design guidance and preserve the existing `DsCard`, `DsBadge`, `DsAlert`, `DsButton`, `DsModal`, `DsTabs`, `DsPagination`, and `DsEmptyState` visual language. Do not introduce another component library.
 
 - [ ] **Step 2: Write failing backend reporting and frontend behavior tests**
 
