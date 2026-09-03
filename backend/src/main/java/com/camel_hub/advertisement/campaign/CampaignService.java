@@ -1,5 +1,6 @@
 package com.camel_hub.advertisement.campaign;
 
+import com.camel_hub.advertisement.campaign.tracking.CampaignPublicContentRedactor;
 import com.camel_hub.advertisement.common.api.PageResponse;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import com.camel_hub.advertisement.messaging.PersonalizationCommandMessage;
@@ -20,16 +21,26 @@ public class CampaignService {
 	private final PersonalizationProperties properties;
 	private final ObjectMapper objectMapper;
 	private final TransactionalOperator transactions;
+	private final CampaignPublicContentRedactor contentRedactor;
 
 	public CampaignService(
 			CampaignRepository repository, SegmentRepository segments, PersonalizationProperties properties,
 			ObjectMapper objectMapper, TransactionalOperator transactions
+	) {
+		this(repository, segments, properties, objectMapper, transactions, new CampaignPublicContentRedactor());
+	}
+
+	public CampaignService(
+			CampaignRepository repository, SegmentRepository segments, PersonalizationProperties properties,
+			ObjectMapper objectMapper, TransactionalOperator transactions,
+			CampaignPublicContentRedactor contentRedactor
 	) {
 		this.repository = repository;
 		this.segments = segments;
 		this.properties = properties;
 		this.objectMapper = objectMapper;
 		this.transactions = transactions;
+		this.contentRedactor = contentRedactor;
 	}
 
 	public Mono<PageResponse<CampaignView>> list(int page, int pageSize) {
@@ -167,10 +178,13 @@ public class CampaignService {
 	}
 
 	private RecipientView recipient(CampaignRepository.RecipientRecord record) {
+		CampaignPublicContentRedactor.RedactedContent content = contentRedactor.redact(
+				record.subject(), record.html(), record.text(), record.trackingArtifactsFrozen());
 		return new RecipientView(
 				record.id(), record.authorName(), record.paperTitle(), record.category(), record.organization(),
-				record.personalizationStatus(), record.subject(), record.html(), record.text(), record.rationale(),
-				record.errorCode(), record.errorMessage(), record.personalizedAt(), record.createdAt());
+				record.personalizationStatus(), content.subject(), content.html(), content.text(), record.rationale(),
+				record.errorCode(), record.errorMessage(), record.personalizedAt(), record.createdAt(),
+				content.trackingArtifactsRedacted());
 	}
 
 	private void validatePage(int page, int pageSize) {
@@ -215,7 +229,8 @@ public class CampaignService {
 	public record RecipientView(
 			UUID id, String authorName, String paperTitle, String category, String organization,
 			String personalizationStatus, String subject, String html, String text, String rationale,
-			String errorCode, String errorMessage, Instant personalizedAt, Instant createdAt
+			String errorCode, String errorMessage, Instant personalizedAt, Instant createdAt,
+			boolean trackingArtifactsRedacted
 	) { }
 
 	public record GenerationStart(UUID jobId, int queuedRecipients) { }

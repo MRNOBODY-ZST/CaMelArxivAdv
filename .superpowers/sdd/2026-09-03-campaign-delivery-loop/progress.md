@@ -49,7 +49,7 @@ Ruling: Task 5 evolves `claimNext` from production-only to a disjoint production
 - Task 1: complete (commits `e99ffa2`, `f62e79c`, `814405f`, `798bd62`, repair `0f848dc`; focused 9 tests and full backend 412 tests passed; independent repair review: specification PASS, quality/safety PASS, no findings).
 - Task 2: complete (commits `5eb2b08`, `ecc7857`; focused 32 tests and full backend 411 tests passed; independent re-review: specification PASS, quality/safety PASS, no findings). The reviewer noted only a non-blocking future optimization: hash each rendered row before ordered aggregation to cap PostgreSQL aggregate memory for very large campaigns.
 - Task 3: complete (this task commit; focused delivery suite and full backend 514 tests passed; independent final review: specification PASS, quality/safety PASS, no P0/P1 findings). Non-blocking follow-ups are indexed same-HMAC/rate scans, finer reconciliation reasons, and large multi-campaign fairness.
-- Task 4: pending
+- Task 4: complete (this task commit; focused tracking/delivery/SMTP suite 193 tests and full backend 602 tests passed; independent final review: specification PASS and quality/safety PASS, no P0/P1/P2 findings; reviewer focused 219 tests and full backend 602 tests passed; independent expiry-rotation safety audit PASS with no findings).
 - Task 5: pending
 - Task 6: pending
 - Task 7: pending

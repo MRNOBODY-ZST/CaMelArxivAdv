@@ -129,7 +129,11 @@ public final class CampaignRepository {
 				SELECT id, author_name_snapshot, paper_title_snapshot, category_snapshot,
 				       organization_snapshot, personalization_status, rendered_subject,
 				       rendered_html, rendered_text, personalization_rationale,
-				       personalization_error_code, personalization_error_message, personalized_at, created_at
+				       personalization_error_code, personalization_error_message, personalized_at, created_at,
+				       (attempt_count > 0 OR EXISTS (
+				           SELECT 1 FROM tracking_tokens token
+				           WHERE token.campaign_recipient_id = campaign_recipients.id
+				       )) AS tracking_artifacts_frozen
 				FROM campaign_recipients WHERE campaign_id = :campaignId
 				ORDER BY created_at, id OFFSET :offset LIMIT :limit
 				""").bind("campaignId", campaignId).bind("offset", offset).bind("limit", limit)
@@ -141,7 +145,8 @@ public final class CampaignRepository {
 						row.get("rendered_text", String.class), row.get("personalization_rationale", String.class),
 						row.get("personalization_error_code", String.class),
 						row.get("personalization_error_message", String.class),
-						row.get("personalized_at", Instant.class), row.get("created_at", Instant.class))).all();
+						row.get("personalized_at", Instant.class), row.get("created_at", Instant.class),
+						Boolean.TRUE.equals(row.get("tracking_artifacts_frozen", Boolean.class)))).all();
 	}
 
 	public Mono<Long> recipientCount(UUID campaignId) {
@@ -350,7 +355,8 @@ public final class CampaignRepository {
 	public record RecipientRecord(
 			UUID id, String authorName, String paperTitle, String category, String organization,
 			String personalizationStatus, String subject, String html, String text, String rationale,
-			String errorCode, String errorMessage, Instant personalizedAt, Instant createdAt
+			String errorCode, String errorMessage, Instant personalizedAt, Instant createdAt,
+			boolean trackingArtifactsFrozen
 	) { }
 
 	public record ResultContext(String fromName, String replyTo) { }

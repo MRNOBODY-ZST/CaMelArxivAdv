@@ -223,20 +223,26 @@ class MailTrackingApiIntegrationTest {
 		String mixedCaseTarget = "HTTP://example.invalid/mixed-case";
 		String signedAssetTarget = "https://assets.example.invalid/api/v1/template-assets/"
 				+ UUID.randomUUID() + "/" + UUID.randomUUID() + "/content?signature=test-signature";
+		String encodedControl = "https://example.invalid/%250d%250aLocation:https://attacker.example";
+		String encodedSelfLoop = "http://localhost:8080/%2574/%2563/old-capability";
+		String invalidPort = "https://example.invalid:0/invalid-port";
 		String html = "<p><a href=\"" + target + "\">Paper details</a>"
 				+ "<a href=\"" + target + "\">Repeated target</a>"
 				+ "<a href=\"" + mixedCaseTarget + "\">Mixed case</a>"
 				+ "<a href=\"" + signedAssetTarget + "\">Private asset</a>"
 				+ "<a href=\"mailto:author@example.invalid\">Mail author</a>"
 				+ "<a href=\"/relative\">Relative</a>"
-				+ "<a href=\"https://user:secret@example.invalid/private\">Unsafe</a></p>";
+				+ "<a href=\"https://user:secret@example.invalid/private\">Unsafe</a>"
+				+ "<a href=\"" + encodedControl + "\">Encoded control</a>"
+				+ "<a href=\"" + encodedSelfLoop + "\">Encoded callback</a>"
+				+ "<a href=\"" + invalidPort + "\">Invalid port</a></p>";
 		String correlationId = UUID.randomUUID().toString();
 		tracking.send(ACTOR, accountId, MailTrackingModels.Source.TEMPLATE_TEST,
 				new SmtpTransport.OutboundMessage("qa@example.invalid", "Tracked links", "Research Team",
 						"reply@example.invalid", html, "Plain text unchanged", correlationId), true, outbound::add).block();
 
 		var links = org.jsoup.Jsoup.parseBodyFragment(outbound.getFirst().html()).select("a[href]");
-		assertThat(links).hasSize(7);
+		assertThat(links).hasSize(10);
 		assertThat(links.get(0).attr("href")).startsWith("http://localhost:8080/t/c/")
 				.isEqualTo(links.get(1).attr("href"));
 		assertThat(links.get(2).attr("href")).startsWith("http://localhost:8080/t/c/");
@@ -244,6 +250,9 @@ class MailTrackingApiIntegrationTest {
 		assertThat(links.get(4).attr("href")).isEqualTo("mailto:author@example.invalid");
 		assertThat(links.get(5).attr("href")).isEqualTo("/relative");
 		assertThat(links.get(6).attr("href")).isEqualTo("https://user:secret@example.invalid/private");
+		assertThat(links.get(7).attr("href")).isEqualTo(encodedControl);
+		assertThat(links.get(8).attr("href")).isEqualTo(encodedSelfLoop);
+		assertThat(links.get(9).attr("href")).isEqualTo(invalidPort);
 		assertThat(outbound.getFirst().text()).isEqualTo("Plain text unchanged");
 		JsonNode preparedDetail = detail(correlationId);
 		assertThat(preparedDetail.path("links")).hasSize(2);
@@ -263,6 +272,9 @@ class MailTrackingApiIntegrationTest {
 		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isEqualTo(1);
 		anonymous.post().uri(clickPath).exchange().expectStatus().isEqualTo(405).expectHeader().valueEquals("Allow", "GET,HEAD");
 		assertThat(detail(correlationId).at("/record/rawClickCount").asLong()).isEqualTo(1);
+		String mixedCaseClickPath = URI.create(links.get(2).attr("href")).getPath();
+		anonymous.get().uri(mixedCaseClickPath).exchange().expectStatus().isFound()
+				.expectHeader().valueEquals("Location", mixedCaseTarget);
 
 		String altered = clickPath.substring(0, clickPath.length() - 1)
 				+ (clickPath.endsWith("A") ? "B" : "A");
@@ -270,6 +282,44 @@ class MailTrackingApiIntegrationTest {
 				.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
 				.expectBody(String.class).returnResult().getResponseBody();
 		assertThat(body).isNullOrEmpty();
+	}
+
+	@Test
+	void clickControllerRejectsEveryUnsafeTargetEvenWhenAnExistingTestMailRowIsCorrupted() {
+		String correlationId = UUID.randomUUID().toString();
+		String clickPath = trackedClickPath(correlationId, "https://example.invalid/paper/42");
+		List<String> corruptedTargets = List.of(
+				"https://user:secret@attacker.example/private",
+				"javascript:alert(1)",
+				"https://example.invalid/%0d%0aLocation:https://attacker.example",
+				"https://example.invalid\\@attacker.example/private",
+				"http://localhost:8080/t/c/another-capability",
+				"http://localhost:8080/%74/%63/encoded-capability",
+				"http://localhost:8080/u/another-capability",
+				"https://assets.example.invalid/api/v1/template-assets/one/two/content");
+		database.sql("ALTER TABLE mail_click_links DROP CONSTRAINT ck_mail_click_target_scheme")
+				.fetch().rowsUpdated().block();
+		try {
+			for (String target : corruptedTargets) {
+				database.sql("UPDATE mail_click_links SET target_url = :target WHERE record_id = :record")
+						.bind("target", target).bind("record", UUID.fromString(correlationId))
+						.fetch().rowsUpdated().block();
+
+				anonymous.get().uri(clickPath).exchange().expectStatus().isNotFound()
+						.expectHeader().doesNotExist(HttpHeaders.LOCATION)
+						.expectHeader().valueMatches("Cache-Control", ".*no-store.*")
+						.expectHeader().valueEquals("Referrer-Policy", "no-referrer")
+						.expectBody().isEmpty();
+			}
+			assertThat(count("mail_click_events")).isZero();
+		}
+		finally {
+			database.sql("UPDATE mail_click_links SET target_url = 'https://example.invalid/restored' "
+						+ "WHERE record_id = :record")
+					.bind("record", UUID.fromString(correlationId)).fetch().rowsUpdated().block();
+			database.sql("ALTER TABLE mail_click_links ADD CONSTRAINT ck_mail_click_target_scheme "
+						+ "CHECK (target_url ~* '^https?://')").fetch().rowsUpdated().block();
+		}
 	}
 
 	@Test
@@ -413,6 +463,16 @@ class MailTrackingApiIntegrationTest {
 				.expectHeader().valueEquals("Referrer-Policy", "no-referrer")
 				.expectHeader().valueEquals("X-Content-Type-Options", "nosniff")
 				.expectBody(byte[].class).value(bytes -> assertThat(bytes).startsWith((byte) 'G', (byte) 'I', (byte) 'F'));
+	}
+
+	@Test
+	void unsubscribeCapabilityPathsRemainAnonymousEvenWithMalformedBearerInput() {
+		String capability = "unsubscribe-capability-must-not-leak";
+		String body = anonymous.post().uri("/u/{token}", capability)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer malformed")
+				.exchange().expectStatus().value(status -> assertThat(status).isIn(404, 405))
+				.expectBody(String.class).returnResult().getResponseBody();
+		assertThat(body).doesNotContain(capability);
 	}
 
 	@Test

@@ -60,17 +60,24 @@ public record MailTrackingProperties(
 		try {
 			URI uri = URI.create(value == null ? "" : value.strip());
 			String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+			String host = canonicalHost(uri.getHost());
 			if (!uri.isAbsolute() || uri.getHost() == null || uri.getRawUserInfo() != null
 					|| uri.getRawQuery() != null || uri.getRawFragment() != null
 					|| !uri.getRawPath().isEmpty() || uri.getPort() < -1 || uri.getPort() == 0 || uri.getPort() > 65_535
-					|| !(scheme.equals("https") || scheme.equals("http") && isLocalHost(uri.getHost()))) {
+					|| host.isEmpty() || !(scheme.equals("https") || scheme.equals("http") && isLocalHost(host))) {
 				throw new IllegalArgumentException();
 			}
-			return new URI(scheme, null, uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null).toString();
+			return new URI(scheme, null, host, uri.getPort(), null, null, null).toString();
 		}
 		catch (Exception ignored) {
 			throw new IllegalArgumentException("Tracking callback URL must be an absolute origin; public hosts require HTTPS");
 		}
+	}
+
+	private static String canonicalHost(String value) {
+		String host = value == null ? "" : value.toLowerCase(Locale.ROOT);
+		while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+		return host;
 	}
 
 	private static boolean isLocalHost(String value) {

@@ -78,6 +78,7 @@ public class SecurityConfiguration {
 								"/api/v1/auth/logout",
 								"/t/o/**",
 								"/t/c/**",
+								"/u/**",
 								"/api/v1/system/health",
 								"/actuator/health/**",
 								"/actuator/info",

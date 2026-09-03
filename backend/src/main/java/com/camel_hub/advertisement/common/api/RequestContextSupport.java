@@ -28,11 +28,13 @@ public final class RequestContextSupport {
 
 	public static boolean isCapabilityRequest(ServerWebExchange exchange) {
 		String path = exchange.getRequest().getPath().pathWithinApplication().value();
-		return path.equals("/t") || path.startsWith("/t/");
+		return path.equals("/t") || path.startsWith("/t/") || path.equals("/u") || path.startsWith("/u/");
 	}
 
 	public static String safePath(ServerWebExchange exchange) {
-		return isCapabilityRequest(exchange) ? "/t/[redacted]" : exchange.getRequest().getPath().value();
+		if (!isCapabilityRequest(exchange)) return exchange.getRequest().getPath().value();
+		return exchange.getRequest().getPath().pathWithinApplication().value().startsWith("/u")
+				? "/u/[redacted]" : "/t/[redacted]";
 	}
 
 	public static AuthenticationRequestContext context(ServerWebExchange exchange) {

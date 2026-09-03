@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.email.smtp;
 
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage;
+import com.camel_hub.advertisement.campaign.tracking.CampaignTrackingSigner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -199,10 +200,18 @@ class SmtpTransportTest {
 
 	@Test
 	void redactsAddressesSecretsControlsAndTruncatesSafeSummary() {
+		CampaignTrackingSigner signer = new CampaignTrackingSigner(KEY);
+		UUID recipient = UUID.fromString("41000000-0000-0000-0000-00000000000a");
+		Instant expiry = Instant.ofEpochSecond(1_900_000_000L);
+		String openCapability = signer.issueOpen(recipient, expiry);
+		String clickCapability = signer.issueClick(recipient,
+				UUID.fromString("51000000-0000-0000-0000-00000000000b"), expiry);
+		String unsubscribeCapability = signer.issueUnsubscribe(recipient, expiry);
 		String raw = "550 victim.person@research.test token=opaque-secret "
 				+ "用户@例子.公司 victim@[127.0.0.1] \"quoted user\"@research.test "
 				+ "https://tracking.example.test/u/signedOpaqueValue Bearer bearer-secret-value "
 				+ "Authorization: Bearer auth-secret-value Authorization: Basic basic-secret-value "
+				+ openCapability + " " + clickCapability + " " + unsubscribeCapability + " "
 				+ "x".repeat(800) + "\r\n";
 		SmtpTransportException error = new SmtpTransportException(
 				SmtpTransportException.FailureCategory.SMTP_REJECTED,
@@ -212,8 +221,32 @@ class SmtpTransportTest {
 				.doesNotContain(
 						"victim.person@research.test", "opaque-secret", "signedOpaqueValue",
 						"用户@例子.公司", "victim@[127.0.0.1]", "quoted user", "bearer-secret-value",
-						"auth-secret-value", "basic-secret-value", "\r", "\n")
+						"auth-secret-value", "basic-secret-value", openCapability, clickCapability,
+						unsubscribeCapability, "campaign-open:v1", "campaign-click:v1",
+						"campaign-unsubscribe:v1", "\r", "\n")
 				.contains("[redacted-address]", "token=[redacted]", "[redacted-url]", "Bearer [redacted]");
+	}
+
+	@Test
+	void redactsEachExactCampaignCapabilityWhenImmediatelyFollowedByCommonPunctuation() {
+		CampaignTrackingSigner signer = new CampaignTrackingSigner(KEY);
+		UUID recipient = UUID.fromString("41000000-0000-0000-0000-00000000000a");
+		Instant expiry = Instant.ofEpochSecond(1_900_000_000L);
+		List<String> capabilities = List.of(
+				signer.issueOpen(recipient, expiry),
+				signer.issueClick(recipient,
+						UUID.fromString("51000000-0000-0000-0000-00000000000b"), expiry),
+				signer.issueUnsubscribe(recipient, expiry));
+
+		for (String capability : capabilities) {
+			for (String punctuation : List.of(".", ":", "-", ",", ";", "!", "?", ")", "]", "}")) {
+				String sanitized = SmtpTransportException.sanitize("450 rejected " + capability + punctuation);
+				assertThat(sanitized).as(capability.substring(0, capability.indexOf('.')) + punctuation)
+						.doesNotContain(capability, "campaign-open:v1", "campaign-click:v1",
+								"campaign-unsubscribe:v1")
+						.contains("[redacted-capability]" + punctuation);
+			}
+		}
 	}
 
 	@Test

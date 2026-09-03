@@ -26,6 +26,12 @@ class MailTrackingPropertiesTest {
 		assertThat(properties(origin).callbackScope()).isEqualTo(MailTrackingModels.CallbackScope.PUBLIC_HTTPS_CONFIGURED);
 	}
 
+	@Test
+	void canonicalizesTheTrailingDotAliasOfAnOrigin() {
+		assertThat(properties("https://Tracking.Example.Org.").publicBaseUrl())
+				.isEqualTo("https://tracking.example.org");
+	}
+
 	@ParameterizedTest
 	@ValueSource(strings = {"", "/relative", "//localhost", "http://example.org", "http://8.8.8.8", "https://example.org/",
 			"https://example.org/path", "https://user:secret@example.org", "https://example.org?token=secret", "https://example.org#fragment",

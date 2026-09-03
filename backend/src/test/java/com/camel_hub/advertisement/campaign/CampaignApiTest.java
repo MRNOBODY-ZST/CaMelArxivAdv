@@ -78,6 +78,25 @@ class CampaignApiTest {
 	}
 
 	@Test
+	void authenticatedRecipientHttpResponseKeepsFrozenCapabilitiesAndBodiesRedacted() {
+		UUID campaignId = UUID.randomUUID();
+		String capability = "campaign-click:v1.capability-must-not-leak";
+		Instant now = Instant.now();
+		var recipient = new CampaignService.RecipientView(
+				UUID.randomUUID(), "Ada", "Paper", "cs.AI", "Research Lab", "GENERATED",
+				"Personal note", null, null, "Paper-specific rationale", null, null, now, now, true);
+		when(service.recipients(campaignId, 1, 20))
+				.thenReturn(Mono.just(PageResponse.of(List.of(recipient), 1, 20, 1)));
+
+		String body = client.get().uri("/api/v1/campaigns/{id}/recipients", campaignId).exchange()
+				.expectStatus().isOk()
+				.expectBody(String.class).returnResult().getResponseBody();
+
+		assertThat(body).contains("\"trackingArtifactsRedacted\":true", "Personal note")
+				.doesNotContain(capability, "/t/o/", "/t/c/", "/u/", "renderedHtml", "renderedText");
+	}
+
+	@Test
 	void mapsOptimisticWorkflowConflictToHttp409() {
 		UUID campaignId = UUID.randomUUID();
 		when(workflow.start(eq(campaignId), eq(ACTOR), any(), eq(7L)))

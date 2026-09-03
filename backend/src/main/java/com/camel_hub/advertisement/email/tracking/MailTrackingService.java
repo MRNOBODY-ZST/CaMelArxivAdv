@@ -1,5 +1,6 @@
 package com.camel_hub.advertisement.email.tracking;
 
+import com.camel_hub.advertisement.campaign.tracking.CampaignRedirectTargetPolicy;
 import com.camel_hub.advertisement.common.api.PageResponse;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
@@ -116,7 +117,8 @@ public final class MailTrackingService {
 					.map(verified -> repository.resolveClick(verified, now)
 							.timeout(CALLBACK_RESOLUTION_TIMEOUT).onErrorResume(ignored -> Mono.empty()))
 					.orElseGet(Mono::empty);
-			return resolution.flatMap(resolved -> (observe
+			return resolution.filter(resolved -> CampaignRedirectTargetPolicy.isSafe(
+					resolved.targetUrl(), properties.publicBaseUrl())).flatMap(resolved -> (observe
 					? repository.observeClick(resolved.linkId(), classifier.classify(headers), now)
 							.timeout(CALLBACK_OBSERVATION_TIMEOUT).onErrorResume(ignored -> Mono.empty())
 					: Mono.<Void>empty()).thenReturn(resolved));

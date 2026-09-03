@@ -16,6 +16,13 @@ public class SmtpTransportException extends RuntimeException {
 			"(?i)\\b(?:proxy-)?authorization\\s*:\\s*(?:bearer|basic)\\s+[^\\s,;]{1,500}");
 	private static final java.util.regex.Pattern BEARER_LIKE = java.util.regex.Pattern.compile(
 			"(?i)\\bbearer\\s+[A-Z0-9._~+/=\\-]{1,500}");
+	private static final String CAMPAIGN_UUID = "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}";
+	private static final String CAMPAIGN_CAPABILITY_TAIL =
+			"[0-9]{1,19}\\.[A-Z0-9_-]{32}\\.[A-Z0-9_-]{43}";
+	private static final java.util.regex.Pattern CAMPAIGN_CAPABILITY = java.util.regex.Pattern.compile(
+			"(?i)campaign-(?:(?:open|unsubscribe):v1\\." + CAMPAIGN_UUID + "\\."
+					+ CAMPAIGN_CAPABILITY_TAIL + "|click:v1\\." + CAMPAIGN_UUID + "\\."
+					+ CAMPAIGN_UUID + "\\." + CAMPAIGN_CAPABILITY_TAIL + ")");
 
 	private final FailureCategory category;
 	private final AttemptStatus status;
@@ -87,6 +94,7 @@ public class SmtpTransportException extends RuntimeException {
 		safe = BEARER_LIKE.matcher(safe).replaceAll("Bearer [redacted]");
 		safe = SECRET_LIKE.matcher(safe).replaceAll("$1=[redacted]");
 		safe = URL_LIKE.matcher(safe).replaceAll("[redacted-url]");
+		safe = CAMPAIGN_CAPABILITY.matcher(safe).replaceAll("[redacted-capability]");
 		return safe.substring(0, Math.min(safe.length(), 500));
 	}
 

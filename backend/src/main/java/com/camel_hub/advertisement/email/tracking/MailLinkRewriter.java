@@ -1,15 +1,14 @@
 package com.camel_hub.advertisement.email.tracking;
 
+import com.camel_hub.advertisement.campaign.tracking.CampaignRedirectTargetPolicy;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 
-import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -18,12 +17,10 @@ import static com.camel_hub.advertisement.email.tracking.MailTrackingModels.Pend
 public final class MailLinkRewriter {
 	private final MailTrackingSigner signer;
 	private final String callbackBaseUrl;
-	private final URI callbackOrigin;
 
 	public MailLinkRewriter(MailTrackingSigner signer, String callbackBaseUrl) {
 		this.signer = signer;
 		this.callbackBaseUrl = callbackBaseUrl;
-		this.callbackOrigin = URI.create(callbackBaseUrl);
 	}
 
 	public RewriteResult rewrite(String html, UUID recordId, Instant expiresAt) {
@@ -50,30 +47,7 @@ public final class MailLinkRewriter {
 	}
 
 	private String eligible(String value) {
-		String target = value == null ? "" : value.strip();
-		if (target.isEmpty() || target.length() > 2048) return null;
-		try {
-			URI uri = URI.create(target);
-			String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
-			if (!uri.isAbsolute() || uri.getHost() == null || uri.getRawUserInfo() != null
-					|| uri.getRawFragment() != null || !(scheme.equals("http") || scheme.equals("https"))) return null;
-			if (uri.getPath().startsWith("/api/v1/template-assets/")) return null;
-			if (sameOrigin(uri, callbackOrigin) && (uri.getPath().equals("/t") || uri.getPath().startsWith("/t/"))) return null;
-			return target;
-		}
-		catch (IllegalArgumentException ignored) {
-			return null;
-		}
-	}
-
-	private boolean sameOrigin(URI left, URI right) {
-		return left.getScheme().equalsIgnoreCase(right.getScheme())
-				&& left.getHost().equalsIgnoreCase(right.getHost()) && normalizedPort(left) == normalizedPort(right);
-	}
-
-	private int normalizedPort(URI uri) {
-		if (uri.getPort() >= 0) return uri.getPort();
-		return uri.getScheme().equalsIgnoreCase("https") ? 443 : 80;
+		return CampaignRedirectTargetPolicy.isSafe(value, callbackBaseUrl) ? value : null;
 	}
 
 	private String boundedLabel(String value) {

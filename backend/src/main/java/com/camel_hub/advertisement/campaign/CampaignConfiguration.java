@@ -2,6 +2,7 @@ package com.camel_hub.advertisement.campaign;
 
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryProperties;
+import com.camel_hub.advertisement.campaign.tracking.CampaignPublicContentRedactor;
 import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,9 +44,11 @@ public class CampaignConfiguration {
 	@ConditionalOnProperty(prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
 	CampaignService campaignService(
 			CampaignRepository repository, SegmentRepository segments, PersonalizationProperties properties,
-			ObjectMapper objectMapper, TransactionalOperator transactions
+			ObjectMapper objectMapper, TransactionalOperator transactions,
+			MailTrackingProperties trackingProperties
 	) {
-		return new CampaignService(repository, segments, properties, objectMapper, transactions);
+		return new CampaignService(repository, segments, properties, objectMapper, transactions,
+				new CampaignPublicContentRedactor(trackingProperties.publicBaseUrl()));
 	}
 
 	@Bean
