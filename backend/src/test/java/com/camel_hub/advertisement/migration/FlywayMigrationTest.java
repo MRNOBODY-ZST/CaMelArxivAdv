@@ -154,6 +154,11 @@ class FlywayMigrationTest {
 		assertColumn("campaign_safety_events", "minute_bucket", "bigint", null, true);
 		assertColumn("campaign_safety_runs", "destination_hmac", "bytea", null, false);
 		assertColumn("campaign_safety_runs", "destination_masked", "character varying", 320, false);
+		assertColumn("campaign_safety_runs", "from_name_snapshot", "character varying", 160, false);
+		assertColumn("campaign_safety_runs", "from_email_snapshot", "character varying", 320, false);
+		assertColumn("campaign_safety_runs", "reply_to_snapshot", "character varying", 320, false);
+		assertColumn("campaign_safety_runs", "tracking_opens_enabled", "boolean", null, false);
+		assertColumn("campaign_safety_runs", "tracking_clicks_enabled", "boolean", null, false);
 
 		Map<String, String> constraints = constraintDefinitions();
 		assertDefinitions(constraints, Map.ofEntries(
@@ -170,6 +175,8 @@ class FlywayMigrationTest {
 		assertDefinitions(indexes, Map.ofEntries(
 				Map.entry("ix_campaign_recipients_rfc_message_id", List.of("CREATE UNIQUE INDEX", "(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
 				Map.entry("ix_campaign_safety_messages_rfc_message_id", List.of("CREATE UNIQUE INDEX", "(rfc_message_id)", "WHERE (rfc_message_id IS NOT NULL)")),
+				Map.entry("uk_campaign_safety_one_active_run", List.of(
+						"CREATE UNIQUE INDEX", "(campaign_id)", "QUEUED", "RUNNING")),
 				Map.entry("uk_campaign_safety_open_token", List.of("CREATE UNIQUE INDEX", "(safety_message_id)", "WHERE ((token_type)::text = 'OPEN'::text)")),
 				Map.entry("uk_campaign_safety_unsubscribe_token", List.of("CREATE UNIQUE INDEX", "(safety_message_id)", "WHERE ((token_type)::text = 'UNSUBSCRIBE'::text)")),
 				Map.entry("uk_campaign_safety_event_callback_minute", List.of("CREATE UNIQUE INDEX", "(safety_link_id, fingerprint_hash, minute_bucket)", "WHERE ((event_type)::text = ANY"))));
@@ -225,9 +232,109 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-				assertThat(latest.migrate().migrationsExecuted).isEqualTo(8);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(9);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
+			dropSchema(schema);
+		}
+	}
+
+	@Test
+	void upgradesV16SafetyRunsByBackfillingImmutableSenderAndTrackingSnapshots() throws SQLException {
+		String schema = "safety_upgrade_" + UUID.randomUUID().toString().replace("-", "");
+		Flyway throughV16 = Flyway.configure()
+				.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+				.schemas(schema)
+				.defaultSchema(schema)
+				.locations("classpath:db/migration")
+				.target("16")
+				.load();
+
+		try {
+			assertThat(throughV16.migrate().targetSchemaVersion.toString()).isEqualTo("16");
+			UUID runId;
+			try (Connection connection = connection(schema); var statement = connection.createStatement()) {
+				statement.executeUpdate("""
+						INSERT INTO smtp_accounts (
+						    id, name, host, port, tls_mode, from_email, default_from_name, reply_to,
+						    per_minute_limit, per_hour_limit, per_day_limit, per_domain_hour_limit
+						) VALUES (
+						    '72000000-0000-0000-0000-000000000017', 'Safety V16 SMTP', 'localhost', 2525,
+						    'PLAIN_LOCAL_ONLY', 'account@example.test', 'Account Sender', 'account-reply@example.test',
+						    10, 100, 1000, 100
+						)
+						""");
+				statement.executeUpdate("""
+						INSERT INTO email_templates (id, name)
+						VALUES ('70000000-0000-0000-0000-000000000017', 'Safety V16 Template')
+						""");
+				statement.executeUpdate("""
+						INSERT INTO email_template_versions (
+						    id, template_id, version_number, subject_template, from_name_template,
+						    reply_to, html_content, text_content, content_size_bytes
+						) VALUES (
+						    '70100000-0000-0000-0000-000000000017', '70000000-0000-0000-0000-000000000017',
+						    1, 'Subject', 'Template Sender', 'template-reply@example.test', '<p>Body</p>', 'Body', 4
+						)
+						""");
+				statement.executeUpdate("""
+						INSERT INTO campaigns (
+						    id, name, purpose, template_id, template_version_id, smtp_account_id,
+						    from_name, from_email, reply_to, tracking_opens_enabled, tracking_clicks_enabled
+						) VALUES (
+						    '50000000-0000-0000-0000-000000000017', 'Safety V16 Campaign', 'migration test',
+						    '70000000-0000-0000-0000-000000000017', '70100000-0000-0000-0000-000000000017',
+						    '72000000-0000-0000-0000-000000000017', 'Frozen Sender', 'frozen@example.test',
+						    'frozen-reply@example.test', true, false
+						)
+						""");
+				try (ResultSet result = statement.executeQuery("""
+						INSERT INTO campaign_safety_runs (
+						    campaign_id, smtp_account_id, recipient_limit, destination_hmac, destination_masked
+						) VALUES (
+						    '50000000-0000-0000-0000-000000000017', '72000000-0000-0000-0000-000000000017',
+						    1, decode(repeat('a', 64), 'hex'), 's***@example.test'
+						) RETURNING id
+						""")) {
+					assertThat(result.next()).isTrue();
+					runId = result.getObject(1, UUID.class);
+				}
+			}
+
+			Flyway latest = Flyway.configure()
+					.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+					.schemas(schema)
+					.defaultSchema(schema)
+					.locations("classpath:db/migration")
+					.load();
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+			try (Connection connection = connection(schema);
+				 var statement = connection.prepareStatement("""
+						SELECT from_name_snapshot, from_email_snapshot, reply_to_snapshot,
+						       tracking_opens_enabled, tracking_clicks_enabled
+						FROM campaign_safety_runs WHERE id = ?
+						""")) {
+				statement.setObject(1, runId);
+				try (ResultSet result = statement.executeQuery()) {
+					assertThat(result.next()).isTrue();
+					assertThat(result.getString("from_name_snapshot")).isEqualTo("Frozen Sender");
+					assertThat(result.getString("from_email_snapshot")).isEqualTo("frozen@example.test");
+					assertThat(result.getString("reply_to_snapshot")).isEqualTo("frozen-reply@example.test");
+					assertThat(result.getBoolean("tracking_opens_enabled")).isTrue();
+					assertThat(result.getBoolean("tracking_clicks_enabled")).isFalse();
+				}
+			}
+			try (Connection connection = connection(schema); var statement = connection.createStatement()) {
+				assertThatThrownBy(() -> statement.executeUpdate(
+						"UPDATE campaign_safety_runs SET from_email_snapshot = NULL WHERE id = '" + runId + "'"))
+						.isInstanceOf(SQLException.class);
+				assertThatThrownBy(() -> statement.executeUpdate(
+						"UPDATE campaign_safety_runs SET from_name_snapshot = E'unsafe\\nname' WHERE id = '" + runId + "'"))
+						.isInstanceOf(SQLException.class);
+			}
+		}
+		finally {
 			dropSchema(schema);
 		}
 	}
@@ -287,7 +394,9 @@ class FlywayMigrationTest {
 		assertThat(columnNames("recipient_delivery_cooldowns")).containsExactlyInAnyOrder("email_hmac", "last_smtp_accepted_at", "updated_at");
 		assertThat(columnNames("campaign_safety_runs")).containsExactlyInAnyOrder(
 				"id", "campaign_id", "smtp_account_id", "created_by", "recipient_limit", "status", "started_at", "completed_at",
-				"lock_version", "created_at", "destination_hmac", "destination_masked");
+				"lock_version", "created_at", "destination_hmac", "destination_masked",
+				"from_name_snapshot", "from_email_snapshot", "reply_to_snapshot",
+				"tracking_opens_enabled", "tracking_clicks_enabled");
 		assertThat(columnNames("campaign_safety_messages")).containsExactlyInAnyOrder(
 				"id", "run_id", "campaign_recipient_id", "smtp_account_id", "status", "delivery_lease_hash", "delivery_lease_expires_at",
 				"next_attempt_at", "attempt_count", "rfc_message_id", "rendered_subject", "rendered_html", "rendered_text", "created_at",
@@ -334,6 +443,8 @@ class FlywayMigrationTest {
 				Map.entry("ck_campaign_safety_run_limit", List.of("recipient_limit >= 1", "recipient_limit <= 20")),
 				Map.entry("ck_campaign_safety_run_status", List.of("QUEUED", "RUNNING", "COMPLETED", "PARTIALLY_FAILED", "FAILED", "CANCELED")),
 				Map.entry("ck_campaign_safety_run_lock_version", List.of("lock_version >= 0")),
+				Map.entry("ck_campaign_safety_sender_snapshot", List.of(
+						"from_name_snapshot", "from_email_snapshot", "reply_to_snapshot", "[:cntrl:]")),
 				Map.entry("ck_campaign_safety_message_status", List.of("QUEUED", "CONNECTING", "SMTP_ACCEPTED", "TEMPORARY_FAILURE", "PERMANENT_FAILURE", "CANCELED", "OUTCOME_UNKNOWN")),
 				Map.entry("ck_campaign_safety_message_lease", List.of("delivery_lease_hash IS NULL", "delivery_lease_expires_at IS NULL", "octet_length(delivery_lease_hash) = 32")),
 				Map.entry("ck_campaign_safety_message_attempt_count", List.of("attempt_count >= 0", "attempt_count <= 3")),
@@ -505,8 +616,12 @@ class FlywayMigrationTest {
 				""".formatted(suffix, templateId, templateVersionId, smtpAccountId));
 		UUID campaignRecipientId = newCampaignRecipient(campaignId);
 		UUID runId = queryUuid("""
-				INSERT INTO campaign_safety_runs (campaign_id, smtp_account_id, recipient_limit, destination_hmac, destination_masked)
-				VALUES ('%s', '%s', 1, decode(repeat('a', 64), 'hex'), 's***@example.test')
+				INSERT INTO campaign_safety_runs (
+				    campaign_id, smtp_account_id, recipient_limit, destination_hmac, destination_masked,
+				    from_name_snapshot, from_email_snapshot, reply_to_snapshot,
+				    tracking_opens_enabled, tracking_clicks_enabled)
+				VALUES ('%s', '%s', 1, decode(repeat('a', 64), 'hex'), 's***@example.test',
+				        'Safety Test', 'from@example.test', 'reply@example.test', false, false)
 				RETURNING id
 				""".formatted(campaignId, smtpAccountId));
 		UUID safetyMessageId = queryUuid("""
@@ -590,6 +705,12 @@ class FlywayMigrationTest {
 
 	private Connection connection() throws SQLException {
 		return DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+	}
+
+	private Connection connection(String schema) throws SQLException {
+		Connection connection = connection();
+		connection.setSchema(schema);
+		return connection;
 	}
 
 	private record SafetyFixture(UUID campaignId, UUID campaignRecipientId, UUID runId, UUID safetyMessageId, UUID smtpAccountId) {

@@ -46,8 +46,8 @@ class CampaignDeliveryPropertiesTest {
 	@Test
 	void validatesSafetyRecipientOnlyWhenSafetyModeIsEnabled() {
 		assertThat(new CampaignSafetyProperties(false, "", 20).validatedRecipient()).isBlank();
-		assertThat(new CampaignSafetyProperties(true, "zstbmw@163.com", 20).validatedRecipient())
-				.isEqualTo("zstbmw@163.com");
+		assertThat(new CampaignSafetyProperties(true, "fixed@example.test", 20).validatedRecipient())
+				.isEqualTo("fixed@example.test");
 		for (int maximumRecipients : new int[] {0, 21}) {
 			assertThatThrownBy(() -> new CampaignSafetyProperties(false, "", maximumRecipients))
 					.isInstanceOf(IllegalArgumentException.class);
@@ -56,6 +56,29 @@ class CampaignDeliveryPropertiesTest {
 			assertThatThrownBy(() -> new CampaignSafetyProperties(true, recipient, 20).validatedRecipient())
 					.isInstanceOf(IllegalArgumentException.class);
 		}
+	}
+
+	@Test
+	void canonicalizesOnlyASingleStrictSafetyMailbox() {
+		assertThat(new CampaignSafetyProperties(true, "  Fixed.Inbox@EXAMPLE.COM  ", 20)
+				.validatedRecipient()).isEqualTo("Fixed.Inbox@example.com");
+
+		for (String unsafe : new String[] {
+				"Safety Team <fixed@example.com>",
+				"fixed@example.com,other@example.com",
+				"fixed@example.com\r\nBcc: other@example.com",
+				"fixed@example", "fixed@-example.com", "fixed@example..com"
+		}) {
+			assertThatThrownBy(() -> new CampaignSafetyProperties(true, unsafe, 20).validatedRecipient())
+					.as("reject %s", unsafe.replaceAll("[\\r\\n]", ""))
+					.isInstanceOf(IllegalArgumentException.class);
+		}
+	}
+
+	@Test
+	void disabledModeStillRejectsAMalformedConfiguredMailbox() {
+		assertThatThrownBy(() -> new CampaignSafetyProperties(false, "not-an-address", 20))
+				.isInstanceOf(IllegalArgumentException.class);
 	}
 
 	private CampaignDeliveryProperties delivery(

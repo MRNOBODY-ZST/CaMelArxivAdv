@@ -116,7 +116,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository delivery = repository();
 		CampaignTrackingService initialTracking = tracking(
 				Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(13));
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		initialTracking.prepare(first).block();
 		delivery.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				new SmtpTransportException(
@@ -156,7 +156,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		Duration ttl = Duration.ofMinutes(13);
 		CampaignTrackingSigner signer = new CampaignTrackingSigner(TRACKING_KEY);
 		CampaignTrackingService initialTracking = tracking(Clock.fixed(NOW, ZoneOffset.UTC), ttl);
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		CampaignOutboundPreparer.PreparedOutbound initial = initialTracking.prepare(first).block();
 		Capabilities old = capabilities(initial.html());
 		delivery.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
@@ -196,7 +196,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository delivery = repository();
 		Duration ttl = Duration.ofMinutes(13);
 		CampaignTrackingService initialTracking = tracking(Clock.fixed(NOW, ZoneOffset.UTC), ttl);
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		initialTracking.prepare(first).block();
 		delivery.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				new SmtpTransportException(
@@ -354,7 +354,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository delivery = repository();
 		MutableClock clock = new MutableClock(NOW);
 		CampaignTrackingService tracking = tracking(clock, Duration.ofMinutes(13));
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		tracking.prepare(first).block();
 		delivery.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				new SmtpTransportException(
@@ -369,7 +369,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 				.bind("attempt", first.attemptId()).fetch().rowsUpdated().block();
 		String before = frozenSnapshot(fixture.recipientId());
 		clock.set(NOW.plus(Duration.ofDays(1)));
-		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNext(clock.instant()).block();
+		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
 				.isInstanceOf(IllegalArgumentException.class)
@@ -385,7 +385,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		MutableClock clock = new MutableClock(NOW);
 		CampaignTrackingSigner signer = new CampaignTrackingSigner(TRACKING_KEY);
 		CampaignTrackingService tracking = tracking(clock, Duration.ofMinutes(13));
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		CampaignOutboundPreparer.PreparedOutbound prepared = tracking.prepare(first).block();
 		Capabilities original = capabilities(new SmtpTransport.OutboundMessage(
 				"recipient@example.invalid", prepared.subject(), "Researcher", "reply@example.invalid",
@@ -409,7 +409,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 						450, "450 retry later", true), NOW).block();
 		String before = frozenSnapshot(fixture.recipientId());
 		clock.set(NOW.plus(Duration.ofDays(1)));
-		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNext(clock.instant()).block();
+		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
 				.isInstanceOf(IllegalArgumentException.class)
@@ -424,7 +424,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository delivery = repository();
 		MutableClock clock = new MutableClock(NOW);
 		CampaignTrackingService tracking = tracking(clock, Duration.ofMinutes(13));
-		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = delivery.claimNextProduction(NOW).block();
 		tracking.prepare(first).block();
 		delivery.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				new SmtpTransportException(
@@ -437,7 +437,7 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 				""").bind("recipient", fixture.recipientId()).fetch().rowsUpdated().block();
 		String before = frozenSnapshot(fixture.recipientId());
 		clock.set(NOW.plus(Duration.ofDays(1)));
-		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNext(clock.instant()).block();
+		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
 				.isInstanceOf(IllegalArgumentException.class)

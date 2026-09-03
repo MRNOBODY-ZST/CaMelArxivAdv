@@ -1,5 +1,7 @@
 package com.camel_hub.advertisement.campaign.delivery;
 
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
@@ -20,6 +22,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CampaignDeliverySchedulerTest extends CampaignDeliveryDatabaseTestSupport {
@@ -60,7 +63,7 @@ class CampaignDeliverySchedulerTest extends CampaignDeliveryDatabaseTestSupport 
 		sql("UPDATE campaign_recipients SET next_attempt_at = TIMESTAMPTZ '" + NOW.minus(Duration.ofMinutes(5))
 				+ "' WHERE id = '" + expiredRecipient + "'");
 		CampaignDeliveryRepository.ProductionClaim expired = repository
-				.claimNext(NOW.minus(Duration.ofMinutes(3))).block();
+				.claimNextProduction(NOW.minus(Duration.ofMinutes(3))).block();
 		assertThat(expired).isNotNull();
 
 		AtomicInteger sends = new AtomicInteger();
@@ -137,6 +140,61 @@ class CampaignDeliverySchedulerTest extends CampaignDeliveryDatabaseTestSupport 
 		assertThat(observed.await(5, TimeUnit.SECONDS)).isTrue();
 		assertThat(reported).hasValue("IllegalStateException");
 		assertThat(reported.get()).doesNotContain("password", "must-never-be-logged");
+	}
+
+	@Test
+	void schedulerReconcilesSafetyLeaseAndTerminalAggregates() {
+		CampaignDeliveryRepository production = mock(CampaignDeliveryRepository.class);
+		CampaignSafetyRepository safety = mock(CampaignSafetyRepository.class);
+		CampaignDeliveryExecutor executor = mock(CampaignDeliveryExecutor.class);
+		when(production.activateDueCampaigns(NOW)).thenReturn(Mono.just(0));
+		when(production.reconcileCanceledRecipients(NOW)).thenReturn(Mono.just(0));
+		when(production.reconcileExpiredLeases(NOW)).thenReturn(Mono.just(0));
+		when(production.reconcileUndeliverable(NOW)).thenReturn(Mono.just(0));
+		when(production.reconcileCampaigns(NOW)).thenReturn(Mono.just(0));
+		when(safety.reconcileExpiredLeases(NOW, DELIVERY_PROPERTIES.batchSize())).thenReturn(Mono.just(2));
+		when(safety.reconcileAggregates(NOW, DELIVERY_PROPERTIES.batchSize())).thenReturn(Mono.just(3));
+		when(executor.pumpOnce()).thenReturn(Mono.just(CampaignDeliveryExecutor.PumpResult.NO_WORK));
+		CampaignDeliveryScheduler scheduler = new CampaignDeliveryScheduler(
+				production, safety, executor, DELIVERY_PROPERTIES, Clock.fixed(NOW, ZoneOffset.UTC));
+
+		CampaignDeliveryScheduler.SchedulerRun result = scheduler.runOnce().block();
+
+		assertThat(result.reconciled()).isEqualTo(5);
+		assertThat(result.pumped()).isZero();
+		verify(safety).reconcileExpiredLeases(NOW, DELIVERY_PROPERTIES.batchSize());
+		verify(safety).reconcileAggregates(NOW, DELIVERY_PROPERTIES.batchSize());
+	}
+
+	@Test
+	void disabledSafetyCancellationUnblocksAndSendsProductionInTheSameSchedulerTick() {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "same-tick-after-disable@research.test");
+		UUID safetyMessage = insertDueSafetyRun(recipientId, "fixed@example.test");
+		UUID runId = uuid("SELECT run_id FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'");
+		CampaignSafetyRepository safetyRepository = new CampaignSafetyRepository(
+				databaseClient, transactions, new ObjectMapper().findAndRegisterModules());
+		AtomicInteger sends = new AtomicInteger();
+		CampaignDeliveryExecutor executor = new CampaignDeliveryExecutor(
+				repository, validPreparer(), contactCrypto, (account, message) -> {
+					sends.incrementAndGet();
+					return new SmtpTransport.SmtpOutcome(
+							AttemptStatus.SMTP_ACCEPTED, TransportStage.POST_DATA, 250, "250 queued");
+				}, Clock.fixed(NOW, ZoneOffset.UTC));
+		CampaignDeliveryScheduler scheduler = new CampaignDeliveryScheduler(
+				repository, safetyRepository, new CampaignSafetyProperties(false, "", 20),
+				executor, DELIVERY_PROPERTIES, Clock.fixed(NOW, ZoneOffset.UTC));
+
+		CampaignDeliveryScheduler.SchedulerRun result = scheduler.runOnce().block();
+
+		assertThat(result.pumped()).isEqualTo(1);
+		assertThat(sends).hasValue(1);
+		assertThat(text("SELECT status FROM campaign_safety_runs WHERE id = '" + runId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + recipientId + "'"))
+				.isEqualTo("SMTP_ACCEPTED");
 	}
 
 	private CampaignOutboundPreparer validPreparer() {

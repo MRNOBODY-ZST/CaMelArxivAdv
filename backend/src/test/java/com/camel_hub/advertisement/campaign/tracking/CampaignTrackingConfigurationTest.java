@@ -123,6 +123,20 @@ class CampaignTrackingConfigurationTest {
 	}
 
 	@Test
+	void threeMinuteTokensAcceptTheMinimumLegalTwoAttemptRetryConfiguration() {
+		context.withBean(CampaignDeliveryProperties.class, () -> new CampaignDeliveryProperties(
+				true, 10, Duration.ofSeconds(30), Duration.ofDays(180), 2,
+				Duration.ofMinutes(1), Duration.ofMinutes(5), Duration.ofSeconds(1)))
+				.withPropertyValues(
+						"spring.profiles.active=mail-worker", "app.campaign-delivery.enabled=true",
+						"app.mail-tracking.enabled=true", "app.mail-tracking.token-ttl=PT3M",
+						"app.mail-tracking.public-base-url=https://tracking.example.test",
+						"app.mail-tracking.signing-key-base64="
+								+ CampaignTrackingDatabaseTestSupport.TRACKING_KEY)
+				.run(application -> assertThat(application).hasNotFailed());
+	}
+
+	@Test
 	void realTrackingAndDeliveryConfigurationsActivateExactlyOneWorkerRuntimeWithoutControllers() {
 		new ApplicationContextRunner()
 				.withUserConfiguration(CampaignTrackingConfiguration.class,

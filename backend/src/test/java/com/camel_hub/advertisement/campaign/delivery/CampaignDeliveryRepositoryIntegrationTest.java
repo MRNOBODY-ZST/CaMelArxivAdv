@@ -2,11 +2,17 @@ package com.camel_hub.advertisement.campaign.delivery;
 
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.contact.config.ContactDataProtectionProperties;
 import com.camel_hub.advertisement.contact.security.ContactCrypto;
+import com.camel_hub.advertisement.email.smtp.SmtpProperties;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
+import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
 import com.camel_hub.advertisement.messaging.OutboxRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.spi.ConnectionFactories;
 import io.r2dbc.spi.ConnectionFactory;
 import org.flywaydb.core.Flyway;
@@ -47,7 +53,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "author-one@research.test");
 
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW).block();
 
 		assertThat(claim).isNotNull();
 		assertThat(claim.recipientId()).isEqualTo(recipientId);
@@ -63,6 +69,63 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		assertThat(text("SELECT status FROM delivery_attempts WHERE campaign_recipient_id = '" + recipientId + "'"))
 				.isEqualTo("CONNECTING");
 		assertThat(repository.claimNext(NOW).block()).isNull();
+	}
+
+	@Test
+	void disablingSafetyDurablyCancelsQueuedRunAndImmediatelyUnblocksProductionClaim() {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "disabled-safety-gate@research.test");
+		UUID safetyMessage = insertDueSafetyRun(recipientId, "fixed@example.test");
+		UUID runId = uuid("SELECT run_id FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'");
+		CampaignSafetyRepository safetyRepository = new CampaignSafetyRepository(
+				databaseClient, transactions, new ObjectMapper().findAndRegisterModules());
+
+		assertThat(repository.claimNextProduction(NOW).block()).isNull();
+		assertThat(safetyRepository.cancelActiveRunsBecauseDisabled(NOW, 10).block()).isEqualTo(1);
+		assertThat(text("SELECT status FROM campaign_safety_runs WHERE id = '" + runId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(count("audit_logs WHERE action = 'CAMPAIGN_SAFETY_DISABLED_CANCELED' "
+				+ "AND resource_id = '" + runId + "'")).isEqualTo(1);
+		assertThat(repository.claimNextProduction(NOW).block()).extracting(
+				CampaignDeliveryRepository.ProductionClaim::recipientId).isEqualTo(recipientId);
+		assertThat(safetyRepository.cancelActiveRunsBecauseDisabled(NOW, 10).block()).isZero();
+		assertThat(count("audit_logs WHERE action = 'CAMPAIGN_SAFETY_DISABLED_CANCELED' "
+				+ "AND resource_id = '" + runId + "'")).isEqualTo(1);
+	}
+
+	@Test
+	void disablingSafetyCancelsAnActiveRunWhoseCreatingUserNoLongerExists() {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "deleted-creator-gate@research.test");
+		UUID safetyMessage = insertDueSafetyRun(recipientId, "fixed@example.test");
+		UUID runId = uuid("SELECT run_id FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'");
+		UUID deletedCreator = UUID.randomUUID();
+		databaseClient.sql("""
+				INSERT INTO users (id, username, email, password_hash, display_name)
+				VALUES (:id, :username, :email, 'hash', 'Deleted safety creator')
+				""").bind("id", deletedCreator).bind("username", "deleted-safety-" + deletedCreator)
+				.bind("email", deletedCreator + "@example.invalid").fetch().rowsUpdated().block();
+		databaseClient.sql("UPDATE campaign_safety_runs SET created_by = :creator WHERE id = :run")
+				.bind("creator", deletedCreator).bind("run", runId).fetch().rowsUpdated().block();
+		databaseClient.sql("DELETE FROM users WHERE id = :creator")
+				.bind("creator", deletedCreator).fetch().rowsUpdated().block();
+		assertThat(count("campaign_safety_runs WHERE id = '" + runId + "' AND created_by IS NULL"))
+				.isEqualTo(1);
+		CampaignSafetyRepository safetyRepository = new CampaignSafetyRepository(
+				databaseClient, transactions, new ObjectMapper().findAndRegisterModules());
+
+		assertThat(repository.claimNextProduction(NOW).block()).isNull();
+		assertThat(safetyRepository.cancelActiveRunsBecauseDisabled(NOW, 10).block()).isEqualTo(1);
+		assertThat(text("SELECT status FROM campaign_safety_runs WHERE id = '" + runId + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_safety_messages WHERE id = '" + safetyMessage + "'"))
+				.isEqualTo("CANCELED");
+		assertThat(count("audit_logs WHERE action = 'CAMPAIGN_SAFETY_DISABLED_CANCELED' "
+				+ "AND resource_id = '" + runId + "' AND actor_user_id IS NULL")).isEqualTo(1);
+		assertThat(repository.claimNextProduction(NOW).block()).extracting(
+				CampaignDeliveryRepository.ProductionClaim::recipientId).isEqualTo(recipientId);
 	}
 
 	@ParameterizedTest(name = "{0} rolling limit defers without reserving")
@@ -117,6 +180,49 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	}
 
 	@Test
+	void rateLimitedSafetyWorkNeverFallsThroughToMutateTheProductionQueue() {
+		setLimits(1, 100, 1000, 100);
+		UUID safetyCampaign = insertCampaign("DRAFT");
+		UUID safetySource = insertEligibleRecipient(safetyCampaign, "source@authors.test");
+		UUID safetyMessage = insertDueSafetyRun(safetySource, "fixed@research.test");
+		UUID productionCampaign = insertCampaign("RUNNING");
+		UUID productionRecipient = insertEligibleRecipient(productionCampaign, "production@authors.test");
+		insertProductionReservation("shared-capacity", "other.test", NOW.minusSeconds(20), "SMTP_ACCEPTED");
+		String productionBefore = text("SELECT to_jsonb(r)::text FROM campaign_recipients r WHERE id = '"
+				+ productionRecipient + "'");
+
+		assertThat(safetyRepository("fixed@research.test").claimNext(NOW).block()).isNull();
+
+		assertThat(instant("SELECT next_attempt_at FROM campaign_safety_messages WHERE id = '"
+				+ safetyMessage + "'")).isEqualTo(NOW.plusSeconds(40));
+		assertThat(text("SELECT to_jsonb(r)::text FROM campaign_recipients r WHERE id = '"
+				+ productionRecipient + "'")).isEqualTo(productionBefore);
+		assertThat(count("campaign_safety_attempts")).isZero();
+	}
+
+	@ParameterizedTest(name = "production history enforces the safety {0} window")
+	@MethodSource("rollingLimits")
+	void productionReservationsEnforceEveryRollingWindowOnSafetyClaims(
+			String window, int minute, int hour, int day, int domainHour,
+			int existing, Duration oldestAge, Duration spacing, Duration windowLength
+	) {
+		setLimits(minute, hour, day, domainHour);
+		UUID campaignId = insertCampaign("DRAFT");
+		UUID source = insertEligibleRecipient(campaignId, "source@research.test");
+		UUID safetyMessage = insertDueSafetyRun(source, "fixed@research.test");
+		for (int index = 0; index < existing; index++) {
+			insertProductionReservation("safety-" + window + "-" + index, "research.test",
+					NOW.minus(oldestAge).plus(spacing.multipliedBy(index)), "SMTP_ACCEPTED");
+		}
+
+		assertThat(safetyRepository("fixed@research.test").claimNext(NOW).block()).isNull();
+
+		assertThat(instant("SELECT next_attempt_at FROM campaign_safety_messages WHERE id = '"
+				+ safetyMessage + "'")).isEqualTo(NOW.minus(oldestAge).plus(windowLength));
+		assertThat(count("campaign_safety_attempts")).isZero();
+	}
+
+	@Test
 	void usesTheLatestReleaseWhenSeveralRateWindowsAreSaturated() {
 		setLimits(2, 3, 1000, 100);
 		UUID campaignId = insertCampaign("RUNNING");
@@ -141,7 +247,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 			insertProductionReservation("ignored-" + status, "research.test", NOW.minusSeconds(10), status);
 		}
 
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW).block();
 
 		assertThat(claim).isNotNull();
 		assertThat(claim.recipientId()).isEqualTo(recipientId);
@@ -158,7 +264,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		assertThat(repository.claimNext(NOW).block()).isNull();
 		Instant release = NOW.plusSeconds(10);
 		assertThat(repository.claimNext(release.minusNanos(1)).block()).isNull();
-		CampaignDeliveryRepository.ProductionClaim atBoundary = repository.claimNext(release).block();
+		CampaignDeliveryRepository.ProductionClaim atBoundary = repository.claimNextProduction(release).block();
 
 		assertThat(atBoundary).isNotNull();
 		assertThat(atBoundary.recipientId()).isEqualTo(recipientId);
@@ -277,7 +383,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 				+ "VALUES ('" + unrelatedRun + "', '" + PAPER + "', 'new-parser', 'SUCCEEDED', TIMESTAMPTZ '"
 				+ NOW.plusSeconds(1) + "', TIMESTAMPTZ '" + NOW.plusSeconds(2) + "')");
 
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW.plusSeconds(3)).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW.plusSeconds(3)).block();
 
 		assertThat(claim).isNotNull();
 		assertThat(claim.recipientId()).isEqualTo(recipientId);
@@ -328,8 +434,8 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		UUID expiredCampaign = insertCampaign("RUNNING");
 		UUID expiredOne = insertEligibleRecipient(expiredCampaign, "expired-one@research.test");
 		UUID expiredTwo = insertEligibleRecipient(expiredCampaign, "expired-two@research.test");
-		CampaignDeliveryRepository.ProductionClaim firstClaim = bounded.claimNext(NOW).block();
-		CampaignDeliveryRepository.ProductionClaim secondClaim = bounded.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim firstClaim = bounded.claimNextProduction(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim secondClaim = bounded.claimNextProduction(NOW).block();
 		assertThat(java.util.List.of(firstClaim.recipientId(), secondClaim.recipientId()))
 				.containsExactlyInAnyOrder(expiredOne, expiredTwo);
 		assertThat(bounded.reconcileExpiredLeases(NOW.plus(Duration.ofMinutes(3))).block()).isEqualTo(1);
@@ -365,7 +471,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void cooldownSentinelDoesNotBlockFailuresOrExplicitRetryButAcceptanceDoes() {
 		UUID firstCampaign = insertCampaign("RUNNING");
 		UUID firstRecipient = insertEligibleRecipient(firstCampaign, "cooldown-semantics@research.test");
-		CampaignDeliveryRepository.ProductionClaim first = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = repository.claimNextProduction(NOW).block();
 		repository.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				temporary(450, "450 later"), NOW).block();
 		assertThat(instant("SELECT last_smtp_accepted_at FROM recipient_delivery_cooldowns WHERE email_hmac = "
@@ -376,7 +482,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		UUID otherRecipient = cloneRecipientToCampaign(firstRecipient, otherCampaign);
 		sql("UPDATE campaign_recipients SET next_attempt_at = TIMESTAMPTZ '" + NOW
 				+ "' WHERE id = '" + otherRecipient + "'");
-		CampaignDeliveryRepository.ProductionClaim other = repository.claimNext(NOW.plusSeconds(1)).block();
+		CampaignDeliveryRepository.ProductionClaim other = repository.claimNextProduction(NOW.plusSeconds(1)).block();
 		assertThat(other).isNotNull();
 		assertThat(other.recipientId()).isEqualTo(otherRecipient);
 		repository.completeFailure(other.recipientId(), other.attemptId(), other.leaseDigest(),
@@ -384,7 +490,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 						AttemptStatus.PERMANENT_FAILURE, TransportStage.RCPT_TO, 550, "550 rejected", false),
 				NOW.plusSeconds(1)).block();
 
-		CampaignDeliveryRepository.ProductionClaim retry = repository.claimNext(NOW.plus(Duration.ofMinutes(1))).block();
+		CampaignDeliveryRepository.ProductionClaim retry = repository.claimNextProduction(NOW.plus(Duration.ofMinutes(1))).block();
 		assertThat(retry).isNotNull();
 		assertThat(retry.recipientId()).isEqualTo(firstRecipient);
 		repository.completeAccepted(retry.recipientId(), retry.attemptId(), retry.leaseDigest(),
@@ -404,7 +510,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void unknownOutcomeConservativelyBlocksTheSameAddressUntilAdministrativeResolution() {
 		UUID firstCampaign = insertCampaign("RUNNING");
 		UUID firstRecipient = insertEligibleRecipient(firstCampaign, "unknown-cooldown@research.test");
-		CampaignDeliveryRepository.ProductionClaim first = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = repository.claimNextProduction(NOW).block();
 		repository.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				new SmtpTransportException(
 						SmtpTransportException.FailureCategory.UNEXPECTED_FAILURE,
@@ -425,7 +531,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void unresolvedAddressCannotStarveUnrelatedDeliverableCampaigns() {
 		UUID unknownCampaign = insertCampaign("RUNNING");
 		UUID unknownRecipient = insertEligibleRecipient(unknownCampaign, "unknown-starvation@research.test");
-		CampaignDeliveryRepository.ProductionClaim unknown = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim unknown = repository.claimNextProduction(NOW).block();
 		repository.completeFailure(unknown.recipientId(), unknown.attemptId(), unknown.leaseDigest(),
 				new SmtpTransportException(
 						SmtpTransportException.FailureCategory.UNEXPECTED_FAILURE,
@@ -441,7 +547,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		cloneRecipientToCampaign(unknownRecipient, blockedCampaign);
 		UUID deliverable = insertEligibleRecipient(deliverableCampaign, "unrelated@research.test");
 
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW.plusSeconds(1)).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW.plusSeconds(1)).block();
 
 		assertThat(claim).isNotNull();
 		assertThat(claim.recipientId()).isEqualTo(deliverable);
@@ -451,7 +557,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void retriesOnlyExplicitFourHundredsAtOneAndFiveMinutesThenStopsAfterAttemptThree() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "retry@research.test");
-		CampaignDeliveryRepository.ProductionClaim first = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = repository.claimNextProduction(NOW).block();
 
 		repository.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				temporary(450, "450 busy"), NOW).block();
@@ -460,7 +566,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 				.isEqualTo(NOW.plus(Duration.ofMinutes(1)));
 		assertThat(repository.claimNext(NOW.plusSeconds(59)).block()).isNull();
 
-		CampaignDeliveryRepository.ProductionClaim second = repository.claimNext(NOW.plus(Duration.ofMinutes(1))).block();
+		CampaignDeliveryRepository.ProductionClaim second = repository.claimNextProduction(NOW.plus(Duration.ofMinutes(1))).block();
 		assertThat(second.attemptNumber()).isEqualTo(2);
 		assertThat(second.rfcMessageId()).isEqualTo(first.rfcMessageId());
 		assertThat(second.correlationId()).isEqualTo(first.correlationId());
@@ -469,7 +575,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		assertThat(instant("SELECT next_attempt_at FROM campaign_recipients WHERE id = '" + recipientId + "'"))
 				.isEqualTo(NOW.plus(Duration.ofMinutes(6)));
 
-		CampaignDeliveryRepository.ProductionClaim third = repository.claimNext(NOW.plus(Duration.ofMinutes(6))).block();
+		CampaignDeliveryRepository.ProductionClaim third = repository.claimNextProduction(NOW.plus(Duration.ofMinutes(6))).block();
 		assertThat(third.attemptNumber()).isEqualTo(3);
 		repository.completeFailure(third.recipientId(), third.attemptId(), third.leaseDigest(),
 				temporary(452, "452 still busy"), NOW.plus(Duration.ofMinutes(6))).block();
@@ -485,14 +591,14 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void retryAcceptsTaskFourFinalizedContentWithoutRequiringTheOriginalPlaceholder() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "finalized-retry@research.test");
-		CampaignDeliveryRepository.ProductionClaim first = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = repository.claimNextProduction(NOW).block();
 		repository.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				temporary(450, "450 later"), NOW).block();
 		sql("UPDATE campaign_recipients SET rendered_html = '<p>Final</p><a href=\"https://tracking.test/u/opaque\">unsubscribe</a>', "
 				+ "rendered_text = 'Final https://tracking.test/u/opaque' WHERE id = '" + recipientId + "'");
 
 		CampaignDeliveryRepository.ProductionClaim retry = repository
-				.claimNext(NOW.plus(Duration.ofMinutes(1))).block();
+				.claimNextProduction(NOW.plus(Duration.ofMinutes(1))).block();
 
 		assertThat(retry).isNotNull();
 		assertThat(retry.attemptNumber()).isEqualTo(2);
@@ -503,7 +609,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void unknownPostDataOutcomeAndExpiredLeaseAreTerminalAndNeverRequeued() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "unknown@research.test");
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW).block();
 
 		repository.completeFailure(claim.recipientId(), claim.attemptId(), claim.leaseDigest(),
 				new SmtpTransportException(
@@ -517,7 +623,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 
 		UUID secondCampaign = insertCampaign("RUNNING");
 		UUID expired = insertEligibleRecipient(secondCampaign, "expired@research.test");
-		CampaignDeliveryRepository.ProductionClaim expiredClaim = repository.claimNext(NOW.plusSeconds(1)).block();
+		CampaignDeliveryRepository.ProductionClaim expiredClaim = repository.claimNextProduction(NOW.plusSeconds(1)).block();
 		assertThat(expiredClaim.recipientId()).isEqualTo(expired);
 		assertThat(repository.reconcileExpiredLeases(
 				NOW.plus(DELIVERY_PROPERTIES.leaseDuration()).plusSeconds(1)).block()).isEqualTo(1);
@@ -529,7 +635,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void leaseDigestFencesCompletionAndAcceptanceUpdatesCooldown() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "accepted@research.test");
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW).block();
 		SmtpTransport.SmtpOutcome accepted = new SmtpTransport.SmtpOutcome(
 				AttemptStatus.SMTP_ACCEPTED, TransportStage.POST_DATA, 250, "250 queued");
 
@@ -551,7 +657,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void wrongLeaseCannotSettleFailure() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "failure-fence@research.test");
-		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = repository.claimNextProduction(NOW).block();
 
 		assertThat(repository.completeFailure(claim.recipientId(), claim.attemptId(), new byte[32],
 				temporary(450, "450 later"), NOW).block()).isFalse();
@@ -713,6 +819,20 @@ abstract class CampaignDeliveryDatabaseTestSupport {
 				new CampaignSafetyProperties(false, "", 20));
 	}
 
+	CampaignDeliveryRepository safetyRepository(String recipient) {
+		CampaignSafetyProperties safety = new CampaignSafetyProperties(true, recipient, 20);
+		CampaignSafetySigner signer = new CampaignSafetySigner(HMAC_KEY);
+		CampaignSafetyRuntimePolicy policy = new CampaignSafetyRuntimePolicy(
+				safety,
+				new SmtpProperties(true, java.util.Set.of("localhost"), Duration.ofSeconds(2),
+						Duration.ofSeconds(2), Duration.ofSeconds(2), ""),
+				new MailTrackingProperties(true, "https://tracking.example.test", HMAC_KEY,
+						Duration.ofDays(30), Duration.ofMinutes(15)),
+				signer, DELIVERY_PROPERTIES.leaseDuration());
+		return new CampaignDeliveryRepository(
+				databaseClient, transactions, DELIVERY_PROPERTIES, safety, policy);
+	}
+
 	UUID insertCampaign(String status) {
 		UUID id = UUID.randomUUID();
 			sql("""
@@ -826,12 +946,48 @@ abstract class CampaignDeliveryDatabaseTestSupport {
 		databaseClient.sql("""
 				INSERT INTO campaign_safety_runs (
 				    id, campaign_id, smtp_account_id, created_by, recipient_limit,
-				    destination_hmac, destination_masked, status
-				) SELECT :run, campaign_id, :smtp, :actor, 1, digest('safety@test.invalid','sha256'),
-				         's***@test.invalid', :status FROM campaign_recipients WHERE id = :recipient
+				    destination_hmac, destination_masked, status,
+				    from_name_snapshot, from_email_snapshot, reply_to_snapshot,
+				    tracking_opens_enabled, tracking_clicks_enabled
+				) SELECT :run, r.campaign_id, :smtp, :actor, 1, digest('safety@test.invalid','sha256'),
+				         's***@test.invalid', :status, c.from_name, c.from_email, c.reply_to,
+				         c.tracking_opens_enabled, c.tracking_clicks_enabled
+				  FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id
+				 WHERE r.id = :recipient
 				""").bind("run", run).bind("smtp", SMTP).bind("actor", ACTOR).bind("status", status)
 				.bind("recipient", sourceRecipient).fetch().rowsUpdated().block();
 		return run;
+	}
+
+	UUID insertDueSafetyRun(UUID sourceRecipient, String destination) {
+		UUID run = UUID.randomUUID();
+		UUID message = UUID.randomUUID();
+		CampaignSafetySigner signer = new CampaignSafetySigner(HMAC_KEY);
+		CampaignSafetyProperties properties = new CampaignSafetyProperties(true, destination, 20);
+		databaseClient.sql("""
+				INSERT INTO campaign_safety_runs (
+				    id, campaign_id, smtp_account_id, created_by, recipient_limit,
+				    destination_hmac, destination_masked, status,
+				    from_name_snapshot, from_email_snapshot, reply_to_snapshot,
+				    tracking_opens_enabled, tracking_clicks_enabled
+				) SELECT :run, campaign_id, :smtp, :actor, 1, :hmac, :masked, 'QUEUED',
+				         c.from_name, c.from_email, c.reply_to,
+				         c.tracking_opens_enabled, c.tracking_clicks_enabled
+				  FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id
+				 WHERE r.id = :recipient
+				""").bind("run", run).bind("smtp", SMTP).bind("actor", ACTOR)
+				.bind("hmac", signer.destinationHmac(properties.validatedRecipient()))
+				.bind("masked", properties.maskedRecipient()).bind("recipient", sourceRecipient)
+				.fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO campaign_safety_messages (
+				    id, run_id, campaign_recipient_id, smtp_account_id, status,
+				    next_attempt_at, rendered_subject, rendered_html, rendered_text
+				) VALUES (:message, :run, :recipient, :smtp, 'QUEUED', :now,
+				          'Safety fixture', '<p>Safety fixture</p>', 'Safety fixture')
+				""").bind("message", message).bind("run", run).bind("recipient", sourceRecipient)
+				.bind("smtp", SMTP).bind("now", NOW).fetch().rowsUpdated().block();
+		return message;
 	}
 
 	UUID cloneRecipientToCampaign(UUID sourceRecipient, UUID campaignId) {
@@ -878,6 +1034,10 @@ abstract class CampaignDeliveryDatabaseTestSupport {
 
 	String text(String statement) {
 		return databaseClient.sql(statement).map((row, metadata) -> row.get(0, String.class)).one().block();
+	}
+
+	UUID uuid(String statement) {
+		return databaseClient.sql(statement).map((row, metadata) -> row.get(0, UUID.class)).one().block();
 	}
 
 	int integer(String statement) {

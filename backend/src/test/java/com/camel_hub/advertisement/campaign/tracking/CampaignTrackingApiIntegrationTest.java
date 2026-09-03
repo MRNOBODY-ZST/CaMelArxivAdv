@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.campaign.CampaignService;
 import com.camel_hub.advertisement.campaign.PersonalizationProperties;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository;
 import com.camel_hub.advertisement.campaign.delivery.CampaignOutboundPreparer;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.common.api.PageResponse;
 import com.camel_hub.advertisement.email.tracking.MailClickController;
 import com.camel_hub.advertisement.email.tracking.MailOpenClassifier;
@@ -23,6 +24,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -92,6 +94,13 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		String testMailOpen = testMailSigner.issue(UUID.randomUUID(), NOW.plusSeconds(3_600));
 		String testMailClick = testMailSigner.issueClick(
 				UUID.randomUUID(), UUID.randomUUID(), NOW.plusSeconds(3_600));
+		CampaignSafetySigner safetySigner = new CampaignSafetySigner(TRACKING_KEY);
+		String safetyOpen = safetySigner.issueOpen(UUID.randomUUID(), NOW.plusSeconds(3_600));
+		String safetyClick = safetySigner.issueClick(
+				UUID.randomUUID(), UUID.randomUUID(), NOW.plusSeconds(3_600));
+		String safetyUnsubscribe = safetySigner.issueUnsubscribe(UUID.randomUUID(), NOW.plusSeconds(3_600));
+		String compatibilityEncodedSafetyOpen = compatibilityPercentEncoded(safetyOpen);
+		String wrappedTestMailOpen = "X" + testMailOpen;
 		List<PreloadedCapability> cases = List.of(
 				new PreloadedCapability(
 						"subject campaign open",
@@ -125,6 +134,35 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 						"HTML-entity encoded body campaign click", "Subject",
 						"<p>https://tracking.example.test&#x2F;t&#x2F;c&#x2F;" + clickToken(sourceHtml)
 								+ "</p><a href=\"{{unsubscribe_url}}\">Stop</a>",
+						"Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"subject bare safety open", "Subject " + safetyOpen,
+						"<a href=\"{{unsubscribe_url}}\">Stop</a>", "Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"HTML bare safety click", "Subject",
+						"<p data-capability=\"" + safetyClick + "\">Body</p>"
+								+ "<a href=\"{{unsubscribe_url}}\">Stop</a>", "Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"encoded plain safety unsubscribe", "Subject",
+						"<a href=\"{{unsubscribe_url}}\">Stop</a>",
+						"Injected " + safetyUnsubscribe.replace(":", "%3A") + " Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"compatibility-percent encoded safety open", "Subject " + compatibilityEncodedSafetyOpen,
+						"<a href=\"{{unsubscribe_url}}\">Stop</a>", "Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"wrapped bare test-mail open", "Subject " + wrappedTestMailOpen,
+						"<a href=\"{{unsubscribe_url}}\">Stop</a>", "Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"HTML span-split safety open", "Subject",
+						"<p>campaign-safety-open:<span>"
+								+ safetyOpen.substring("campaign-safety-open:".length())
+								+ "</span></p><a href=\"{{unsubscribe_url}}\">Stop</a>",
+						"Stop {{unsubscribe_url}}"),
+				new PreloadedCapability(
+						"HTML comment-split safety click", "Subject",
+						"<p>campaign-safety-click:<!-- split -->"
+								+ safetyClick.substring("campaign-safety-click:".length())
+								+ "</p><a href=\"{{unsubscribe_url}}\">Stop</a>",
 						"Stop {{unsubscribe_url}}"));
 
 		for (PreloadedCapability candidate : cases) {
@@ -139,7 +177,10 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 					.hasMessageNotContaining(clickToken(sourceHtml))
 					.hasMessageNotContaining(unsubscribeToken(sourceText))
 					.hasMessageNotContaining(testMailOpen)
-					.hasMessageNotContaining(testMailClick);
+					.hasMessageNotContaining(testMailClick)
+					.hasMessageNotContaining(safetyOpen)
+					.hasMessageNotContaining(safetyClick)
+					.hasMessageNotContaining(safetyUnsubscribe);
 			assertThat(longValue("SELECT count(*) FROM tracking_tokens WHERE campaign_recipient_id = '"
 					+ claim.recipientId() + "'")).as(candidate.name()).isZero();
 			assertThat(longValue("SELECT count(*) FROM campaign_links WHERE campaign_id = '"
@@ -286,6 +327,54 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 	}
 
 	@Test
+	void frozenRetryRejectsProductionSafetyAndTestMailCapabilitiesJoinedAcrossHtmlNodes() {
+		CampaignTrackingSigner productionSigner = new CampaignTrackingSigner(TRACKING_KEY);
+		CampaignSafetySigner safetySigner = new CampaignSafetySigner(TRACKING_KEY);
+		MailTrackingSigner testMailSigner = new MailTrackingSigner(TRACKING_KEY);
+		Instant expiresAt = NOW.plus(Duration.ofHours(1));
+		String compatibilityEncodedSafety = compatibilityPercentEncoded(
+				safetySigner.issueOpen(UUID.randomUUID(), expiresAt));
+		List<PreloadedCapability> cases = List.of(
+				new PreloadedCapability("compatibility-percent encoded safety open", "Subject",
+						compatibilityEncodedSafety, ""),
+				new PreloadedCapability("span-split safety open", "Subject",
+						joinAcrossSpan(safetySigner.issueOpen(UUID.randomUUID(), expiresAt),
+								"campaign-safety-open:"), ""),
+				new PreloadedCapability("comment-split production click", "Subject",
+						joinAcrossComment(productionSigner.issueClick(
+								UUID.randomUUID(), UUID.randomUUID(), expiresAt), "campaign-click:"), ""),
+				new PreloadedCapability("span-split test-mail open", "Subject",
+						joinAcrossSpan(testMailSigner.issue(UUID.randomUUID(), expiresAt), "v1."), ""));
+
+		for (PreloadedCapability candidate : cases) {
+			resetDatabase();
+			CampaignTrackingService service = service(Clock.fixed(NOW, ZoneOffset.UTC));
+			CampaignDeliveryRepository.ProductionClaim claim = insertClaim(
+					"<p>Personalized note</p><a href=\"https://papers.example.org/abs/42\">Paper</a>"
+							+ "<a href=\"{{unsubscribe_url}}\">Stop</a>",
+					"Personalized note Stop {{unsubscribe_url}}");
+			CampaignOutboundPreparer.PreparedOutbound frozen = service.prepare(claim).block();
+			long tokenRows = longValue("SELECT count(*) FROM tracking_tokens WHERE campaign_recipient_id = '"
+					+ claim.recipientId() + "'");
+			long linkRows = longValue("SELECT count(*) FROM campaign_links WHERE campaign_id = '"
+					+ claim.campaignId() + "'");
+			database.sql("UPDATE campaign_recipients SET rendered_html = :html WHERE id = :recipient")
+					.bind("html", frozen.html() + "<p>" + candidate.html() + "</p>")
+					.bind("recipient", claim.recipientId()).fetch().rowsUpdated().block();
+
+			assertThatThrownBy(() -> service.prepare(claim).block())
+					.as(candidate.name()).isInstanceOf(IllegalArgumentException.class)
+					.hasMessageNotContaining("campaign-safety")
+					.hasMessageNotContaining("campaign-click")
+					.hasMessageNotContaining("v1.");
+			assertThat(longValue("SELECT count(*) FROM tracking_tokens WHERE campaign_recipient_id = '"
+					+ claim.recipientId() + "'")).as(candidate.name()).isEqualTo(tokenRows);
+			assertThat(longValue("SELECT count(*) FROM campaign_links WHERE campaign_id = '"
+					+ claim.campaignId() + "'")).as(candidate.name()).isEqualTo(linkRows);
+		}
+	}
+
+	@Test
 	void campaignRecipientReadPathRedactsACapabilityInjectedIntoAFrozenSubject() {
 		CampaignTrackingService tracking = service(Clock.fixed(NOW, ZoneOffset.UTC));
 		CampaignDeliveryRepository.ProductionClaim claim = preparedClaim(tracking);
@@ -337,17 +426,51 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		String campaignClick = clickToken(sourceHtml);
 		String testMailOpen = new MailTrackingSigner(TRACKING_KEY)
 				.issue(UUID.randomUUID(), NOW.plus(Duration.ofHours(1)));
+		CampaignSafetySigner safetySigner = new CampaignSafetySigner(TRACKING_KEY);
+		String safetyOpen = safetySigner.issueOpen(UUID.randomUUID(), NOW.plus(Duration.ofHours(1)));
+		String safetyClick = safetySigner.issueClick(UUID.randomUUID(), UUID.randomUUID(),
+				NOW.plus(Duration.ofHours(1)));
+		String safetyUnsubscribe = safetySigner.issueUnsubscribe(
+				UUID.randomUUID(), NOW.plus(Duration.ofHours(1)));
 		String encodedTestMailUrl = ("https://attacker.example/t/o/" + testMailOpen)
 				.replace(":", "%3A").replace("/", "%2F");
 		String entityCampaignUrl = "https:&#x2F;&#x2F;attacker.example&#x2F;t&#x2F;c&#x2F;"
 				+ campaignClick.replace(":", "&#x3A;");
+		String deepEncodedSafetyClick = safetyClick.replace(":", "%3A");
+		for (int round = 0; round < 3; round++) {
+			deepEncodedSafetyClick = deepEncodedSafetyClick.replace("%", "%25");
+		}
+		String splitCommentSafetyOpen = safetyOpen.replace("campaign-safety-open:",
+				"campaign-safety-open<!--split-->:");
+		String splitNodeSafetyUnsubscribe = safetyUnsubscribe.replace("campaign-safety-unsubscribe:",
+				"<span>campaign-safety-</span><span>unsubscribe:</span>");
+		String compatibilityEncodedSafetyOpen = compatibilityPercentEncoded(safetyOpen);
+		String wrappedTestMailOpen = "X" + testMailOpen;
 		List<PreloadedCapability> cases = List.of(
 				new PreloadedCapability("raw campaign capability", "Safe subject",
 						"<p data-secret=\"" + campaignOpen + "\">Draft</p>", "Safe text"),
 				new PreloadedCapability("percent-encoded test-mail capability", "Safe subject",
 						"<p>Safe HTML</p>", "Draft " + encodedTestMailUrl),
 				new PreloadedCapability("HTML-entity encoded campaign capability", "Safe subject",
-						"<p>Draft " + entityCampaignUrl + "</p>", "Safe text"));
+						"<p>Draft " + entityCampaignUrl + "</p>", "Safe text"),
+				new PreloadedCapability("raw safety capability", "Safe subject",
+						"<p data-secret=\"" + safetyOpen + "\">Draft</p>", "Safe text"),
+				new PreloadedCapability("raw safety click capability", "Safe subject",
+						"<p data-secret=\"" + safetyClick + "\">Draft</p>", "Safe text"),
+				new PreloadedCapability("entity-encoded safety capability", "Safe subject",
+						"<p data-secret=\"" + safetyOpen.replace(":", "&#58;") + "\">Draft</p>", "Safe text"),
+				new PreloadedCapability("deep percent-encoded safety capability", "Safe subject",
+						"<p>Safe HTML</p>", "Draft " + deepEncodedSafetyClick),
+				new PreloadedCapability("comment-split safety capability", "Safe subject",
+						"<p>" + splitCommentSafetyOpen + "</p>", "Safe text"),
+				new PreloadedCapability("node-split safety capability", "Safe subject",
+						"<p>" + splitNodeSafetyUnsubscribe + "</p>", "Safe text"),
+				new PreloadedCapability("NFKC safety capability", "Safe subject",
+						"<p>Safe HTML</p>", "Draft " + fullWidthAscii(safetyUnsubscribe)),
+				new PreloadedCapability("compatibility-percent encoded safety capability", "Safe subject",
+						"<p>Safe HTML</p>", "Draft " + compatibilityEncodedSafetyOpen),
+				new PreloadedCapability("wrapped bare test-mail capability", "Safe subject",
+						"<p>Safe HTML</p>", "Draft " + wrappedTestMailOpen));
 
 		for (PreloadedCapability candidate : cases) {
 			CampaignDeliveryRepository.ProductionClaim draft = insertClaim(candidate.html(), candidate.text());
@@ -368,11 +491,42 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 
 			assertThat(response).as(candidate.name())
 					.doesNotContain(candidate.html(), candidate.text(), campaignOpen, campaignClick,
-							testMailOpen, encodedTestMailUrl, entityCampaignUrl)
+							testMailOpen, safetyOpen, safetyClick, safetyUnsubscribe,
+							encodedTestMailUrl, entityCampaignUrl, deepEncodedSafetyClick,
+							splitCommentSafetyOpen, splitNodeSafetyUnsubscribe, fullWidthAscii(safetyUnsubscribe),
+							compatibilityEncodedSafetyOpen, wrappedTestMailOpen)
 					.contains("\"subject\":\"Safe subject\"", "\"html\":null", "\"text\":null",
 							"\"trackingArtifactsRedacted\":true");
 			assertThat(longValue("SELECT count(*) FROM tracking_tokens WHERE campaign_recipient_id = '"
 					+ draft.recipientId() + "'")).as(candidate.name()).isZero();
+		}
+	}
+
+	@Test
+	void campaignRecipientReadPathRedactsRawDeepEncodedAndNfkcSafetyCapabilitiesFromDraftSubjects() {
+		CampaignSafetySigner safetySigner = new CampaignSafetySigner(TRACKING_KEY);
+		String token = safetySigner.issueUnsubscribe(UUID.randomUUID(), NOW.plus(Duration.ofHours(1)));
+		String encoded = token.replace(":", "%3A");
+		for (int round = 0; round < 3; round++) encoded = encoded.replace("%", "%25");
+		for (String subject : List.of(token, encoded, fullWidthAscii(token))) {
+			CampaignDeliveryRepository.ProductionClaim draft = insertClaim(
+					"<p>Safe HTML</p><a href=\"{{unsubscribe_url}}\">Stop</a>",
+					"Safe text {{unsubscribe_url}}");
+			database.sql("UPDATE campaign_recipients SET status = 'QUEUED', attempt_count = 0, "
+					+ "rendered_subject = :subject, delivery_lease_hash = NULL, delivery_lease_expires_at = NULL "
+					+ "WHERE id = :recipient")
+					.bind("subject", subject).bind("recipient", draft.recipientId())
+					.fetch().rowsUpdated().block();
+			database.sql("DELETE FROM delivery_attempts WHERE campaign_recipient_id = :recipient")
+					.bind("recipient", draft.recipientId()).fetch().rowsUpdated().block();
+			CampaignService campaigns = new CampaignService(new CampaignRepository(database), null,
+					new PersonalizationProperties(false, "test", "test", 20), new ObjectMapper(), transactions,
+					new CampaignPublicContentRedactor(TRACKING_PROPERTIES.publicBaseUrl()));
+
+			String response = json(campaigns.recipients(draft.campaignId(), 1, 20).block());
+
+			assertThat(response).doesNotContain(subject, token)
+					.contains("\"subject\":null", "\"trackingArtifactsRedacted\":true");
 		}
 	}
 
@@ -989,6 +1143,34 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 				WHERE id = :recipient
 				""").bind("status", status).bind("now", NOW).bind("recipient", recipient)
 				.fetch().rowsUpdated().block();
+	}
+
+	private String joinAcrossSpan(String token, String prefix) {
+		return prefix + "<span>" + token.substring(prefix.length()) + "</span>";
+	}
+
+	private String joinAcrossComment(String token, String prefix) {
+		return prefix + "<!-- split -->" + token.substring(prefix.length());
+	}
+
+	private String fullWidthAscii(String value) {
+		StringBuilder transformed = new StringBuilder(value.length());
+		for (int index = 0; index < value.length(); index++) {
+			char character = value.charAt(index);
+			transformed.append(character >= 0x21 && character <= 0x7e
+					? (char) (character + 0xfee0) : character);
+		}
+		return transformed.toString();
+	}
+
+	private String compatibilityPercentEncoded(String value) {
+		StringBuilder encoded = new StringBuilder(value.length() * 3);
+		for (byte octet : value.getBytes(StandardCharsets.US_ASCII)) {
+			int unsigned = Byte.toUnsignedInt(octet);
+			encoded.append('％').append(Character.toUpperCase(Character.forDigit(unsigned >>> 4, 16)))
+					.append(Character.toUpperCase(Character.forDigit(unsigned & 0xf, 16)));
+		}
+		return encoded.toString();
 	}
 
 	private record PreloadedCapability(String name, String subject, String html, String text) { }

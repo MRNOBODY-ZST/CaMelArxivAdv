@@ -20,9 +20,12 @@ public class SmtpTransportException extends RuntimeException {
 	private static final String CAMPAIGN_CAPABILITY_TAIL =
 			"[0-9]{1,19}\\.[A-Z0-9_-]{32}\\.[A-Z0-9_-]{43}";
 	private static final java.util.regex.Pattern CAMPAIGN_CAPABILITY = java.util.regex.Pattern.compile(
-			"(?i)campaign-(?:(?:open|unsubscribe):v1\\." + CAMPAIGN_UUID + "\\."
+			"(?i)(?:campaign-(?:safety-)?(?:(?:open|unsubscribe):v1\\." + CAMPAIGN_UUID + "\\."
 					+ CAMPAIGN_CAPABILITY_TAIL + "|click:v1\\." + CAMPAIGN_UUID + "\\."
-					+ CAMPAIGN_UUID + "\\." + CAMPAIGN_CAPABILITY_TAIL + ")");
+					+ CAMPAIGN_UUID + "\\." + CAMPAIGN_CAPABILITY_TAIL + ")"
+					+ "|v1\\." + CAMPAIGN_UUID + "\\." + CAMPAIGN_CAPABILITY_TAIL
+					+ "|v1c\\." + CAMPAIGN_UUID + "\\." + CAMPAIGN_UUID + "\\."
+					+ CAMPAIGN_CAPABILITY_TAIL + ")");
 
 	private final FailureCategory category;
 	private final AttemptStatus status;
@@ -95,7 +98,50 @@ public class SmtpTransportException extends RuntimeException {
 		safe = SECRET_LIKE.matcher(safe).replaceAll("$1=[redacted]");
 		safe = URL_LIKE.matcher(safe).replaceAll("[redacted-url]");
 		safe = CAMPAIGN_CAPABILITY.matcher(safe).replaceAll("[redacted-capability]");
+		if (containsEncodedCampaignCapability(safe)) safe = "[redacted-capability]";
 		return safe.substring(0, Math.min(safe.length(), 500));
+	}
+
+	private static boolean containsEncodedCampaignCapability(String value) {
+		String decoded = value;
+		try {
+			for (int round = 0; round < 8; round++) {
+				String next = decodeInspectionRound(decoded);
+				if (CAMPAIGN_CAPABILITY.matcher(next).find()) return true;
+				if (next.equals(decoded)) return false;
+				decoded = next;
+			}
+			return !decodeInspectionRound(decoded).equals(decoded);
+		}
+		catch (IllegalArgumentException unsafeEncoding) {
+			return true;
+		}
+	}
+
+	private static String decodeInspectionRound(String value) {
+		String decoded = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC);
+		decoded = java.net.URLDecoder.decode(
+				escapeInvalidPercents(decoded).replace("+", "%2B"), java.nio.charset.StandardCharsets.UTF_8);
+		decoded = org.jsoup.parser.Parser.unescapeEntities(decoded, false);
+		try {
+			decoded = jakarta.mail.internet.MimeUtility.decodeText(decoded);
+		}
+		catch (java.io.UnsupportedEncodingException rejected) {
+			throw new IllegalArgumentException("SMTP response encoding is invalid", rejected);
+		}
+		return java.text.Normalizer.normalize(decoded, java.text.Normalizer.Form.NFKC);
+	}
+
+	private static String escapeInvalidPercents(String value) {
+		StringBuilder safe = new StringBuilder(value.length());
+		for (int index = 0; index < value.length(); index++) {
+			char current = value.charAt(index);
+			if (current == '%' && (index + 2 >= value.length()
+					|| Character.digit(value.charAt(index + 1), 16) < 0
+					|| Character.digit(value.charAt(index + 2), 16) < 0)) safe.append("%25");
+			else safe.append(current);
+		}
+		return safe.toString();
 	}
 
 	public enum FailureCategory {

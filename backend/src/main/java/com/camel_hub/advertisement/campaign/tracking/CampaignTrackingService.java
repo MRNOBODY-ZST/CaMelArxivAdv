@@ -6,9 +6,11 @@ import com.camel_hub.advertisement.email.tracking.MailOpenClassifier;
 import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
 import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
+import jakarta.mail.internet.MimeUtility;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
+import org.jsoup.parser.Parser;
 import org.springframework.dao.TransientDataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -21,6 +23,7 @@ import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.text.Normalizer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,6 +57,8 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 	private static final Pattern ANY_SIGNED_CAPABILITY = Pattern.compile(
 			"(?:campaign-(?:open|unsubscribe):v1\\." + UUID_SHAPE + "\\." + COMMON_TAIL
 					+ "|campaign-click:v1\\." + UUID_SHAPE + "\\." + UUID_SHAPE + "\\." + COMMON_TAIL
+					+ "|campaign-safety-(?:open|unsubscribe):v1\\." + UUID_SHAPE + "\\." + COMMON_TAIL
+					+ "|campaign-safety-click:v1\\." + UUID_SHAPE + "\\." + UUID_SHAPE + "\\." + COMMON_TAIL
 					+ "|v1\\." + UUID_SHAPE + "\\." + COMMON_TAIL
 					+ "|v1c\\." + UUID_SHAPE + "\\." + UUID_SHAPE + "\\." + COMMON_TAIL + ")");
 	private static final Pattern CALLBACK_URL = Pattern.compile(
@@ -69,6 +74,7 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 	private final TransactionalOperator transactions;
 	private final Function<String, byte[]> fingerprintHasher;
 	private final Pattern configuredCallbackPath;
+	private final CampaignPublicContentRedactor publicContentRedactor;
 
 	public CampaignTrackingService(
 			CampaignTrackingRepository repository, MailTrackingProperties properties,
@@ -93,6 +99,7 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 		this.fingerprintHasher = fingerprintHasher == null ? signer::fingerprint : fingerprintHasher;
 		this.configuredCallbackPath = Pattern.compile(
 				Pattern.quote(properties.publicBaseUrl()) + "/(?:t/o|t/c|u)/", Pattern.CASE_INSENSITIVE);
+		this.publicContentRedactor = new CampaignPublicContentRedactor(properties.publicBaseUrl());
 	}
 
 	@Override
@@ -341,7 +348,8 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 	}
 
 	private FrozenCapabilities parseFrozen(CampaignTrackingRepository.PreparationState state) {
-		if (containsPreloadedCapability(decodeRepeatedly(state.subject()))) throw frozenError();
+		if (containsPreloadedCapability(decodeRepeatedly(state.subject()))
+				|| containsCapabilityJoinedAcrossHtmlNodes(state.html())) throw frozenError();
 		validateHtmlCapabilityAttributes(state.html());
 		List<CallbackReference> html = callbackReferences(state.html(), true);
 		List<CallbackReference> text = callbackReferences(state.text(), true);
@@ -431,7 +439,9 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 	private void validateInitialDraft(CampaignTrackingRepository.PreparationState state) {
 		validateHtmlPlaceholderContexts(state.html());
 		validateStandalonePlaceholders(state.text());
-		if (containsPreloadedCapability(decodeRepeatedly(state.subject()))
+		if (publicContentRedactor.redact(
+				state.subject(), state.html(), state.text(), false).trackingArtifactsRedacted()
+				|| containsPreloadedCapability(decodeRepeatedly(state.subject()))
 				|| containsPreloadedCapability(decodeHtmlForInspection(state.html()))
 				|| containsPreloadedCapability(decodeRepeatedly(state.text()))) {
 			throw new IllegalArgumentException("Campaign draft contains a preloaded callback capability");
@@ -511,21 +521,60 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 		return decodeRepeatedly(normalized);
 	}
 
+	private boolean containsCapabilityJoinedAcrossHtmlNodes(String html) {
+		var document = Jsoup.parseBodyFragment(html == null ? "" : html);
+		StringBuilder joinedText = new StringBuilder();
+		List<String> textNodes = new ArrayList<>();
+		collectVisibleText(document.body(), joinedText, textNodes);
+		long joined = signedCapabilityCount(normalizeForInspection(joinedText.toString()));
+		long atomic = textNodes.stream()
+				.map(this::normalizeForInspection)
+				.mapToLong(this::signedCapabilityCount)
+				.sum();
+		return joined != atomic;
+	}
+
+	private void collectVisibleText(Node node, StringBuilder joined, List<String> textNodes) {
+		if (node instanceof TextNode text) {
+			String value = text.getWholeText();
+			joined.append(value);
+			textNodes.add(value);
+		}
+		for (Node child : node.childNodes()) collectVisibleText(child, joined, textNodes);
+	}
+
+	private String normalizeForInspection(String value) {
+		return decodeRepeatedly(value);
+	}
+
 	private String decodeRepeatedly(String value) {
 		String decoded = value == null ? "" : value;
 		try {
-			for (int round = 0; round < 5; round++) {
-				String next = URLDecoder.decode(escapeInvalidPercents(decoded).replace("+", "%2B"),
-						StandardCharsets.UTF_8);
+			for (int round = 0; round < 8; round++) {
+				String next = decodeInspectionRound(decoded);
 				if (next.equals(decoded)) return decoded;
 				decoded = next;
 			}
-			if (containsValidPercentEscape(decoded)) throw frozenError();
+			if (!decodeInspectionRound(decoded).equals(decoded)) throw frozenError();
 			return decoded;
 		}
 		catch (IllegalArgumentException exception) {
 			throw frozenError();
 		}
+	}
+
+	private String decodeInspectionRound(String value) {
+		String decoded = Normalizer.normalize(value, Normalizer.Form.NFKC);
+		decoded = URLDecoder.decode(escapeInvalidPercents(decoded).replace("+", "%2B"),
+				StandardCharsets.UTF_8);
+		decoded = Parser.unescapeEntities(decoded, false);
+		try {
+			decoded = MimeUtility.decodeText(decoded);
+		}
+		catch (java.io.UnsupportedEncodingException rejected) {
+			throw frozenError();
+		}
+		return Normalizer.normalize(decoded, Normalizer.Form.NFKC);
 	}
 
 	private String escapeInvalidPercents(String value) {
@@ -540,14 +589,6 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 			else safe.append(current);
 		}
 		return safe.toString();
-	}
-
-	private boolean containsValidPercentEscape(String value) {
-		for (int index = 0; index + 2 < value.length(); index++) {
-			if (value.charAt(index) == '%' && Character.digit(value.charAt(index + 1), 16) >= 0
-					&& Character.digit(value.charAt(index + 2), 16) >= 0) return true;
-		}
-		return false;
 	}
 
 	private boolean containsPreloadedCapability(String value) {

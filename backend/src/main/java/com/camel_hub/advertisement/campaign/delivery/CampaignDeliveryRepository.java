@@ -4,6 +4,7 @@ import com.camel_hub.advertisement.email.smtp.SmtpModels;
 import com.camel_hub.advertisement.email.smtp.SmtpRepository;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
 import io.r2dbc.spi.Row;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -104,19 +105,63 @@ public final class CampaignDeliveryRepository {
 	private final DatabaseClient database;
 	private final TransactionalOperator transactions;
 	private final CampaignDeliveryProperties properties;
+	private final CampaignSafetyProperties safety;
+	private final CampaignSafetyRuntimePolicy safetyPolicy;
 
 	public CampaignDeliveryRepository(
 			DatabaseClient database, TransactionalOperator transactions,
 			CampaignDeliveryProperties properties, CampaignSafetyProperties safety
 	) {
+		this(database, transactions, properties, safety, null);
+	}
+
+	public CampaignDeliveryRepository(
+			DatabaseClient database, TransactionalOperator transactions,
+			CampaignDeliveryProperties properties, CampaignSafetyProperties safety,
+			CampaignSafetyRuntimePolicy safetyPolicy
+	) {
 		this.database = database;
 		this.transactions = transactions;
 		this.properties = properties;
+		this.safety = safety;
+		this.safetyPolicy = safetyPolicy;
 	}
 
-	/** Claims at most one recipient and commits its lease before returning. */
-	public Mono<ProductionClaim> claimNext(Instant now) {
-		Mono<ProductionClaim> work = selectCandidate(now)
+	/** Claims at most one tagged production or safety message and commits its lease before returning. */
+	public Mono<DeliveryClaim> claimNext(Instant now) {
+		if (!safety.enabled() || safetyPolicy == null) {
+			return claimProduction(now).cast(DeliveryClaim.class).as(transactions::transactional);
+		}
+		return claimSafety(now).as(transactions::transactional)
+				.flatMap(decision -> {
+					if (decision.claim() != null) return Mono.just(decision.claim());
+					if (decision.handled()) return Mono.empty();
+					return claimProduction(now).cast(DeliveryClaim.class).as(transactions::transactional);
+				});
+	}
+
+	/** Production-specific assertion used by package tests while {@link #claimNext} stays exhaustively tagged. */
+	Mono<ProductionClaim> claimNextProduction(Instant now) {
+		return claimNext(now).map(claim -> {
+			if (claim instanceof ProductionClaim production) return production;
+			throw new IllegalStateException("Expected a production delivery claim");
+		});
+	}
+
+	int maximumAttempts() {
+		return properties.maximumAttempts();
+	}
+
+	Duration firstRetryDelay() {
+		return properties.firstRetryDelay();
+	}
+
+	Duration secondRetryDelay() {
+		return properties.secondRetryDelay();
+	}
+
+	private Mono<ProductionClaim> claimProduction(Instant now) {
+		return selectCandidate(now)
 				.flatMap(candidate -> lockAccount(candidate.smtpAccountId())
 						.flatMap(account -> lockCooldown(candidate, now)
 								.flatMap(cooldown -> verifyAfterLocks(candidate, cooldown, now)
@@ -128,7 +173,206 @@ public final class CampaignDeliveryRepository {
 															? reserve(eligible, account, now)
 															: defer(eligible.id(), release).then(Mono.empty());
 												})))));
-		return work.as(transactions::transactional);
+	}
+
+	private Mono<SafetyClaimDecision> claimSafety(Instant now) {
+		return lockSafetyRun(now)
+				.flatMap(run -> claimSafety(run, now))
+				.defaultIfEmpty(SafetyClaimDecision.noWork());
+	}
+
+	private Mono<SafetyClaimDecision> claimSafety(SafetyRunCandidate run, Instant now) {
+		CampaignSafetyRuntimePolicy.Destination destination;
+		try {
+			destination = safetyPolicy.requireMatching(run.destinationHmac());
+		}
+		catch (RuntimeException rejected) {
+			return terminalizeSafetyRun(run.id(), now).thenReturn(SafetyClaimDecision.handledWork());
+		}
+		if (!destination.masked().equals(run.destinationMasked())
+				|| !destination.domain().equals(run.destinationDomain())) {
+			return terminalizeSafetyRun(run.id(), now).thenReturn(SafetyClaimDecision.handledWork());
+		}
+		return lockSafetyMessage(run.id(), now)
+				.flatMap(message -> lockAccount(run.smtpAccountId())
+						.flatMap(account -> claimSafety(run, message, account, destination, now)))
+				.defaultIfEmpty(SafetyClaimDecision.handledWork());
+	}
+
+	private Mono<SafetyClaimDecision> claimSafety(
+			SafetyRunCandidate run, SafetyMessageCandidate message,
+			SmtpRepository.SmtpAccountRecord account,
+			CampaignSafetyRuntimePolicy.Destination destination, Instant now
+	) {
+		if (!smtpHealthy(account)) {
+			return failSafetyBeforeSmtp(run.id(), message.id(), now)
+					.thenReturn(SafetyClaimDecision.handledWork());
+		}
+		return loadReservations(account.id(), now).collectList()
+				.flatMap(reservations -> {
+					Instant release = capacityRelease(account, destination.domain(), reservations, now);
+					if (release != null) {
+						return deferSafety(message.id(), release)
+								.thenReturn(SafetyClaimDecision.handledWork());
+					}
+					return reserveSafety(run, message, account, destination, now)
+							.map(SafetyClaimDecision::claimed)
+							.defaultIfEmpty(SafetyClaimDecision.handledWork());
+				});
+	}
+
+	private Mono<SafetyRunCandidate> lockSafetyRun(Instant now) {
+		return database.sql("""
+				SELECT sr.id, sr.campaign_id, sr.smtp_account_id, sr.destination_hmac,
+				       sr.destination_masked,
+				       lower(split_part(sr.destination_masked, '@', 2)) AS destination_domain,
+				       sr.from_name_snapshot, sr.from_email_snapshot, sr.reply_to_snapshot,
+				       sr.tracking_opens_enabled, sr.tracking_clicks_enabled
+				FROM campaign_safety_runs sr
+				WHERE sr.status IN ('QUEUED','RUNNING')
+				  AND EXISTS (
+				      SELECT 1 FROM campaign_safety_messages m
+				      WHERE m.run_id = sr.id AND m.status IN ('QUEUED','TEMPORARY_FAILURE')
+				        AND m.next_attempt_at <= :now AND m.attempt_count < :maximumAttempts)
+				ORDER BY CASE WHEN sr.status = 'RUNNING' THEN 0 ELSE 1 END, sr.created_at, sr.id
+				FOR UPDATE OF sr SKIP LOCKED
+				LIMIT 1
+				""").bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
+				.map((row, metadata) -> new SafetyRunCandidate(
+						row.get("id", UUID.class), row.get("campaign_id", UUID.class),
+						row.get("smtp_account_id", UUID.class), copy(row.get("destination_hmac", byte[].class)),
+						row.get("destination_masked", String.class), row.get("destination_domain", String.class),
+						row.get("from_name_snapshot", String.class), row.get("from_email_snapshot", String.class),
+						row.get("reply_to_snapshot", String.class),
+						Boolean.TRUE.equals(row.get("tracking_opens_enabled", Boolean.class)),
+						Boolean.TRUE.equals(row.get("tracking_clicks_enabled", Boolean.class)))).one();
+	}
+
+	private Mono<SafetyMessageCandidate> lockSafetyMessage(UUID runId, Instant now) {
+		return database.sql("""
+				SELECT id, campaign_recipient_id, attempt_count, rfc_message_id,
+				       rendered_subject, rendered_html, rendered_text
+				FROM campaign_safety_messages
+				WHERE run_id = :run AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				  AND next_attempt_at <= :now AND attempt_count < :maximumAttempts
+				ORDER BY next_attempt_at, id
+				FOR UPDATE SKIP LOCKED
+				LIMIT 1
+				""").bind("run", runId).bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
+				.map((row, metadata) -> new SafetyMessageCandidate(
+						row.get("id", UUID.class), row.get("campaign_recipient_id", UUID.class),
+						requiredInt(row, "attempt_count"), row.get("rfc_message_id", String.class),
+						row.get("rendered_subject", String.class), row.get("rendered_html", String.class),
+						row.get("rendered_text", String.class))).one();
+	}
+
+	private boolean smtpHealthy(SmtpRepository.SmtpAccountRecord account) {
+		return account.enabled() && "SUCCEEDED".equals(account.lastTestStatus())
+				&& account.lastTestedAt() != null && account.updatedAt() != null
+				&& !account.lastTestedAt().isBefore(account.updatedAt());
+	}
+
+	private Mono<SafetyClaim> reserveSafety(
+			SafetyRunCandidate run, SafetyMessageCandidate message,
+			SmtpRepository.SmtpAccountRecord account,
+			CampaignSafetyRuntimePolicy.Destination destination, Instant now
+	) {
+		UUID attemptId = UUID.randomUUID();
+		int attemptNumber = message.attemptCount() + 1;
+		byte[] lease = new byte[32];
+		RANDOM.nextBytes(lease);
+		byte[] leaseHash = sha256(lease);
+		String idempotency = "safety:" + message.id() + ":" + attemptNumber;
+		String messageId = message.rfcMessageId() == null
+				? "<safety-" + message.id() + "@delivery.camel-arxiv.invalid>" : message.rfcMessageId();
+		Instant expires = now.plus(properties.leaseDuration());
+		SafetyClaim claim = new SafetyClaim(
+				message.id(), run.id(), message.campaignRecipientId(), attemptId, attemptNumber,
+				idempotency, messageId, "campaign-safety-" + message.id(), lease,
+				run.destinationHmac(), run.destinationMasked(), destination.domain(), account,
+				run.fromName(), run.fromEmail(), run.replyTo(), run.trackingOpens(), run.trackingClicks(),
+				message.subject(), message.html(), message.text());
+		return database.sql("""
+				UPDATE campaign_safety_messages
+				SET status = 'CONNECTING', attempt_count = :number,
+				    delivery_lease_hash = :lease, delivery_lease_expires_at = :expires,
+				    rfc_message_id = :messageId
+				WHERE id = :message AND run_id = :run
+				  AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				  AND attempt_count = :oldAttemptCount AND next_attempt_at <= :now
+				  AND EXISTS (SELECT 1 FROM campaign_safety_runs sr WHERE sr.id = :run
+				              AND sr.status IN ('QUEUED','RUNNING'))
+				""").bind("number", attemptNumber).bind("lease", leaseHash).bind("expires", expires)
+				.bind("messageId", messageId).bind("message", message.id()).bind("run", run.id())
+				.bind("oldAttemptCount", message.attemptCount()).bind("now", now).fetch().rowsUpdated()
+				.flatMap(updated -> updated.longValue() != 1L ? Mono.empty()
+						: database.sql("""
+								UPDATE campaign_safety_runs
+								SET status = 'RUNNING', started_at = COALESCE(started_at, :now),
+								    lock_version = lock_version + CASE WHEN status = 'QUEUED' THEN 1 ELSE 0 END
+								WHERE id = :run AND status IN ('QUEUED','RUNNING')
+								""").bind("now", now).bind("run", run.id()).fetch().rowsUpdated()
+							.then(database.sql("""
+									INSERT INTO campaign_safety_attempts (
+									    id, safety_message_id, attempt_number, idempotency_key, status,
+									    transport_stage, retryable, rfc_message_id, started_at
+									) VALUES (:id, :message, :number, :key, 'CONNECTING',
+									          'CONNECT', false, :messageId, :now)
+									""").bind("id", attemptId).bind("message", message.id())
+									.bind("number", attemptNumber).bind("key", idempotency)
+									.bind("messageId", messageId).bind("now", now).fetch().rowsUpdated())
+							.thenReturn(claim));
+	}
+
+	private Mono<Integer> deferSafety(UUID messageId, Instant release) {
+		return database.sql("""
+				UPDATE campaign_safety_messages SET next_attempt_at = :release
+				WHERE id = :message AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				""").bind("release", release).bind("message", messageId)
+				.fetch().rowsUpdated().map(Number::intValue);
+	}
+
+	private Mono<Integer> failSafetyBeforeSmtp(UUID runId, UUID messageId, Instant now) {
+		return database.sql("""
+				UPDATE campaign_safety_messages
+				SET status = 'PERMANENT_FAILURE', delivery_lease_hash = NULL,
+				    delivery_lease_expires_at = NULL, next_attempt_at = :now
+				WHERE id = :message AND run_id = :run AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				""").bind("now", now).bind("message", messageId).bind("run", runId)
+				.fetch().rowsUpdated().map(Number::intValue)
+				.flatMap(updated -> aggregateSafetyRun(runId, now).thenReturn(updated));
+	}
+
+	private Mono<Integer> terminalizeSafetyRun(UUID runId, Instant now) {
+		return database.sql("""
+				UPDATE campaign_safety_messages
+				SET status = 'PERMANENT_FAILURE', delivery_lease_hash = NULL,
+				    delivery_lease_expires_at = NULL, next_attempt_at = :now
+				WHERE run_id = :run AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				""").bind("now", now).bind("run", runId).fetch().rowsUpdated().map(Number::intValue)
+				.flatMap(updated -> aggregateSafetyRun(runId, now).thenReturn(updated));
+	}
+
+	private Mono<Integer> aggregateSafetyRun(UUID runId, Instant now) {
+		return database.sql("""
+				WITH totals AS (
+				    SELECT count(*)::int AS total,
+				           count(*) FILTER (WHERE status = 'SMTP_ACCEPTED')::int AS accepted,
+				           count(*) FILTER (WHERE status IN ('QUEUED','CONNECTING','TEMPORARY_FAILURE'))::int AS active
+				    FROM campaign_safety_messages WHERE run_id = :run
+				), resolved AS (
+				    SELECT CASE
+				        WHEN active > 0 THEN NULL
+				        WHEN total > 0 AND accepted = total THEN 'COMPLETED'
+				        WHEN accepted = 0 THEN 'FAILED'
+				        ELSE 'PARTIALLY_FAILED'
+				    END AS next_status FROM totals
+				)
+				UPDATE campaign_safety_runs sr
+				SET status = resolved.next_status, completed_at = :now, lock_version = lock_version + 1
+				FROM resolved
+				WHERE sr.id = :run AND sr.status IN ('QUEUED','RUNNING') AND resolved.next_status IS NOT NULL
+				""").bind("run", runId).bind("now", now).fetch().rowsUpdated().map(Number::intValue);
 	}
 
 	/**
@@ -853,6 +1097,38 @@ public final class CampaignDeliveryRepository {
 			String renderedSubject, String renderedHtml, String renderedText
 	) { }
 
+	private record SafetyClaimDecision(SafetyClaim claim, boolean handled) {
+		private static SafetyClaimDecision claimed(SafetyClaim claim) {
+			return new SafetyClaimDecision(claim, true);
+		}
+
+		private static SafetyClaimDecision handledWork() {
+			return new SafetyClaimDecision(null, true);
+		}
+
+		private static SafetyClaimDecision noWork() {
+			return new SafetyClaimDecision(null, false);
+		}
+	}
+
+	private record SafetyRunCandidate(
+			UUID id, UUID campaignId, UUID smtpAccountId, byte[] destinationHmac,
+			String destinationMasked, String destinationDomain,
+			String fromName, String fromEmail, String replyTo,
+			boolean trackingOpens, boolean trackingClicks
+	) {
+		private SafetyRunCandidate {
+			destinationHmac = copy(destinationHmac);
+		}
+
+		@Override public byte[] destinationHmac() { return copy(destinationHmac); }
+	}
+
+	private record SafetyMessageCandidate(
+			UUID id, UUID campaignRecipientId, int attemptCount, String rfcMessageId,
+			String subject, String html, String text
+	) { }
+
 	private record Cooldown(Instant lastAccepted) { }
 
 	private record Eligibility(String reason) { }
@@ -860,6 +1136,8 @@ public final class CampaignDeliveryRepository {
 	private record Reservation(Instant startedAt, String domain) { }
 
 	public record FailureSettlement(boolean applied, AttemptStatus recipientStatus) { }
+
+	public sealed interface DeliveryClaim permits ProductionClaim, SafetyClaim { }
 
 	public record ProductionClaim(
 			UUID recipientId, UUID campaignId, UUID attemptId, int attemptNumber,
@@ -869,7 +1147,7 @@ public final class CampaignDeliveryRepository {
 			String fromName, String fromEmail, String replyTo,
 			boolean trackingOpensEnabled, boolean trackingClicksEnabled, boolean unsubscribeEnabled,
 			String renderedSubject, String renderedHtml, String renderedText
-	) {
+	) implements DeliveryClaim {
 		public ProductionClaim {
 			leaseDigest = copy(leaseDigest);
 			emailCiphertext = copy(emailCiphertext);
@@ -881,5 +1159,23 @@ public final class CampaignDeliveryRepository {
 		@Override public byte[] emailCiphertext() { return copy(emailCiphertext); }
 		@Override public byte[] emailNonce() { return copy(emailNonce); }
 		@Override public byte[] emailHmac() { return copy(emailHmac); }
+	}
+
+	public record SafetyClaim(
+			UUID messageId, UUID runId, UUID campaignRecipientId, UUID attemptId, int attemptNumber,
+			String idempotencyKey, String rfcMessageId, String correlationId, byte[] leaseDigest,
+			byte[] destinationHmac, String destinationMasked, String destinationDomain,
+			SmtpRepository.SmtpAccountRecord smtpAccount,
+			String fromName, String fromEmail, String replyTo,
+			boolean trackingOpensEnabled, boolean trackingClicksEnabled,
+			String renderedSubject, String renderedHtml, String renderedText
+	) implements DeliveryClaim {
+		public SafetyClaim {
+			leaseDigest = copy(leaseDigest);
+			destinationHmac = copy(destinationHmac);
+		}
+
+		@Override public byte[] leaseDigest() { return copy(leaseDigest); }
+		@Override public byte[] destinationHmac() { return copy(destinationHmac); }
 	}
 }

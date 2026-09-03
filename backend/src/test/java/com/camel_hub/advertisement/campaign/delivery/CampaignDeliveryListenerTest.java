@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.kafka.annotation.KafkaListener;
 import reactor.core.CoreSubscriber;
@@ -14,6 +16,7 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.charset.StandardCharsets;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -26,6 +29,14 @@ class CampaignDeliveryListenerTest {
 			 "campaignId":"20000000-0000-0000-0000-000000000002",
 			 "action":"START",
 			 "traceId":"deliverytrace1",
+			 "createdAt":"2030-04-05T10:15:30Z"}
+			""";
+	private static final String VALID_SAFETY = """
+			{"version":1,
+			 "messageId":"10000000-0000-0000-0000-000000000001",
+			 "safetyRunId":"30000000-0000-0000-0000-000000000003",
+			 "action":"SAFETY_START",
+			 "traceId":"safetytrace1",
 			 "createdAt":"2030-04-05T10:15:30Z"}
 			""";
 
@@ -46,6 +57,49 @@ class CampaignDeliveryListenerTest {
 		assertThat(pumps).hasValue(2);
 		assertThat(acknowledgments).hasValue(2);
 		assertThat(deadLetters.published).hasValue(0);
+	}
+
+	@Test
+	void acceptsTheExactPrivacyMinimalSafetyDiscriminator() {
+		AtomicInteger pumps = new AtomicInteger();
+		AtomicInteger acknowledgments = new AtomicInteger();
+		CapturingDeadLetters deadLetters = new CapturingDeadLetters();
+		CampaignDeliveryListener listener = new CampaignDeliveryListener(
+				new ObjectMapper().findAndRegisterModules(), () -> {
+					pumps.incrementAndGet();
+					return Mono.just(CampaignDeliveryExecutor.PumpResult.NO_WORK);
+				}, deadLetters);
+
+		listener.consume(record(VALID_SAFETY), acknowledgments::incrementAndGet);
+
+		assertThat(pumps).hasValue(1);
+		assertThat(acknowledgments).hasValue(1);
+		assertThat(deadLetters.published).hasValue(0);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"{\"version\":1,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"campaignId\":\"20000000-0000-0000-0000-000000000002\",\"safetyRunId\":\"30000000-0000-0000-0000-000000000003\",\"action\":\"SAFETY_START\",\"traceId\":\"safetytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\"}",
+			"{\"version\":1,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"safetyRunId\":\"30000000-0000-0000-0000-000000000003\",\"action\":\"START\",\"traceId\":\"safetytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\"}",
+			"{\"version\":1,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"safetyRunId\":\"30000000-0000-0000-0000-000000000003\",\"action\":\"SAFETY_START\",\"traceId\":\"safetytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\",\"recipient\":\"private@example.test\"}"
+	})
+	void rejectsMixedOrExpandedSafetyWakeupShapes(String payload) {
+		AtomicInteger pumps = new AtomicInteger();
+		AtomicInteger acknowledgments = new AtomicInteger();
+		CapturingDeadLetters deadLetters = new CapturingDeadLetters();
+		CampaignDeliveryListener listener = new CampaignDeliveryListener(
+				new ObjectMapper().findAndRegisterModules(), () -> {
+					pumps.incrementAndGet();
+					return Mono.just(CampaignDeliveryExecutor.PumpResult.NO_WORK);
+				}, deadLetters);
+
+		listener.consume(record(payload), acknowledgments::incrementAndGet);
+
+		assertThat(pumps).hasValue(0);
+		assertThat(acknowledgments).hasValue(1);
+		assertThat(deadLetters.published).hasValue(1);
+		assertThat(deadLetters.source.value()).isEqualTo(
+				"{\"version\":1,\"failureCategory\":\"INVALID_CONTRACT\"}");
 	}
 
 	@Test
@@ -78,6 +132,7 @@ class CampaignDeliveryListenerTest {
 	@ParameterizedTest
 	@ValueSource(strings = {
 			"{\"version\":2,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"campaignId\":\"20000000-0000-0000-0000-000000000002\",\"action\":\"START\",\"traceId\":\"deliverytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\"}",
+			"{\"version\":\"1\",\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"campaignId\":\"20000000-0000-0000-0000-000000000002\",\"action\":\"START\",\"traceId\":\"deliverytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\"}",
 			"{\"version\":1,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"campaignId\":\"20000000-0000-0000-0000-000000000002\",\"action\":\"SEND\",\"traceId\":\"deliverytrace1\",\"createdAt\":\"2030-04-05T10:15:30Z\"}",
 			"{\"version\":1,\"messageId\":\"10000000-0000-0000-0000-000000000001\",\"campaignId\":\"20000000-0000-0000-0000-000000000002\",\"action\":\"START\",\"traceId\":\"deliverytrace1\"}"
 	})
@@ -96,6 +151,54 @@ class CampaignDeliveryListenerTest {
 		assertThat(pumps).hasValue(0);
 		assertThat(acknowledgments).hasValue(1);
 		assertThat(deadLetters.published).hasValue(1);
+	}
+
+	@ParameterizedTest(name = "strict JSON/UUID contract rejects {0}")
+	@MethodSource("nonCanonicalEnvelopes")
+	void rejectsDuplicateFieldsTrailingRootsAndNonCanonicalUuidStrings(
+			String label, String invalidPayload
+	) {
+		AtomicInteger pumps = new AtomicInteger();
+		AtomicInteger acknowledgments = new AtomicInteger();
+		CapturingDeadLetters deadLetters = new CapturingDeadLetters();
+		CampaignDeliveryListener listener = new CampaignDeliveryListener(
+				new ObjectMapper().findAndRegisterModules(), () -> {
+					pumps.incrementAndGet();
+					return Mono.just(CampaignDeliveryExecutor.PumpResult.NO_WORK);
+				}, deadLetters);
+
+		listener.consume(record(invalidPayload), acknowledgments::incrementAndGet);
+
+		assertThat(pumps).as(label).hasValue(0);
+		assertThat(acknowledgments).as(label).hasValue(1);
+		assertThat(deadLetters.published).as(label).hasValue(1);
+		assertThat(deadLetters.source.key()).isNull();
+		assertThat(deadLetters.source.value())
+				.isEqualTo("{\"version\":1,\"failureCategory\":\"INVALID_CONTRACT\"}");
+	}
+
+	private static Stream<Arguments> nonCanonicalEnvelopes() {
+		return Stream.of(
+				Arguments.of("duplicate-field", """
+						{"version":1,
+						 "messageId":"10000000-0000-0000-0000-000000000001",
+						 "messageId":"10000000-0000-0000-0000-000000000001",
+						 "campaignId":"20000000-0000-0000-0000-000000000002",
+						 "action":"START","traceId":"deliverytrace1",
+						 "createdAt":"2030-04-05T10:15:30Z"}
+						"""),
+				Arguments.of("trailing-root", VALID + "{}"),
+				Arguments.of("non-canonical-message-uuid", """
+						{"version":1,"messageId":"1-1-1-1-1",
+						 "safetyRunId":"30000000-0000-0000-0000-000000000003",
+						 "action":"SAFETY_START","traceId":"safetytrace1",
+						 "createdAt":"2030-04-05T10:15:30Z"}
+						"""),
+				Arguments.of("non-canonical-aggregate-uuid", """
+						{"version":1,"messageId":"10000000-0000-0000-0000-000000000001",
+						 "campaignId":"2-2-2-2-2","action":"START",
+						 "traceId":"deliverytrace1","createdAt":"2030-04-05T10:15:30Z"}
+						"""));
 	}
 
 	@Test

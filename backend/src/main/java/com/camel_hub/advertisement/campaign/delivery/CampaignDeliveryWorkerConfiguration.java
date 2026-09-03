@@ -2,6 +2,9 @@ package com.camel_hub.advertisement.campaign.delivery;
 
 import com.camel_hub.advertisement.contact.config.ContactDataProtectionProperties;
 import com.camel_hub.advertisement.contact.security.ContactCrypto;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyOutboundPreparer;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
 import com.camel_hub.advertisement.email.smtp.SmtpPolicy;
 import com.camel_hub.advertisement.email.smtp.SmtpProperties;
 import com.camel_hub.advertisement.email.smtp.SmtpRepository;
@@ -16,6 +19,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -81,9 +85,11 @@ public class CampaignDeliveryWorkerConfiguration {
 	@ConditionalOnProperty(prefix = "app.campaign-delivery", name = "enabled", havingValue = "true")
 	CampaignDeliveryRepository campaignDeliveryRepository(
 			DatabaseClient database, TransactionalOperator transactions,
-			CampaignDeliveryProperties properties, CampaignSafetyProperties safety
+			CampaignDeliveryProperties properties, CampaignSafetyProperties safety,
+			ObjectProvider<CampaignSafetyRuntimePolicy> safetyPolicy
 	) {
-		return new CampaignDeliveryRepository(database, transactions, properties, safety);
+		return new CampaignDeliveryRepository(
+				database, transactions, properties, safety, safetyPolicy.getIfAvailable());
 	}
 
 	@Bean
@@ -101,11 +107,19 @@ public class CampaignDeliveryWorkerConfiguration {
 				return;
 			}
 			RootBeanDefinition executor = new RootBeanDefinition(CampaignDeliveryExecutor.class);
-			executor.setInstanceSupplier(() -> new CampaignDeliveryExecutor(
-					beanFactory.getBean(CampaignDeliveryRepository.class),
-					beanFactory.getBean(CampaignOutboundPreparer.class),
-					beanFactory.getBean(ContactCrypto.class), beanFactory.getBean(SmtpTransport.class),
-					beanFactory.getBean(Clock.class)));
+			executor.setInstanceSupplier(() -> {
+				CampaignSafetyRepository safetyRepository = beanFactory
+						.getBeanProvider(CampaignSafetyRepository.class).getIfAvailable();
+				CampaignSafetyOutboundPreparer safetyPreparer = beanFactory
+						.getBeanProvider(CampaignSafetyOutboundPreparer.class).getIfAvailable();
+				return new CampaignDeliveryExecutor(
+						beanFactory.getBean(CampaignDeliveryRepository.class),
+						beanFactory.getBean(CampaignOutboundPreparer.class),
+						safetyRepository, safetyPreparer,
+						beanFactory.getBean(ContactCrypto.class),
+						beanFactory.getBean(SmtpTransport.class)::sendDetailed,
+						beanFactory.getBean(Clock.class));
+			});
 			registry.registerBeanDefinition("campaignDeliveryExecutor", executor);
 
 			RootBeanDefinition listener = new RootBeanDefinition(CampaignDeliveryListener.class);
@@ -117,6 +131,8 @@ public class CampaignDeliveryWorkerConfiguration {
 			RootBeanDefinition scheduler = new RootBeanDefinition(CampaignDeliveryScheduler.class);
 			scheduler.setInstanceSupplier(() -> new CampaignDeliveryScheduler(
 					beanFactory.getBean(CampaignDeliveryRepository.class),
+					beanFactory.getBeanProvider(CampaignSafetyRepository.class).getIfAvailable(),
+					beanFactory.getBean(CampaignSafetyProperties.class),
 					beanFactory.getBean(CampaignDeliveryExecutor.class),
 					beanFactory.getBean(CampaignDeliveryProperties.class), beanFactory.getBean(Clock.class)));
 			registry.registerBeanDefinition("campaignDeliveryScheduler", scheduler);

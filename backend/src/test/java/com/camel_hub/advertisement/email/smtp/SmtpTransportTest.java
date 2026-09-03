@@ -2,7 +2,9 @@ package com.camel_hub.advertisement.email.smtp;
 
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.campaign.tracking.CampaignTrackingSigner;
+import com.camel_hub.advertisement.email.tracking.MailTrackingSigner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -230,23 +232,66 @@ class SmtpTransportTest {
 	@Test
 	void redactsEachExactCampaignCapabilityWhenImmediatelyFollowedByCommonPunctuation() {
 		CampaignTrackingSigner signer = new CampaignTrackingSigner(KEY);
+		CampaignSafetySigner safetySigner = new CampaignSafetySigner(KEY);
+		MailTrackingSigner testMailSigner = new MailTrackingSigner(KEY);
 		UUID recipient = UUID.fromString("41000000-0000-0000-0000-00000000000a");
 		Instant expiry = Instant.ofEpochSecond(1_900_000_000L);
 		List<String> capabilities = List.of(
 				signer.issueOpen(recipient, expiry),
 				signer.issueClick(recipient,
 						UUID.fromString("51000000-0000-0000-0000-00000000000b"), expiry),
-				signer.issueUnsubscribe(recipient, expiry));
+				signer.issueUnsubscribe(recipient, expiry),
+				safetySigner.issueOpen(recipient, expiry),
+				safetySigner.issueClick(recipient,
+						UUID.fromString("51000000-0000-0000-0000-00000000000b"), expiry),
+				safetySigner.issueUnsubscribe(recipient, expiry),
+				testMailSigner.issue(recipient, expiry),
+				testMailSigner.issueClick(recipient,
+						UUID.fromString("51000000-0000-0000-0000-00000000000b"), expiry));
 
 		for (String capability : capabilities) {
 			for (String punctuation : List.of(".", ":", "-", ",", ";", "!", "?", ")", "]", "}")) {
 				String sanitized = SmtpTransportException.sanitize("450 rejected " + capability + punctuation);
 				assertThat(sanitized).as(capability.substring(0, capability.indexOf('.')) + punctuation)
 						.doesNotContain(capability, "campaign-open:v1", "campaign-click:v1",
-								"campaign-unsubscribe:v1")
+								"campaign-unsubscribe:v1", "campaign-safety-open:v1",
+								"campaign-safety-click:v1", "campaign-safety-unsubscribe:v1")
 						.contains("[redacted-capability]" + punctuation);
 			}
 		}
+	}
+
+	@Test
+	void redactsPercentEncodedSafetyCapabilitiesFromProviderResponses() {
+		UUID message = UUID.fromString("41000000-0000-0000-0000-00000000000a");
+		UUID link = UUID.fromString("51000000-0000-0000-0000-00000000000b");
+		Instant expiry = Instant.ofEpochSecond(1_900_000_000L);
+		CampaignTrackingSigner production = new CampaignTrackingSigner(KEY);
+		CampaignSafetySigner safety = new CampaignSafetySigner(KEY);
+		MailTrackingSigner testMail = new MailTrackingSigner(KEY);
+		for (String capability : List.of(
+				production.issueOpen(message, expiry), production.issueClick(message, link, expiry),
+				production.issueUnsubscribe(message, expiry), safety.issueOpen(message, expiry),
+				safety.issueClick(message, link, expiry), safety.issueUnsubscribe(message, expiry),
+				testMail.issue(message, expiry), testMail.issueClick(message, link, expiry))) {
+			String encoded = capability.replace("-", "%2D").replace(":", "%3A").replace(".", "%2E");
+			encoded = encoded.replace("%", "%25");
+
+			String sanitized = SmtpTransportException.sanitize("450 rejected " + encoded);
+
+			assertThat(sanitized).as(capability.substring(0, capability.indexOf('.')))
+					.doesNotContain(encoded, capability, "campaign", "%25", "v1c%", "v1%")
+					.contains("[redacted-capability]");
+
+			String compatibilityEncoded = compatibilityPercentEncoded(capability);
+			assertThat(SmtpTransportException.sanitize("450 rejected " + compatibilityEncoded))
+					.as("compatibility-percent " + capability.substring(0, capability.indexOf('.')))
+					.doesNotContain(compatibilityEncoded, capability)
+					.contains("[redacted-capability]");
+		}
+		String wrapped = "X" + testMail.issue(message, expiry);
+		assertThat(SmtpTransportException.sanitize("450 rejected " + wrapped))
+				.doesNotContain(wrapped).contains("X[redacted-capability]");
 	}
 
 	@Test
@@ -351,6 +396,16 @@ class SmtpTransportTest {
 
 	private SmtpTransport transport() {
 		return transport(false);
+	}
+
+	private String compatibilityPercentEncoded(String value) {
+		StringBuilder encoded = new StringBuilder(value.length() * 3);
+		for (byte octet : value.getBytes(java.nio.charset.StandardCharsets.US_ASCII)) {
+			int unsigned = Byte.toUnsignedInt(octet);
+			encoded.append('％').append(Character.toUpperCase(Character.forDigit(unsigned >>> 4, 16)))
+					.append(Character.toUpperCase(Character.forDigit(unsigned & 0xf, 16)));
+		}
+		return encoded.toString();
 	}
 
 	private SmtpTransport transport(boolean liveAllowed) {

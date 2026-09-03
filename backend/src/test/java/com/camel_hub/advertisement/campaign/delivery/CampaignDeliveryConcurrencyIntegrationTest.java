@@ -1,5 +1,12 @@
 package com.camel_hub.advertisement.campaign.delivery;
 
+import com.camel_hub.advertisement.campaign.CampaignConflictException;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
+import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
+import com.camel_hub.advertisement.email.smtp.SmtpProperties;
+import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -10,6 +17,7 @@ import reactor.core.scheduler.Schedulers;
 import java.time.Duration;
 import java.util.List;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -85,6 +93,51 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 		assertThat(count("delivery_attempts")).isEqualTo(history + 1L);
 	}
 
+	@ParameterizedTest(name = "production and safety share the final {0} slot")
+	@MethodSource("mixedRollingConcurrencyCases")
+	void productionAndSafetyClaimsCannotOversubscribeAnyRollingWindow(
+			String label, int minute, int hour, int day, int domainHour, Duration window
+	) throws Exception {
+		setLimits(minute, hour, day, domainHour);
+		UUID safetyCampaign = insertCampaign("DRAFT");
+		UUID source = insertEligibleRecipient(safetyCampaign, "source@research.test");
+		UUID safetyMessage = insertDueSafetyRun(source, "fixed@research.test");
+		UUID productionCampaign = insertCampaign("RUNNING");
+		UUID productionRecipient = insertEligibleRecipient(productionCampaign, "production@research.test");
+		CampaignDeliveryRepository safetyRepository = safetyRepository("fixed@research.test");
+		CountDownLatch subscribed = new CountDownLatch(2);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		CompletableFuture<CampaignDeliveryRepository.DeliveryClaim> safetyClaim = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release).then(safetyRepository.claimNext(NOW));
+		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		CompletableFuture<CampaignDeliveryRepository.DeliveryClaim> productionClaim = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release).then(firstRepository.claimNext(NOW));
+		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
+
+		release.complete(null);
+		CampaignDeliveryRepository.DeliveryClaim[] claims = {
+				safetyClaim.get(20, TimeUnit.SECONDS), productionClaim.get(20, TimeUnit.SECONDS)};
+
+		assertThat(Arrays.asList(claims)).filteredOn(java.util.Objects::nonNull).hasSize(1);
+		assertThat(count("delivery_attempts") + count("campaign_safety_attempts")).isEqualTo(1);
+		String productionStatus = text("SELECT status FROM campaign_recipients WHERE id = '"
+				+ productionRecipient + "'");
+		String safetyStatus = text("SELECT status FROM campaign_safety_messages WHERE id = '"
+				+ safetyMessage + "'");
+		assertThat(List.of(productionStatus, safetyStatus)).containsExactlyInAnyOrder("CONNECTING", "QUEUED");
+		if ("QUEUED".equals(productionStatus)) {
+			assertThat(instant("SELECT next_attempt_at FROM campaign_recipients WHERE id = '"
+					+ productionRecipient + "'")).as(label).isEqualTo(NOW.plus(window));
+		}
+		else {
+			assertThat(instant("SELECT next_attempt_at FROM campaign_safety_messages WHERE id = '"
+					+ safetyMessage + "'")).as(label).isEqualTo(NOW.plus(window));
+		}
+	}
+
 	private static Stream<Arguments> rollingConcurrencyCases() {
 		return Stream.of(
 				Arguments.of("2/minute", 2, 100, 1000, 100, 1,
@@ -95,6 +148,15 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 						Duration.ofHours(12), "other.test"),
 				Arguments.of("10/domain-hour", 100, 100, 1000, 10, 9,
 						Duration.ofMinutes(30), "research.test"));
+	}
+
+	private static Stream<Arguments> mixedRollingConcurrencyCases() {
+		return Stream.of(
+				Arguments.of("minute", 1, 100, 1000, 100, Duration.ofMinutes(1)),
+				Arguments.of("hour", 100, 1, 1000, 100, Duration.ofHours(1)),
+				Arguments.of("day", 100, 100, 1, 100, Duration.ofDays(1)),
+				Arguments.of("domain-hour", 100, 100, 1000, 1, Duration.ofHours(1))
+		);
 	}
 
 	@Test
@@ -133,7 +195,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	void lateCompletionCannotOverwriteExpiredLeaseReconciliation() {
 		UUID campaignId = insertCampaign("RUNNING");
 		insertEligibleRecipient(campaignId, "late@research.test");
-		CampaignDeliveryRepository.ProductionClaim claim = firstRepository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim claim = firstRepository.claimNextProduction(NOW).block();
 		firstRepository.reconcileExpiredLeases(NOW.plus(DELIVERY_PROPERTIES.leaseDuration()).plusSeconds(1)).block();
 
 		boolean applied = firstRepository.completeAccepted(
@@ -163,6 +225,58 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	@Test
+	void productionClaimAndSafetyStartCannotCrossTheSameCampaignLockBoundary() throws Exception {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "start-claim-race@research.test");
+		CampaignSafetyProperties safety = new CampaignSafetyProperties(true, "fixed@research.test", 20);
+		CampaignSafetySigner signer = new CampaignSafetySigner(HMAC_KEY);
+		CampaignSafetyRuntimePolicy policy = new CampaignSafetyRuntimePolicy(
+				safety, new SmtpProperties(true, Set.of("localhost"), Duration.ofSeconds(2),
+				Duration.ofSeconds(2), Duration.ofSeconds(2), ""),
+				new MailTrackingProperties(true, "https://tracking.example.test", HMAC_KEY,
+						Duration.ofDays(30), Duration.ofMinutes(15)), signer,
+				DELIVERY_PROPERTIES.leaseDuration());
+		CampaignSafetyRepository safetyRepository = new CampaignSafetyRepository(
+				databaseClient, transactions, new ObjectMapper().findAndRegisterModules());
+		CampaignSafetyRuntimePolicy.Destination destination = policy.requireReady();
+		CountDownLatch subscribed = new CountDownLatch(2);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		CompletableFuture<CampaignDeliveryRepository.DeliveryClaim> production = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release).then(firstRepository.claimNext(NOW));
+		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		CompletableFuture<Object> safetyStart = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release)
+					.then(safetyRepository.materialize(new CampaignSafetyRepository.MaterializeCommand(
+							campaignId, ACTOR, 0, 1, destination.hmac(), destination.masked(), NOW,
+							"safetystartclaimrace")))
+					.cast(Object.class);
+		}).onErrorResume(error -> reactor.core.publisher.Mono.just(error))
+				.subscribeOn(Schedulers.boundedElastic()).toFuture();
+		assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
+
+		release.complete(null);
+		CampaignDeliveryRepository.DeliveryClaim productionResult = production.get(20, TimeUnit.SECONDS);
+		Object safetyResult = safetyStart.get(20, TimeUnit.SECONDS);
+
+		if (safetyResult instanceof CampaignSafetyRepository.MaterializedRun) {
+			assertThat(productionResult).isNull();
+			assertThat(count("delivery_attempts")).isZero();
+			assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + recipientId + "'"))
+					.isEqualTo("QUEUED");
+			assertThat(count("campaign_safety_runs")).isEqualTo(1);
+		}
+		else {
+			assertThat(safetyResult).isInstanceOf(CampaignConflictException.class);
+			assertThat(productionResult).isInstanceOf(CampaignDeliveryRepository.ProductionClaim.class);
+			assertThat(count("campaign_safety_runs")).isZero();
+			assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + recipientId + "'"))
+					.isEqualTo("CONNECTING");
+		}
+	}
+
+	@Test
 	void finalReservationRechecksSuppressionInsertedWhileClaimWaitsOnAccountLock() throws Exception {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "eligibility-race@research.test");
@@ -173,7 +287,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 				statement.execute("SELECT id FROM smtp_accounts WHERE id = '" + SMTP + "' FOR UPDATE");
 			}
 			CompletableFuture<CampaignDeliveryRepository.ProductionClaim> claim = firstRepository
-					.claimNext(NOW).subscribeOn(Schedulers.boundedElastic()).toFuture();
+					.claimNextProduction(NOW).subscribeOn(Schedulers.boundedElastic()).toFuture();
 			assertThat(awaitBlockedClaim()).isTrue();
 			sql("INSERT INTO suppression_entries (email_hmac, email_domain, reason, source) "
 					+ "SELECT email_hmac, email_domain, 'MANUAL', 'RACE_TEST' FROM campaign_recipients WHERE id = '"
@@ -198,7 +312,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 			try (var statement = control.createStatement()) {
 				statement.execute("UPDATE campaigns SET status = 'PAUSED' WHERE id = '" + campaignId + "'");
 			}
-			claim = firstRepository.claimNext(NOW).block(Duration.ofSeconds(5));
+			claim = firstRepository.claimNextProduction(NOW).block(Duration.ofSeconds(5));
 			control.commit();
 		}
 
@@ -240,7 +354,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 		CompletableFuture<Void> release = new CompletableFuture<>();
 		CompletableFuture<CampaignDeliveryRepository.ProductionClaim> claim = reactor.core.publisher.Mono.defer(() -> {
 			subscribed.countDown();
-			return reactor.core.publisher.Mono.fromFuture(release).then(firstRepository.claimNext(NOW));
+			return reactor.core.publisher.Mono.fromFuture(release).then(firstRepository.claimNextProduction(NOW));
 		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
 		CompletableFuture<Integer> reconciliation = reactor.core.publisher.Mono.defer(() -> {
 			subscribed.countDown();
@@ -285,7 +399,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 		List<CompletableFuture<CampaignDeliveryRepository.ProductionClaim>> futures = repositories.stream()
 				.map(repository -> reactor.core.publisher.Mono.defer(() -> {
 					subscribed.countDown();
-					return reactor.core.publisher.Mono.fromFuture(release).then(repository.claimNext(NOW));
+					return reactor.core.publisher.Mono.fromFuture(release).then(repository.claimNextProduction(NOW));
 				}).subscribeOn(Schedulers.boundedElastic()).toFuture())
 				.toList();
 		assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();

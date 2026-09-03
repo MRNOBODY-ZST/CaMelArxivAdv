@@ -90,11 +90,11 @@ class CampaignDeliveryExecutorTest extends CampaignDeliveryDatabaseTestSupport {
 	void exhaustedExplicitFourHundredReportsTheDurableRecipientTerminalState() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "exhausted@research.test");
-		CampaignDeliveryRepository.ProductionClaim first = repository.claimNext(NOW).block();
+		CampaignDeliveryRepository.ProductionClaim first = repository.claimNextProduction(NOW).block();
 		repository.completeFailure(first.recipientId(), first.attemptId(), first.leaseDigest(),
 				temporary(450), NOW).block();
 		CampaignDeliveryRepository.ProductionClaim second = repository
-				.claimNext(NOW.plus(Duration.ofMinutes(1))).block();
+				.claimNextProduction(NOW.plus(Duration.ofMinutes(1))).block();
 		repository.completeFailure(second.recipientId(), second.attemptId(), second.leaseDigest(),
 				temporary(451), NOW.plus(Duration.ofMinutes(1))).block();
 		CampaignDeliveryExecutor executor = new CampaignDeliveryExecutor(

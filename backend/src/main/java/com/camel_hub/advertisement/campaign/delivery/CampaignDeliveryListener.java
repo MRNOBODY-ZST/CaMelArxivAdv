@@ -4,6 +4,7 @@ import com.camel_hub.advertisement.messaging.KafkaDeadLetterPublisher;
 import com.camel_hub.advertisement.messaging.KafkaTopics;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonParser;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
@@ -19,8 +20,10 @@ public final class CampaignDeliveryListener {
 	static final String GROUP_ID = "camel-mail-delivery-v1";
 	private static final String INVALID_ENVELOPE =
 			"{\"version\":1,\"failureCategory\":\"INVALID_CONTRACT\"}";
-	private static final Set<String> FIELDS = Set.of(
+	private static final Set<String> PRODUCTION_FIELDS = Set.of(
 			"version", "messageId", "campaignId", "action", "traceId", "createdAt");
+	private static final Set<String> SAFETY_FIELDS = Set.of(
+			"version", "messageId", "safetyRunId", "action", "traceId", "createdAt");
 
 	private final ObjectMapper objectMapper;
 	private final DeliveryPump pump;
@@ -59,16 +62,27 @@ public final class CampaignDeliveryListener {
 	}
 
 	private boolean valid(String payload) {
-		try {
-			JsonNode root = objectMapper.readTree(payload);
+		try (JsonParser parser = objectMapper.getFactory().createParser(payload)) {
+			parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+			JsonNode root = objectMapper.readTree(parser);
+			if (parser.nextToken() != null) return false;
 			if (root == null || !root.isObject()) return false;
 			Set<String> actual = new HashSet<>();
 			root.fieldNames().forEachRemaining(actual::add);
-			if (!actual.equals(FIELDS) || root.path("version").asInt(-1) != 1) return false;
-			UUID.fromString(requiredText(root, "messageId"));
-			UUID.fromString(requiredText(root, "campaignId"));
+			JsonNode version = root.get("version");
+			if (version == null || !version.isIntegralNumber() || !version.canConvertToInt()
+					|| version.intValue() != 1) return false;
+			canonicalUuid(requiredText(root, "messageId"));
 			String action = requiredText(root, "action");
-			if (!Set.of("START", "SCHEDULE").contains(action)) return false;
+			if (actual.equals(PRODUCTION_FIELDS)) {
+				canonicalUuid(requiredText(root, "campaignId"));
+				if (!Set.of("START", "SCHEDULE").contains(action)) return false;
+			}
+			else if (actual.equals(SAFETY_FIELDS)) {
+				canonicalUuid(requiredText(root, "safetyRunId"));
+				if (!"SAFETY_START".equals(action)) return false;
+			}
+			else return false;
 			String trace = requiredText(root, "traceId");
 			if (!trace.matches("[A-Za-z0-9_-]{1,64}")) return false;
 			Instant.parse(requiredText(root, "createdAt"));
@@ -77,6 +91,15 @@ public final class CampaignDeliveryListener {
 		catch (RuntimeException | java.io.IOException ignored) {
 			return false;
 		}
+	}
+
+	private UUID canonicalUuid(String value) {
+		if (value.length() != 36) throw new IllegalArgumentException("Invalid delivery envelope UUID");
+		UUID parsed = UUID.fromString(value);
+		if (!parsed.toString().equals(value)) {
+			throw new IllegalArgumentException("Invalid delivery envelope UUID");
+		}
+		return parsed;
 	}
 
 	private String requiredText(JsonNode root, String name) {
