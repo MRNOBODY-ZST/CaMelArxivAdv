@@ -9,6 +9,7 @@ import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryScheduler;
 import com.camel_hub.advertisement.identity.api.AuthController;
 import com.camel_hub.advertisement.job.api.JobController;
 import com.camel_hub.advertisement.job.domain.JobStateMachine;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -62,6 +63,7 @@ class MailWorkerProfileIsolationTest {
 
 	@Test
 	void loadsOnlyDeliveryWorkerInfrastructure() {
+		assertThat(context.getBeansOfType(ObjectMapper.class)).hasSize(1);
 		assertThat(context.getBeansOfType(PasswordEncoder.class)).isEmpty();
 		assertThat(context.getBeansOfType(JobStateMachine.class)).isEmpty();
 		assertThat(context.getBeansOfType(AtomFeedParser.class)).isEmpty();

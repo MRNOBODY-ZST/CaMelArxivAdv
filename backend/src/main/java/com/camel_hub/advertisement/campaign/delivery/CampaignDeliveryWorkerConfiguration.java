@@ -38,6 +38,19 @@ import java.time.Clock;
 })
 public class CampaignDeliveryWorkerConfiguration {
 	@Bean
+	static BeanFactoryPostProcessor campaignDeliveryObjectMapperRegistrar() {
+		return beanFactory -> {
+			if (!(beanFactory instanceof DefaultListableBeanFactory registry)
+					|| beanFactory.getBeanNamesForType(ObjectMapper.class, false, false).length != 0) {
+				return;
+			}
+			RootBeanDefinition objectMapper = new RootBeanDefinition(ObjectMapper.class);
+			objectMapper.setInstanceSupplier(() -> new ObjectMapper().findAndRegisterModules());
+			registry.registerBeanDefinition("campaignDeliveryObjectMapper", objectMapper);
+		};
+	}
+
+	@Bean
 	@ConditionalOnProperty(prefix = "app.campaign-delivery", name = "enabled", havingValue = "true")
 	@ConditionalOnMissingBean
 	TransactionalOperator campaignDeliveryTransactions(ReactiveTransactionManager manager) {
