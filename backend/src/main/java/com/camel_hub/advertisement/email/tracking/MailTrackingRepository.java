@@ -1,8 +1,11 @@
 package com.camel_hub.advertisement.email.tracking;
 
+import com.camel_hub.advertisement.email.smtp.SmtpQuotaRepository;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.r2dbc.connection.R2dbcTransactionManager;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -14,9 +17,13 @@ import static com.camel_hub.advertisement.email.tracking.MailTrackingModels.*;
 
 public final class MailTrackingRepository {
 	private final DatabaseClient database;
+	private final SmtpQuotaRepository quotas;
+	private final TransactionalOperator transactions;
 
 	public MailTrackingRepository(DatabaseClient database) {
 		this.database = database;
+		this.quotas = new SmtpQuotaRepository(database);
+		this.transactions = TransactionalOperator.create(new R2dbcTransactionManager(database.getConnectionFactory()));
 	}
 
 	public Mono<Void> insert(
@@ -33,7 +40,8 @@ public final class MailTrackingRepository {
 				.bind("tracked", tokenHash != null).bind("created", createdAt);
 		query = expiresAt == null ? query.bindNull("expires", Instant.class) : query.bind("expires", expiresAt);
 		query = tokenHash == null ? query.bindNull("hash", byte[].class) : query.bind("hash", tokenHash);
-		return query.fetch().rowsUpdated().then();
+		return quotas.checkDiagnosticCapacity(accountId, recipientMasked, createdAt)
+				.then(query.fetch().rowsUpdated()).then().as(transactions::transactional);
 	}
 
 	public Mono<Void> complete(UUID id, Status status, String failureCategory, Instant completedAt) {

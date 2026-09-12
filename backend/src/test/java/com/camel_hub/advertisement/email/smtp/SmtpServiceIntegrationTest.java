@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class SmtpServiceIntegrationTest {
 
@@ -43,6 +44,7 @@ class SmtpServiceIntegrationTest {
 	private static ConnectionFactory connectionFactory;
 	private SmtpRepository repository;
 	private SmtpService service;
+	private SmtpTransport transport;
 
 	@BeforeAll
 	static void startDatabase() {
@@ -71,9 +73,10 @@ class SmtpServiceIntegrationTest {
 		SmtpProperties properties = new SmtpProperties(false, Set.of("mailpit"),
 				Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(10), key);
 		repository = new SmtpRepository(databaseClient);
+		transport = mock(SmtpTransport.class);
 		service = new SmtpService(repository, new SmtpSecretCrypto(key), new SmtpPolicy(properties),
 				audit, hasher, TransactionalOperator.create(new R2dbcTransactionManager(connectionFactory)),
-				mock(SmtpTransport.class), new MailTrackingService(new MailTrackingRepository(databaseClient),
+				transport, new MailTrackingService(new MailTrackingRepository(databaseClient),
 						new MailTrackingProperties(false, "http://localhost:8080", "", Duration.ofDays(30)),
 						null, new MailOpenClassifier(), Clock.systemUTC()));
 	}
@@ -99,6 +102,56 @@ class SmtpServiceIntegrationTest {
 		assertThat(afterRotate.passwordCiphertext()).isNotEqualTo(stored.passwordCiphertext());
 		assertThat(afterRotate.passwordNonce()).isNotEqualTo(stored.passwordNonce());
 		assertThat(rotated.passwordConfigured()).isTrue();
+	}
+
+	@Test
+	void persistsMonthlyQuotaAndPreservesItWhenAnOlderClientOmitsTheField() {
+		var legacy = service.create(ACTOR, command("Legacy", null), CONTEXT).block();
+		assertThat(legacy.perMonthLimit()).isNull();
+		var capped = service.create(ACTOR, monthlyCommand("Capped", 400, 12_000), CONTEXT).block();
+		assertThat(capped.perMonthLimit()).isEqualTo(12_000);
+		assertThat(repository.find(capped.id()).block().perMonthLimit()).isEqualTo(12_000);
+		var updated = service.update(ACTOR, capped.id(), capped.lockVersion(),
+				monthlyCommand("Capped updated", 400, null), CONTEXT).block();
+		assertThat(updated.perMonthLimit()).isEqualTo(12_000);
+		assertThat(service.list(1, 10).block().items()).anySatisfy(account -> {
+			assertThat(account.id()).isEqualTo(capped.id());
+			assertThat(account.perMonthLimit()).isEqualTo(12_000);
+		});
+	}
+
+	@Test
+	void rejectsDiagnosticAtTheMonthlyCapBeforeAnySmtpIo() {
+		var capped = service.create(ACTOR, new SmtpService.SmtpCommand(
+				"Capped diagnostic", "mailpit", 1025, "PLAIN_LOCAL_ONLY", null, null,
+				"sender@example.org", "Sender", "reply@example.org", 1, 1, 1, 1, 1, true), CONTEXT).block();
+		databaseClient.sql("""
+				INSERT INTO mail_send_records(id, source, recipient_masked, subject, smtp_account_id,
+				    status, created_at, completed_at)
+				VALUES (:id, 'TEMPLATE_TEST', 't***@example.org', 'Existing test', :smtp, 'SMTP_ACCEPTED', now(), now())
+				""").bind("id", UUID.randomUUID()).bind("smtp", capped.id()).fetch().rowsUpdated().block();
+
+		assertThatThrownBy(() -> service.sendDiagnostic(ACTOR, capped.id(), "recipient@example.org", "Test",
+				"Diagnostic body", false, CONTEXT).block())
+				.isInstanceOf(SmtpConflictException.class).hasMessageContaining("quota reached");
+		verifyNoInteractions(transport);
+		assertThat(databaseClient.sql("SELECT count(*) AS total FROM mail_send_records")
+				.map((row, metadata) -> row.get("total", Long.class)).one().block()).isEqualTo(1);
+	}
+
+	@Test
+	void rejectsMonthlyQuotaBelowDailyQuotaIncludingLegacyUpdates() {
+		assertThatThrownBy(() -> service.create(ACTOR, monthlyCommand("Invalid", 400, 399), CONTEXT))
+				.isInstanceOf(SmtpValidationException.class);
+		var capped = service.create(ACTOR, monthlyCommand("Capped", 400, 12_000), CONTEXT).block();
+		assertThatThrownBy(() -> service.update(ACTOR, capped.id(), capped.lockVersion(),
+				monthlyCommand("Invalid update", 12_001, null), CONTEXT).block())
+				.isInstanceOf(SmtpValidationException.class);
+	}
+
+	private SmtpService.SmtpCommand monthlyCommand(String name, int daily, Integer monthly) {
+		return new SmtpService.SmtpCommand(name, "mailpit", 1025, "PLAIN_LOCAL_ONLY", null, null,
+				"sender@example.org", "Research Team", "reply@example.org", 10, 100, daily, monthly, 50, true);
 	}
 
 	@Test

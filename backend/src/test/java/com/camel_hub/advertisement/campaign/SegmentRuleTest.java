@@ -10,6 +10,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SegmentRuleTest {
+	@Test
+	void keywordUsesLiteralContainsAndRejectsWrongOperatorsOrEmptyInput() {
+		assertThat(SegmentModels.criteria(List.of(new SegmentModels.RuleInput("paperKeyword", "contains", "  Agent  ")))
+				.paperKeyword()).isEqualTo("Agent");
+		assertThatThrownBy(() -> SegmentModels.criteria(List.of(new SegmentModels.RuleInput("paperKeyword", "equals", "Agent"))))
+				.isInstanceOf(SegmentValidationException.class);
+		assertThatThrownBy(() -> SegmentModels.criteria(List.of(new SegmentModels.RuleInput("paperKeyword", "contains", "  "))))
+				.isInstanceOf(SegmentValidationException.class);
+	}
 
 	@Test
 	void acceptsOnlyTheDocumentedRuleFieldsAndValues() {

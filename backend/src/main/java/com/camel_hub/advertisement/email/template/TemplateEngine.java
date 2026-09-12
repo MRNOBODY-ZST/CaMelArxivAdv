@@ -44,6 +44,8 @@ public final class TemplateEngine {
 			.addAttributes("table", "width", "cellpadding", "cellspacing", "border")
 			.addAttributes("td", "width", "colspan", "rowspan", "align", "valign")
 			.addAttributes("th", "width", "colspan", "rowspan", "align", "valign")
+			.addAttributes(":all", "style", "title")
+			.addAttributes("table", "role")
 			.addProtocols("a", "href", "http", "https", "mailto")
 			.addProtocols("img", "src", "http", "https")
 			.addEnforcedAttribute("a", "rel", "noopener noreferrer");
@@ -192,6 +194,14 @@ public final class TemplateEngine {
 		Document parsed = Jsoup.parseBodyFragment(html);
 		Map<String, String> assetPlaceholders = new LinkedHashMap<>();
 		for (Element element : parsed.getAllElements()) {
+			if (element.hasAttr("style")) {
+				String style = EmailInlineStyles.sanitize(element.attr("style"));
+				if (style.isEmpty()) element.removeAttr("style");
+				else element.attr("style", style);
+			}
+			if (element.hasAttr("role") && !element.attr("role").equals("presentation")) {
+				element.removeAttr("role");
+			}
 			for (Attribute attribute : element.attributes()) {
 				Matcher matcher = WHOLE_PLACEHOLDER.matcher(attribute.getValue());
 				if (matcher.matches() && URL_VARIABLES.contains(matcher.group(1))) {

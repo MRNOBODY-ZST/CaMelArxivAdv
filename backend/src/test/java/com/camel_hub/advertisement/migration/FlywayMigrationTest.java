@@ -88,6 +88,15 @@ class FlywayMigrationTest {
 	}
 
 	@Test
+	void addsOptionalMonthlyQuotaWithoutChangingExistingAccountLimits() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+		assertColumn("smtp_accounts", "per_month_limit", "integer", null, true);
+		assertThat(constraintDefinitions().get("ck_smtp_month_limit"))
+				.contains("per_month_limit IS NULL", "per_month_limit >= per_day_limit");
+		assertThat(indexNames()).contains("ix_mail_send_account_quota");
+	}
+
+	@Test
 	void seedsPromptRolesAndPermissionsWithoutAPlaintextAdministrator() throws SQLException {
 		assertThat(flyway().migrate().success).isTrue();
 
@@ -251,7 +260,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(10);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(11);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 		} finally {
 			dropSchema(schema);
@@ -383,7 +392,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(2);
+			assertThat(latest.migrate().migrationsExecuted).isEqualTo(3);
 			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
 			try (Connection connection = connection(schema);
 				 var statement = connection.prepareStatement("""

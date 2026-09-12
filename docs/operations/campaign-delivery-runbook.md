@@ -92,6 +92,16 @@ GET /api/v1/campaigns/{id}/preflight
 
 通过活动详情填写 1–20 和 `SAFETY_REDIRECT`。观察 run 的 queued/connecting/SMTP accepted/temporary failure/permanent failure/outcome unknown，直到所有 message 进入持久化终态。达到 SMTP 账户分钟、小时、日或域名窗口限制时应等待窗口自然恢复，不得提高限额绕过保护。
 
+### SMTP 月配额
+
+SMTP 账户支持 `perMonthLimit`。每天额度沿用滚动 24 小时；每月额度按 UTC 自然月计数，并在次月 1 日 00:00 UTC 恢复。若供应商使用不同结算时区，应按其限制设置更保守的配额。新建 API 请求可省略月限额以兼容旧账户；编辑时省略或传 `null` 保留已有月限额，非空值必须不小于日限额。
+
+配置了月限额的账户，正式活动、安全实流、SMTP 诊断邮件和模板测试邮件共同使用账户行锁预约额度；已接受、正在发送、结果未知的记录均占用额度。耗尽时活动自动等待，诊断/模板测试返回额度冲突而不连接 SMTP。界面显示的日/月上限仅约束本系统，经其他平台发送的邮件仍须计入供应商总额度。
+
+### Agent 研究筛选
+
+分组新增可选规则 `{"field":"paperKeyword","operator":"contains","value":"agent"}`，按论文标题与摘要做不区分大小写的字面包含匹配，支持与原有四个规则组合。预览、人数统计及生成收件人使用同一条件。关键词 `%`、`_` 不作为通配符；筛选不会改变作者邮箱证据或自动标记联系人有效。
+
 ## 7. Kafka 与 IMAP 观察
 
 ```bash

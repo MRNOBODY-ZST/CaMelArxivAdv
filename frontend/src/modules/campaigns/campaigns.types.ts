@@ -1,11 +1,15 @@
 import type { PageResponse } from '@/modules/jobs/jobs.types'
 
-export type SegmentRuleField = 'primaryCategory' | 'confidence' | 'verificationStatus' | 'corresponding'
+export type SegmentRuleField = 'primaryCategory' | 'confidence' | 'verificationStatus' | 'corresponding' | 'paperKeyword'
 
-export interface SegmentRule {
-  field: SegmentRuleField
+export type SegmentRule = {
+  field: Exclude<SegmentRuleField, 'paperKeyword'>
   operator: 'equals'
   value: string | boolean
+} | {
+  field: 'paperKeyword'
+  operator: 'contains'
+  value: string
 }
 
 export interface SegmentView {

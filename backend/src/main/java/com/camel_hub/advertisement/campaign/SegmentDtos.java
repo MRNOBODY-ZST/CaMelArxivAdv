@@ -25,7 +25,7 @@ public final class SegmentDtos {
 	public record CreateRequest(
 			@NotBlank @Size(max = 160) String name,
 			@Size(max = 500) String description,
-			@NotEmpty @Size(max = 4) List<@Valid RuleRequest> rules
+			@NotEmpty @Size(max = 5) List<@Valid RuleRequest> rules
 	) {
 		SegmentService.SegmentCommand command() {
 			return new SegmentService.SegmentCommand(name, description, inputs(rules));
@@ -33,7 +33,7 @@ public final class SegmentDtos {
 	}
 
 	public record PreviewRequest(
-			@NotEmpty @Size(max = 4) List<@Valid RuleRequest> rules
+			@NotEmpty @Size(max = 5) List<@Valid RuleRequest> rules
 	) {
 		List<SegmentModels.RuleInput> inputs() {
 			return SegmentDtos.inputs(rules);

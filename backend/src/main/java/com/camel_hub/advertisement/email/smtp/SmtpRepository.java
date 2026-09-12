@@ -32,17 +32,22 @@ public final class SmtpRepository {
 				.bind("id", id).map(this::map).one();
 	}
 
+	public Mono<SmtpAccountRecord> findForUpdate(UUID id) {
+		return databaseClient.sql(selectSql() + " WHERE id = :id FOR UPDATE")
+				.bind("id", id).map(this::map).one();
+	}
+
 	public Mono<SmtpAccountRecord> create(SmtpWrite value, UUID actorId) {
 		DatabaseClient.GenericExecuteSpec statement = databaseClient.sql("""
 				INSERT INTO smtp_accounts (
 				    name, host, port, tls_mode, username, password_ciphertext, password_nonce,
 				    from_email, default_from_name, reply_to, per_minute_limit, per_hour_limit,
-				    per_day_limit, per_domain_hour_limit, enabled, created_by
+				    per_day_limit, per_month_limit, per_domain_hour_limit, enabled, created_by
 				)
 				VALUES (
 				    :name, :host, :port, :tlsMode, :username, :ciphertext, :nonce,
 				    :fromEmail, :fromName, :replyTo, :perMinute, :perHour,
-				    :perDay, :perDomainHour, :enabled, :actorId
+				    :perDay, :perMonth, :perDomainHour, :enabled, :actorId
 				)
 				RETURNING *
 				""").bind("name", value.name()).bind("host", value.host()).bind("port", value.port())
@@ -52,6 +57,7 @@ public final class SmtpRepository {
 				.bind("perDay", value.perDayLimit()).bind("perDomainHour", value.perDomainHourLimit())
 				.bind("enabled", value.enabled()).bind("actorId", actorId);
 		statement = bindNullable(statement, "username", value.username(), String.class);
+		statement = bindNullable(statement, "perMonth", value.perMonthLimit(), Integer.class);
 		statement = bindNullable(statement, "ciphertext", value.passwordCiphertext(), byte[].class);
 		statement = bindNullable(statement, "nonce", value.passwordNonce(), byte[].class);
 		return statement.map(this::map).one();
@@ -66,7 +72,7 @@ public final class SmtpRepository {
 				    username = :username, password_ciphertext = :ciphertext, password_nonce = :nonce,
 				    from_email = :fromEmail, default_from_name = :fromName, reply_to = :replyTo,
 				    per_minute_limit = :perMinute, per_hour_limit = :perHour,
-				    per_day_limit = :perDay, per_domain_hour_limit = :perDomainHour,
+				    per_day_limit = :perDay, per_month_limit = :perMonth, per_domain_hour_limit = :perDomainHour,
 				    enabled = :enabled, updated_at = now(), lock_version = lock_version + 1
 				WHERE id = :id AND lock_version = :expectedLockVersion
 				RETURNING *
@@ -78,6 +84,7 @@ public final class SmtpRepository {
 				.bind("enabled", value.enabled()).bind("id", id)
 				.bind("expectedLockVersion", expectedLockVersion);
 		statement = bindNullable(statement, "username", value.username(), String.class);
+		statement = bindNullable(statement, "perMonth", value.perMonthLimit(), Integer.class);
 		statement = bindNullable(statement, "ciphertext", value.passwordCiphertext(), byte[].class);
 		statement = bindNullable(statement, "nonce", value.passwordNonce(), byte[].class);
 		return statement.map(this::map).one();
@@ -108,7 +115,7 @@ public final class SmtpRepository {
 		return """
 				SELECT id, name, host, port, tls_mode, username, password_ciphertext, password_nonce,
 				       from_email, default_from_name, reply_to, per_minute_limit, per_hour_limit,
-				       per_day_limit, per_domain_hour_limit, enabled, last_tested_at,
+				       per_day_limit, per_month_limit, per_domain_hour_limit, enabled, last_tested_at,
 				       last_test_status, last_test_error, lock_version, created_by, created_at, updated_at
 				FROM smtp_accounts
 				""";
@@ -122,7 +129,7 @@ public final class SmtpRepository {
 				row.get("password_nonce", byte[].class), row.get("from_email", String.class),
 				row.get("default_from_name", String.class), row.get("reply_to", String.class),
 				requiredInt(row, "per_minute_limit"), requiredInt(row, "per_hour_limit"),
-				requiredInt(row, "per_day_limit"), requiredInt(row, "per_domain_hour_limit"),
+				requiredInt(row, "per_day_limit"), row.get("per_month_limit", Integer.class), requiredInt(row, "per_domain_hour_limit"),
 				Boolean.TRUE.equals(row.get("enabled", Boolean.class)), row.get("last_tested_at", Instant.class),
 				row.get("last_test_status", String.class), row.get("last_test_error", String.class),
 				requiredLong(row, "lock_version"), row.get("created_by", UUID.class),
@@ -150,15 +157,26 @@ public final class SmtpRepository {
 	public record SmtpWrite(
 			String name, String host, int port, SmtpModels.TlsMode tlsMode, String username,
 			byte[] passwordCiphertext, byte[] passwordNonce, String fromEmail, String defaultFromName,
-			String replyTo, int perMinuteLimit, int perHourLimit, int perDayLimit,
+			String replyTo, int perMinuteLimit, int perHourLimit, int perDayLimit, Integer perMonthLimit,
 			int perDomainHourLimit, boolean enabled
 	) { }
 
 	public record SmtpAccountRecord(
 			UUID id, String name, String host, int port, SmtpModels.TlsMode tlsMode, String username,
 			byte[] passwordCiphertext, byte[] passwordNonce, String fromEmail, String defaultFromName,
-			String replyTo, int perMinuteLimit, int perHourLimit, int perDayLimit,
+			String replyTo, int perMinuteLimit, int perHourLimit, int perDayLimit, Integer perMonthLimit,
 			int perDomainHourLimit, boolean enabled, Instant lastTestedAt, String lastTestStatus,
 			String lastTestError, long lockVersion, UUID createdBy, Instant createdAt, Instant updatedAt
-	) { }
+	) {
+		public SmtpAccountRecord(UUID id, String name, String host, int port, SmtpModels.TlsMode tlsMode, String username,
+				byte[] passwordCiphertext, byte[] passwordNonce, String fromEmail, String defaultFromName,
+				String replyTo, int perMinuteLimit, int perHourLimit, int perDayLimit,
+				int perDomainHourLimit, boolean enabled, Instant lastTestedAt, String lastTestStatus,
+				String lastTestError, long lockVersion, UUID createdBy, Instant createdAt, Instant updatedAt) {
+			this(id, name, host, port, tlsMode, username, passwordCiphertext, passwordNonce, fromEmail,
+					defaultFromName, replyTo, perMinuteLimit, perHourLimit, perDayLimit, null,
+					perDomainHourLimit, enabled, lastTestedAt, lastTestStatus, lastTestError, lockVersion,
+					createdBy, createdAt, updatedAt);
+		}
+	}
 }

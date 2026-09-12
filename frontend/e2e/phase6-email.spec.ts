@@ -53,6 +53,7 @@ test.beforeAll(async ({ request }) => {
       perMinuteLimit: 10,
       perHourLimit: 100,
       perDayLimit: 1_000,
+      perMonthLimit: null,
       perDomainHourLimit: 50,
       enabled: true,
     },

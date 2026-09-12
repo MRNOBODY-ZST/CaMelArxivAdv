@@ -49,6 +49,10 @@ const username = computed({ get: () => form.username ?? '', set: (value: string)
 const minuteLimit = computed({ get: () => String(form.perMinuteLimit), set: (value: string) => { form.perMinuteLimit = Number(value) } })
 const hourLimit = computed({ get: () => String(form.perHourLimit), set: (value: string) => { form.perHourLimit = Number(value) } })
 const dayLimit = computed({ get: () => String(form.perDayLimit), set: (value: string) => { form.perDayLimit = Number(value) } })
+const monthLimit = computed({
+  get: () => form.perMonthLimit == null ? '' : String(form.perMonthLimit),
+  set: (value: string) => { form.perMonthLimit = value.trim() ? Number(value) : null },
+})
 const domainLimit = computed({ get: () => String(form.perDomainHourLimit), set: (value: string) => { form.perDomainHourLimit = Number(value) } })
 
 onMounted(() => load())
@@ -79,7 +83,8 @@ function openEdit(account: SmtpAccountView): void {
     username: account.username, password: null, fromEmail: account.fromEmail,
     defaultFromName: account.defaultFromName, replyTo: account.replyTo,
     perMinuteLimit: account.perMinuteLimit, perHourLimit: account.perHourLimit,
-    perDayLimit: account.perDayLimit, perDomainHourLimit: account.perDomainHourLimit, enabled: account.enabled,
+    perDayLimit: account.perDayLimit, perMonthLimit: account.perMonthLimit ?? null,
+    perDomainHourLimit: account.perDomainHourLimit, enabled: account.enabled,
   })
   passwordInput.value = ''
   modalOpen.value = true
@@ -93,6 +98,7 @@ async function save(): Promise<void> {
       ...form,
       port: Number(form.port), perMinuteLimit: Number(form.perMinuteLimit),
       perHourLimit: Number(form.perHourLimit), perDayLimit: Number(form.perDayLimit),
+      perMonthLimit: form.perMonthLimit == null ? null : Number(form.perMonthLimit),
       perDomainHourLimit: Number(form.perDomainHourLimit), username: form.username || null,
       password: passwordForUpdate(passwordInput.value, editing.value?.passwordConfigured ?? false),
     }
@@ -293,6 +299,24 @@ function tlsLabel(mode: SmtpTlsMode): string {
           <ShieldCheckIcon class="size-5 text-emerald-500" />
         </div>
         <dl class="mt-5 grid gap-3 rounded-lg bg-slate-50 p-4 text-sm sm:grid-cols-2">
+          <div data-testid="smtp-daily-quota">
+            <dt class="text-xs text-slate-500">
+              每日上限
+            </dt><dd class="mt-1 text-lg font-semibold tabular-nums text-slate-900">
+              {{ account.perDayLimit.toLocaleString('zh-CN') }} <span class="text-xs font-normal text-slate-500">封 / 24 小时</span>
+            </dd>
+          </div>
+          <div data-testid="smtp-monthly-quota">
+            <dt class="text-xs text-slate-500">
+              每月上限
+            </dt><dd class="mt-1 text-lg font-semibold tabular-nums text-slate-900">
+              {{ account.perMonthLimit == null ? '未设置' : account.perMonthLimit.toLocaleString('zh-CN') }}
+              <span
+                v-if="account.perMonthLimit != null"
+                class="text-xs font-normal text-slate-500"
+              >封 / UTC 自然月</span>
+            </dd>
+          </div>
           <div>
             <dt class="text-xs text-slate-400">
               发件地址
@@ -436,29 +460,45 @@ function tlsLabel(mode: SmtpTlsMode): string {
           type="email"
           label="Reply-To"
         />
-        <div class="grid gap-4 sm:grid-cols-2">
-          <DsInput
-            id="limit-minute"
-            v-model="minuteLimit"
-            type="number"
-            label="每分钟上限"
-          /><DsInput
-            id="limit-hour"
-            v-model="hourLimit"
-            type="number"
-            label="每小时上限"
-          /><DsInput
-            id="limit-day"
-            v-model="dayLimit"
-            type="number"
-            label="每日上限"
-          /><DsInput
-            id="limit-domain"
-            v-model="domainLimit"
-            type="number"
-            label="每域每小时上限"
-          />
-        </div>
+        <fieldset class="space-y-4 border-t border-slate-100 pt-4">
+          <legend class="px-1 text-sm font-semibold text-slate-900">
+            发送限额
+          </legend>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <DsInput
+              id="limit-day"
+              v-model="dayLimit"
+              type="number"
+              label="每日上限"
+              description="按最近 24 小时累计。"
+            /><DsInput
+              id="limit-month"
+              v-model="monthLimit"
+              type="number"
+              label="每月上限（可选）"
+              :description="editing?.perMonthLimit != null ? 'UTC 自然月；留空保留现有限额。' : 'UTC 自然月；留空则不设置月上限。'"
+              placeholder="例如 12000"
+            />
+          </div>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <DsInput
+              id="limit-minute"
+              v-model="minuteLimit"
+              type="number"
+              label="每分钟上限"
+            /><DsInput
+              id="limit-hour"
+              v-model="hourLimit"
+              type="number"
+              label="每小时上限"
+            /><DsInput
+              id="limit-domain"
+              v-model="domainLimit"
+              type="number"
+              label="每域每小时上限"
+            />
+          </div>
+        </fieldset>
         <DsSwitch
           v-model="form.enabled"
           label="启用此账户"

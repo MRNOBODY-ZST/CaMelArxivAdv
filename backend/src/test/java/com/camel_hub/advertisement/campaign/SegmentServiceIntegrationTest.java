@@ -75,6 +75,23 @@ class SegmentServiceIntegrationTest {
 				new SegmentModels.RuleInput("corresponding", "equals", BooleanNode.TRUE));
 	}
 
+	@Test
+	void keywordMatchesTitleAndAbstractCaseInsensitivelyAcrossPreviewAndGeneration() {
+		var keywordRules = new java.util.ArrayList<>(rules());
+		keywordRules.add(new SegmentModels.RuleInput("paperKeyword", "contains", "  DISTRIBUTED  "));
+		var created = service.create(ACTOR, new SegmentService.SegmentCommand("Keyword cohort", "Agent targeting", keywordRules)).block();
+		assertThat(created.eligibleCount()).isEqualTo(1);
+		assertThat(service.preview(keywordRules).block().eligibleCount()).isEqualTo(1);
+		var repository = new SegmentRepository(databaseClient, new ObjectMapper());
+		assertThat(repository.campaignCandidates(SegmentModels.criteria(keywordRules), 10).collectList().block()).hasSize(1);
+		assertThat(service.preview(List.of(new SegmentModels.RuleInput("paperKeyword", "contains", "public abstract")))
+				.block().eligibleCount()).isEqualTo(1);
+		for (String noMatch : List.of("agents", "%", "_", "' OR '1'='1")) {
+			assertThat(service.preview(List.of(new SegmentModels.RuleInput("paperKeyword", "contains", noMatch)))
+					.block().eligibleCount()).isZero();
+		}
+	}
+
 	private void seedEligibleAndExcludedContacts() {
 		sql("""
 				INSERT INTO users (id, username, email, password_hash, display_name)

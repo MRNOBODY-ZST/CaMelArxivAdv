@@ -28,13 +28,14 @@ public final class SmtpDtos {
 			@Min(1) int perMinuteLimit,
 			@Min(1) int perHourLimit,
 			@Min(1) int perDayLimit,
+			@Min(1) Integer perMonthLimit,
 			@Min(1) int perDomainHourLimit,
 			boolean enabled
 	) {
 		SmtpService.SmtpCommand command() {
 			return new SmtpService.SmtpCommand(
 					name, host, port, tlsMode, username, password, fromEmail, defaultFromName, replyTo,
-					perMinuteLimit, perHourLimit, perDayLimit, perDomainHourLimit, enabled);
+					perMinuteLimit, perHourLimit, perDayLimit, perMonthLimit, perDomainHourLimit, enabled);
 		}
 	}
 

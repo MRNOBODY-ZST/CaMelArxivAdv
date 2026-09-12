@@ -26,7 +26,7 @@ const smtpAccount: SmtpAccountView = {
   id: 'smtp-1', name: 'Mailpit', host: 'mailpit', port: 1025, tlsMode: 'PLAIN_LOCAL_ONLY',
   username: 'local', passwordConfigured: true, fromEmail: 'sender@example.invalid', defaultFromName: 'Research Team',
   replyTo: 'reply@example.invalid', perMinuteLimit: 10, perHourLimit: 100, perDayLimit: 1_000,
-  perDomainHourLimit: 50, enabled: true, lastTestedAt: null, lastTestStatus: null, lastTestError: null,
+  perMonthLimit: null, perDomainHourLimit: 50, enabled: true, lastTestedAt: null, lastTestStatus: null, lastTestError: null,
   lockVersion: 0, createdAt: '2026-08-28T10:00:00Z', updatedAt: '2026-08-28T10:00:00Z',
 }
 

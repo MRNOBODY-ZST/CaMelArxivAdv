@@ -2,6 +2,8 @@ package com.camel_hub.advertisement.campaign.delivery;
 
 import com.camel_hub.advertisement.email.smtp.SmtpModels;
 import com.camel_hub.advertisement.email.smtp.SmtpRepository;
+import com.camel_hub.advertisement.email.smtp.SmtpQuotaPolicy;
+import com.camel_hub.advertisement.email.smtp.SmtpQuotaRepository;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
@@ -16,9 +18,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -165,10 +165,10 @@ public final class CampaignDeliveryRepository {
 				.flatMap(candidate -> lockAccount(candidate.smtpAccountId())
 						.flatMap(account -> lockCooldown(candidate, now)
 								.flatMap(cooldown -> verifyAfterLocks(candidate, cooldown, now)
-										.flatMap(eligible -> loadReservations(account.id(), now)
+										.flatMap(eligible -> new SmtpQuotaRepository(database).reservations(account, now)
 												.collectList()
 												.flatMap(reservations -> {
-													Instant release = capacityRelease(account, candidate.emailDomain(), reservations, now);
+													Instant release = SmtpQuotaPolicy.capacityRelease(account, candidate.emailDomain(), reservations, now);
 													return release == null
 															? reserve(eligible, account, now)
 															: defer(eligible.id(), release).then(Mono.empty());
@@ -208,9 +208,9 @@ public final class CampaignDeliveryRepository {
 			return failSafetyBeforeSmtp(run.id(), message.id(), now)
 					.thenReturn(SafetyClaimDecision.handledWork());
 		}
-		return loadReservations(account.id(), now).collectList()
+		return new SmtpQuotaRepository(database).reservations(account, now).collectList()
 				.flatMap(reservations -> {
-					Instant release = capacityRelease(account, destination.domain(), reservations, now);
+					Instant release = SmtpQuotaPolicy.capacityRelease(account, destination.domain(), reservations, now);
 					if (release != null) {
 						return deferSafety(message.id(), release)
 								.thenReturn(SafetyClaimDecision.handledWork());
@@ -496,7 +496,7 @@ public final class CampaignDeliveryRepository {
 		return database.sql("""
 				SELECT id, name, host, port, tls_mode, username, password_ciphertext, password_nonce,
 				       from_email, default_from_name, reply_to, per_minute_limit, per_hour_limit,
-				       per_day_limit, per_domain_hour_limit, enabled, last_tested_at,
+				       per_day_limit, per_month_limit, per_domain_hour_limit, enabled, last_tested_at,
 				       last_test_status, last_test_error, lock_version, created_by, created_at, updated_at
 				FROM smtp_accounts WHERE id = :id FOR UPDATE
 				""").bind("id", id).map((row, metadata) -> account(row)).one();
@@ -616,55 +616,6 @@ public final class CampaignDeliveryRepository {
 				WHERE id = :id AND status IN ('QUEUED', 'TEMPORARY_FAILURE')
 				""").bind("status", status).bind("reason", reason).bind("now", now)
 				.bind("id", recipientId).fetch().rowsUpdated().map(Number::intValue);
-	}
-
-	private Flux<Reservation> loadReservations(UUID smtpAccountId, Instant now) {
-		return database.sql("""
-				SELECT a.started_at, r.email_domain
-				FROM delivery_attempts a
-				JOIN campaign_recipients r ON r.id = a.campaign_recipient_id
-				WHERE a.smtp_account_id = :smtp
-				  AND a.status IN ('CONNECTING', 'SMTP_ACCEPTED')
-				  AND a.started_at > :dayCutoff
-				UNION ALL
-				SELECT a.started_at,
-				       nullif(lower(split_part(sr.destination_masked, '@', 2)), '')
-				FROM campaign_safety_attempts a
-				JOIN campaign_safety_messages m ON m.id = a.safety_message_id
-				JOIN campaign_safety_runs sr ON sr.id = m.run_id
-				WHERE m.smtp_account_id = :smtp
-				  AND a.status IN ('CONNECTING', 'SMTP_ACCEPTED')
-				  AND a.started_at > :dayCutoff
-				""").bind("smtp", smtpAccountId).bind("dayCutoff", now.minus(Duration.ofDays(1)))
-				.map((row, metadata) -> new Reservation(
-						row.get("started_at", Instant.class), row.get("email_domain", String.class)))
-				.all();
-	}
-
-	private Instant capacityRelease(
-			SmtpRepository.SmtpAccountRecord account, String recipientDomain,
-			List<Reservation> reservations, Instant now
-	) {
-		List<Instant> saturated = new ArrayList<>();
-		addRelease(saturated, reservations, account.perMinuteLimit(), Duration.ofMinutes(1), now, null);
-		addRelease(saturated, reservations, account.perHourLimit(), Duration.ofHours(1), now, null);
-		addRelease(saturated, reservations, account.perDayLimit(), Duration.ofDays(1), now, null);
-		addRelease(saturated, reservations, account.perDomainHourLimit(), Duration.ofHours(1), now,
-				recipientDomain);
-		return saturated.stream().max(Comparator.naturalOrder()).orElse(null);
-	}
-
-	private void addRelease(
-			List<Instant> releases, List<Reservation> reservations, int limit,
-			Duration window, Instant now, String domain
-	) {
-		List<Instant> inWindow = reservations.stream()
-				.filter(item -> item.startedAt().isAfter(now.minus(window)))
-				.filter(item -> domain == null || domain.equalsIgnoreCase(item.domain()))
-				.map(Reservation::startedAt).sorted().toList();
-		if (inWindow.size() >= limit) {
-			releases.add(inWindow.get(inWindow.size() - limit).plus(window));
-		}
 	}
 
 	private Mono<ProductionClaim> reserve(
@@ -1032,7 +983,7 @@ public final class CampaignDeliveryRepository {
 				copy(row.get("password_nonce", byte[].class)), row.get("from_email", String.class),
 				row.get("default_from_name", String.class), row.get("reply_to", String.class),
 				requiredInt(row, "per_minute_limit"), requiredInt(row, "per_hour_limit"),
-				requiredInt(row, "per_day_limit"), requiredInt(row, "per_domain_hour_limit"),
+				requiredInt(row, "per_day_limit"), row.get("per_month_limit", Integer.class), requiredInt(row, "per_domain_hour_limit"),
 				Boolean.TRUE.equals(row.get("enabled", Boolean.class)), row.get("last_tested_at", Instant.class),
 				row.get("last_test_status", String.class), row.get("last_test_error", String.class),
 				requiredLong(row, "lock_version"), row.get("created_by", UUID.class),
@@ -1133,7 +1084,6 @@ public final class CampaignDeliveryRepository {
 
 	private record Eligibility(String reason) { }
 
-	private record Reservation(Instant startedAt, String domain) { }
 
 	public record FailureSettlement(boolean applied, AttemptStatus recipientStatus) { }
 

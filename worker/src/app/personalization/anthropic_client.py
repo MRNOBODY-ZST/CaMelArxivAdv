@@ -14,6 +14,11 @@ from app.personalization.contracts import (
 )
 from app.personalization.openai_client import PermanentGenerationError, TransientGenerationError
 from app.personalization.prompt import INSTRUCTIONS, public_generation_input
+from app.personalization.research_invitation import (
+    generation_schema,
+    parse_generation,
+    uses_research_invitation,
+)
 
 
 class AnthropicEmailClient:
@@ -52,7 +57,7 @@ class AnthropicEmailClient:
                 {
                     "name": "personalized_email",
                     "description": "Return an email draft for human review, without sending it.",
-                    "input_schema": GeneratedEmail.model_json_schema(),
+                    "input_schema": generation_schema(command),
                 }
             ],
             "tool_choice": {"type": "tool", "name": "personalized_email"},
@@ -79,13 +84,18 @@ class AnthropicEmailClient:
         self._raise_for_status(response)
         try:
             payload: dict[str, Any] = response.json()
-            return self._generated_email(payload)
+            return self._generated_email(payload, command, target)
         except (ValueError, KeyError, TypeError, AttributeError, ValidationError) as exception:
             raise TransientGenerationError(
                 "INVALID_PROVIDER_OUTPUT", "Anthropic returned an invalid structured response"
             ) from exception
 
-    def _generated_email(self, payload: dict[str, Any]) -> GeneratedEmail:
+    def _generated_email(
+        self,
+        payload: dict[str, Any],
+        command: PersonalizationCommand,
+        target: PersonalizationTarget,
+    ) -> GeneratedEmail:
         content = payload.get("content")
         if not isinstance(content, list):
             raise ValueError("Provider response content was not a list")
@@ -97,7 +107,7 @@ class AnthropicEmailClient:
             ):
                 continue
             try:
-                return GeneratedEmail.model_validate(block["input"])
+                return parse_generation(block["input"], command, target)
             except (KeyError, TypeError, ValidationError):
                 continue
         for block in content:
@@ -106,20 +116,24 @@ class AnthropicEmailClient:
             text = block.get("text")
             if not isinstance(text, str):
                 continue
-            generated = self._text_fallback(text)
+            generated = self._text_fallback(text, command, target)
             if generated is not None:
                 return generated
         raise ValueError("Provider did not return a compliant email draft")
 
-    def _text_fallback(self, value: str) -> GeneratedEmail | None:
+    def _text_fallback(
+        self, value: str, command: PersonalizationCommand, target: PersonalizationTarget
+    ) -> GeneratedEmail | None:
         candidate = value.strip()
         if candidate.startswith("```") and candidate.endswith("```"):
             candidate = re.sub(r"^```(?:json)?\s*", "", candidate, count=1, flags=re.I)
             candidate = re.sub(r"\s*```$", "", candidate, count=1)
         try:
-            return GeneratedEmail.model_validate_json(candidate)
+            return parse_generation(json.loads(candidate), command, target)
         except (ValueError, ValidationError):
             pass
+        if uses_research_invitation(command):
+            return None
         subject = self._section(
             value,
             r"^\s*(?:\*\*)?Subject\s*:(?:\*\*)?\s*(?P<value>.+?)\s*$",

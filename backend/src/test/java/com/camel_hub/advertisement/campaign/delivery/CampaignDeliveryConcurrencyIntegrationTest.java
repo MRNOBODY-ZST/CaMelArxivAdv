@@ -7,7 +7,10 @@ import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.email.smtp.SmtpProperties;
+import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
 import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.camel_hub.advertisement.email.tracking.MailTrackingRepository;
+import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +57,58 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 		assertThat(count("delivery_attempts")).isEqualTo(1);
 		assertThat(integer("SELECT attempt_count FROM campaign_recipients WHERE id = '" + recipientId + "'"))
 				.isEqualTo(1);
+	}
+
+	@Test
+	void diagnosticAndProductionReservationsShareTheLastMonthlySlot() throws Exception {
+		setLimits(2, 2, 2, 2);
+		sql("UPDATE smtp_accounts SET per_month_limit = 2 WHERE id = '" + SMTP + "'");
+		UUID campaign = insertCampaign("RUNNING");
+		insertEligibleRecipient(campaign, "monthly-production@research.test");
+		insertProductionReservation("previous-month-capacity", "research.test", NOW.minus(Duration.ofDays(2)), "SMTP_ACCEPTED");
+		CountDownLatch subscribed = new CountDownLatch(2);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		CompletableFuture<Boolean> diagnostic = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release)
+					.then(new MailTrackingRepository(databaseClient).insert(UUID.randomUUID(), ACTOR, SMTP,
+							MailTrackingModels.Source.TEMPLATE_TEST, "d***@research.test", "quota fixture", NOW, null, null))
+					.thenReturn(true).onErrorReturn(SmtpConflictException.class, false);
+		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		CompletableFuture<Boolean> production = reactor.core.publisher.Mono.defer(() -> {
+			subscribed.countDown();
+			return reactor.core.publisher.Mono.fromFuture(release)
+					.then(firstRepository.claimNext(NOW)).hasElement();
+		}).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
+		release.complete(null);
+
+		assertThat(List.of(diagnostic.get(20, TimeUnit.SECONDS), production.get(20, TimeUnit.SECONDS)))
+				.containsExactlyInAnyOrder(true, false);
+		assertThat(count("delivery_attempts") + count("mail_send_records")).isEqualTo(2);
+	}
+
+	@Test
+	void concurrentDiagnosticAndTemplateSendsCannotOversubscribeTheDailyCap() throws Exception {
+		setLimits(1, 1, 1, 1);
+		sql("UPDATE smtp_accounts SET per_month_limit = 12 WHERE id = '" + SMTP + "'");
+		CountDownLatch subscribed = new CountDownLatch(2);
+		CompletableFuture<Void> release = new CompletableFuture<>();
+		List<CompletableFuture<Boolean>> sends = Stream.of(
+				MailTrackingModels.Source.SMTP_DIAGNOSTIC, MailTrackingModels.Source.TEMPLATE_TEST)
+				.map(source -> reactor.core.publisher.Mono.defer(() -> {
+					subscribed.countDown();
+					return reactor.core.publisher.Mono.fromFuture(release)
+							.then(new MailTrackingRepository(databaseClient).insert(UUID.randomUUID(), ACTOR, SMTP,
+									source, "d***@research.test", "quota fixture", NOW, null, null))
+							.thenReturn(true).onErrorReturn(SmtpConflictException.class, false);
+				}).subscribeOn(Schedulers.boundedElastic()).toFuture()).toList();
+		assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
+		release.complete(null);
+
+		assertThat(List.of(sends.get(0).get(20, TimeUnit.SECONDS), sends.get(1).get(20, TimeUnit.SECONDS)))
+				.containsExactlyInAnyOrder(true, false);
+		assertThat(count("mail_send_records")).isEqualTo(1);
 	}
 
 	@Test

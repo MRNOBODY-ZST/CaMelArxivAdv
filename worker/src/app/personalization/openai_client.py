@@ -12,6 +12,7 @@ from app.personalization.contracts import (
     PersonalizationTarget,
 )
 from app.personalization.prompt import INSTRUCTIONS, public_generation_input
+from app.personalization.research_invitation import generation_schema, parse_generation
 
 
 class GenerationError(RuntimeError):
@@ -60,7 +61,7 @@ class OpenAIEmailClient:
                     "type": "json_schema",
                     "name": "personalized_email",
                     "strict": True,
-                    "schema": GeneratedEmail.model_json_schema(),
+                    "schema": generation_schema(command),
                 }
             },
             "store": False,
@@ -82,7 +83,7 @@ class OpenAIEmailClient:
         try:
             payload: dict[str, Any] = response.json()
             content = self._output_text(payload)
-            return GeneratedEmail.model_validate_json(content)
+            return parse_generation(json.loads(content), command, target)
         except (ValueError, KeyError, TypeError, ValidationError) as exception:
             raise PermanentGenerationError(
                 "INVALID_PROVIDER_OUTPUT", "OpenAI returned an invalid structured response"

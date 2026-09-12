@@ -8,9 +8,13 @@ import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.contact.config.ContactDataProtectionProperties;
 import com.camel_hub.advertisement.contact.security.ContactCrypto;
 import com.camel_hub.advertisement.email.smtp.SmtpProperties;
+import com.camel_hub.advertisement.email.smtp.SmtpConflictException;
+import com.camel_hub.advertisement.email.smtp.SmtpQuotaPolicy;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
 import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.camel_hub.advertisement.email.tracking.MailTrackingRepository;
+import com.camel_hub.advertisement.email.tracking.MailTrackingModels;
 import com.camel_hub.advertisement.messaging.OutboxRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.spi.ConnectionFactories;
@@ -164,6 +168,66 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 				Arguments.of("domain-hour", 100, 100, 1000, 10, 10,
 						Duration.ofMinutes(45), Duration.ofMinutes(4), Duration.ofHours(1))
 		);
+	}
+
+	@Test
+	void monthlyQuotaCombinesProductionSafetyAndDiagnosticHistoryBeyondTheLastDay() {
+		setLimits(1, 2, 2, 2);
+		sql("UPDATE smtp_accounts SET per_month_limit = 3 WHERE id = '" + SMTP + "'");
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "monthly@research.test");
+		insertProductionReservation("month-start-inclusive", "authors.test", SmtpQuotaPolicy.monthStart(NOW), "SMTP_ACCEPTED");
+		insertSafetyReservation(recipient, NOW.minus(Duration.ofDays(2)), "SMTP_ACCEPTED");
+		insertDiagnosticReservation(NOW.minus(Duration.ofDays(2)).plusSeconds(120), MailTrackingModels.Status.SMTP_ACCEPTED);
+
+		assertThat(repository.claimNext(NOW).block()).isNull();
+		assertThat(instant("SELECT next_attempt_at FROM campaign_recipients WHERE id = '" + recipient + "'"))
+				.isEqualTo(Instant.parse("2030-05-01T00:00:00Z"));
+		assertThat(count("delivery_attempts")).isEqualTo(1);
+		assertThatThrownBy(() -> new MailTrackingRepository(databaseClient).insert(UUID.randomUUID(), ACTOR, SMTP,
+				MailTrackingModels.Source.TEMPLATE_TEST, "t***@research.test", "quota blocked", NOW, null, null).block())
+				.isInstanceOf(SmtpConflictException.class).hasMessageContaining("2030-05-01T00:00:00Z");
+		assertThat(count("mail_send_records")).isEqualTo(1);
+	}
+
+	@Test
+	void safetyClaimsHonorMonthlyQuotaAndResumeAtTheNewMonth() {
+		setLimits(1, 1, 1, 1);
+		sql("UPDATE smtp_accounts SET per_month_limit = 1 WHERE id = '" + SMTP + "'");
+		UUID campaign = insertCampaign("DRAFT");
+		UUID source = insertEligibleRecipient(campaign, "monthly-source@research.test");
+		UUID message = insertDueSafetyRun(source, "fixed@research.test");
+		insertProductionReservation("monthly-shared", "authors.test", NOW.minus(Duration.ofDays(2)), "SMTP_ACCEPTED");
+		var safety = safetyRepository("fixed@research.test");
+		assertThat(safety.claimNext(NOW).block()).isNull();
+		Instant release = Instant.parse("2030-05-01T00:00:00Z");
+		assertThat(instant("SELECT next_attempt_at FROM campaign_safety_messages WHERE id = '" + message + "'"))
+				.isEqualTo(release);
+		assertThat(safety.claimNext(release.minusMillis(1)).block()).isNull();
+		assertThat(safety.claimNext(release).block()).isInstanceOf(CampaignDeliveryRepository.SafetyClaim.class);
+	}
+
+	@Test
+	void cappedAccountCountsAmbiguousAcceptedOutcomesAndDiagnosticSendsAgainstItsDailyLimit() {
+		setLimits(1, 1, 1, 1);
+		sql("UPDATE smtp_accounts SET per_month_limit = 12 WHERE id = '" + SMTP + "'");
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "daily@research.test");
+		insertDiagnosticReservation(NOW.minus(Duration.ofHours(2)), MailTrackingModels.Status.UNKNOWN);
+		assertThat(repository.claimNext(NOW).block()).isNull();
+		assertThat(instant("SELECT next_attempt_at FROM campaign_recipients WHERE id = '" + recipient + "'"))
+				.isEqualTo(NOW.plus(Duration.ofHours(22)));
+		assertThat(count("delivery_attempts")).isZero();
+	}
+
+	private void insertDiagnosticReservation(Instant at, MailTrackingModels.Status status) {
+		UUID id = UUID.randomUUID();
+		var tracking = new MailTrackingRepository(databaseClient);
+		tracking.insert(id, ACTOR, SMTP, MailTrackingModels.Source.SMTP_DIAGNOSTIC,
+				"d***@research.test", "quota fixture", at, null, null).block();
+		if (status != MailTrackingModels.Status.SENDING) {
+			tracking.complete(id, status, status == MailTrackingModels.Status.UNKNOWN ? "SEND_OUTCOME_MISSING" : null, at).block();
+		}
 	}
 
 	@Test

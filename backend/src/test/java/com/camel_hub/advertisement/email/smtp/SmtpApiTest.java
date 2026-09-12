@@ -32,12 +32,13 @@ class SmtpApiTest {
 		UUID id = UUID.randomUUID();
 		when(service.get(id)).thenReturn(Mono.just(new SmtpService.SmtpAccountView(
 				id, "Mailpit", "mailpit", 1025, SmtpModels.TlsMode.PLAIN_LOCAL_ONLY, "local-user",
-				true, "sender@example.org", "Sender", "reply@example.org", 10, 100, 1_000, 50,
+				true, "sender@example.org", "Sender", "reply@example.org", 10, 100, 1_000, 12_000, 50,
 				true, Instant.parse("2026-08-06T10:00:00Z"), "SUCCEEDED", null, 0,
 				Instant.parse("2026-08-06T09:00:00Z"), Instant.parse("2026-08-06T10:00:00Z"))));
 
 		client.get().uri("/api/v1/smtp-accounts/{id}", id).exchange().expectStatus().isOk()
 				.expectBody().jsonPath("$.passwordConfigured").isEqualTo(true)
+				.jsonPath("$.perMonthLimit").isEqualTo(12_000)
 				.jsonPath("$.password").doesNotExist()
 				.jsonPath("$.passwordCiphertext").doesNotExist()
 				.jsonPath("$.passwordNonce").doesNotExist();

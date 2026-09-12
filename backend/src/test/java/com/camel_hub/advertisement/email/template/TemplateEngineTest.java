@@ -12,6 +12,35 @@ class TemplateEngineTest {
 	private final TemplateEngine engine = new TemplateEngine(102_400);
 
 	@Test
+	void preservesEmailLayoutThroughSaveAndRenderWithoutAllowingActiveCss() {
+		var prepared = engine.prepare(new TemplateModels.TemplateDraft(
+				"Research invitation", "Camel Hub", "reply@example.org",
+				"<table role=\"presentation\" title=\"Camel Hub research invitation v1\" style=\"width:100%;max-width:600px;border-collapse:collapse\">"
+						+ "<tr><td style=\"padding:24px 16px;background-color:#faf8f5;color:#18212f;font-family:Arial, sans-serif;font-size:16px;line-height:1.6;border:1px solid #eeeeee\">"
+						+ "Hello {{author_name}} <a href=\"{{unsubscribe_url}}\" style=\"color:#b54720;text-decoration:underline\">Unsubscribe</a>"
+						+ "</td></tr></table>", "", true));
+		assertThat(prepared.validation().valid()).isTrue();
+		var rendered = engine.render(prepared, Map.of("author_name", "Ada <script>",
+				"unsubscribe_url", "https://example.org/unsubscribe/preview"));
+		assertThat(rendered.html()).contains("role=\"presentation\"", "max-width:600px", "padding:24px 16px",
+				"background-color:#faf8f5", "font-family:Arial, sans-serif", "Ada &lt;script&gt;", "Camel Hub research invitation v1");
+		assertThat(rendered.text()).contains("Unsubscribe (https://example.org/unsubscribe/preview)");
+	}
+
+	@Test
+	void stripsCssResourceLoadsEscapesHiddenContentAndPositioning() {
+		var prepared = engine.prepare(new TemplateModels.TemplateDraft(
+				"Research invitation", "Camel Hub", "reply@example.org",
+				"<p style=\"color:#123456;background-image:url(https://evil.example/pixel);width:expression(alert(1));"
+						+ "position:fixed;display:none;opacity:0;font-family:u\\72l(https://evil.example);"
+						+ "background-color:/*x*/red;behavior:url(x);padding:12px;left:0\">Hello</p>"
+						+ "<table role=\"button\"><tr><td>x</td></tr></table>",
+				"Unsubscribe {{unsubscribe_url}}", false));
+		assertThat(prepared.sanitizedHtml()).contains("color:#123456;padding:12px")
+				.doesNotContain("evil", "expression", "position", "display", "opacity", "behavior", "/*", "role=\"button\"");
+	}
+
+	@Test
 	void sanitizesDangerousMarkupAndReportsUnknownOrMalformedVariables() {
 		var prepared = engine.prepare(new TemplateModels.TemplateDraft(
 				"Hello {{author_name}}", "Research Team", "reply@example.org",

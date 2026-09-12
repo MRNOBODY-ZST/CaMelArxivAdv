@@ -133,6 +133,7 @@ public final class SegmentRepository {
 				    AND (:confidenceEmpty OR pac.confidence = :confidence)
 				    AND (:verificationEmpty OR pac.verification_status = :verification)
 				    AND (:correspondingEmpty OR pac.corresponding_author = :corresponding)
+				    AND (:keywordEmpty OR strpos(lower(p.title || ' ' || coalesce(p.abstract_text, '')), lower(:keyword)) > 0)
 				  ORDER BY c.id, pac.human_verified DESC, pac.created_at DESC, pac.id
 				)
 				""";
@@ -148,7 +149,9 @@ public final class SegmentRepository {
 				.bind("verificationEmpty", criteria.verificationStatus() == null)
 				.bind("verification", value(criteria.verificationStatus()))
 				.bind("correspondingEmpty", criteria.corresponding() == null)
-				.bind("corresponding", Boolean.TRUE.equals(criteria.corresponding()));
+				.bind("corresponding", Boolean.TRUE.equals(criteria.corresponding()))
+				.bind("keywordEmpty", criteria.paperKeyword() == null)
+				.bind("keyword", value(criteria.paperKeyword()));
 	}
 
 	private SegmentHeader header(Row row, io.r2dbc.spi.RowMetadata metadata) {

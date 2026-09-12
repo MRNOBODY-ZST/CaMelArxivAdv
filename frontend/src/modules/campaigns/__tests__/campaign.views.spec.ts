@@ -45,6 +45,8 @@ vi.mock('@/modules/analytics/AnalyticsChart.vue', () => ({
 describe('campaign workspace views', () => {
   beforeEach(() => {
     vi.mocked(campaignsApi.listSegments).mockResolvedValue(page([segment()]))
+    vi.mocked(campaignsApi.previewSegment).mockResolvedValue({ eligibleCount: 12, sample: [] })
+    vi.mocked(campaignsApi.createSegment).mockResolvedValue(segment())
     vi.mocked(campaignsApi.listCampaigns).mockResolvedValue(page([campaign()]))
     vi.mocked(campaignsApi.getCampaign).mockResolvedValue(campaign())
     vi.mocked(campaignsApi.listRecipients).mockResolvedValue(page([recipient()]))
@@ -62,11 +64,59 @@ describe('campaign workspace views', () => {
     const wrapper = await mountView(SegmentsView, '/email/segments')
     expect(wrapper.text()).toContain('AI 已验证作者')
     expect(wrapper.text()).toContain('12 位可用联系人')
+    expect(wrapper.text()).toContain('论文关键词 包含 agent')
 
     await click(wrapper, '新建分组')
     expect(wrapper.text()).toContain('arXiv 主分类')
     expect(wrapper.text()).toContain('邮箱置信度')
     expect(wrapper.text()).toContain('联系人验证状态')
+    expect(wrapper.get<HTMLInputElement>('#segment-paper-keyword').element.value).toBe('')
+  })
+
+  it('uses the same trimmed paper keyword and other rules for previewing and creating a segment', async () => {
+    const wrapper = await mountView(SegmentsView, '/email/segments')
+    await click(wrapper, '新建分组')
+    await wrapper.get('#segment-name').setValue('Agent researchers')
+    await wrapper.get('#segment-category').setValue('cs.AI')
+    await wrapper.get('#segment-paper-keyword').setValue('  agent  ')
+    await wrapper.get('#segment-confidence').setValue('HIGH')
+    await wrapper.get('#segment-verification').setValue('CONFIRMED')
+    await wrapper.get('#segment-corresponding').setValue('true')
+    await click(wrapper, '预览人数')
+    await flushPromises()
+
+    const expectedRules = [
+      { field: 'primaryCategory', operator: 'equals', value: 'cs.AI' },
+      { field: 'paperKeyword', operator: 'contains', value: 'agent' },
+      { field: 'confidence', operator: 'equals', value: 'HIGH' },
+      { field: 'verificationStatus', operator: 'equals', value: 'CONFIRMED' },
+      { field: 'corresponding', operator: 'equals', value: true },
+    ]
+    expect(campaignsApi.previewSegment).toHaveBeenLastCalledWith(expectedRules)
+    await wrapper.get('#segment-form').trigger('submit')
+    await flushPromises()
+    expect(campaignsApi.createSegment).toHaveBeenLastCalledWith({
+      name: 'Agent researchers', description: '', rules: expectedRules,
+    })
+    await click(wrapper, '新建分组')
+    expect(wrapper.get<HTMLInputElement>('#segment-paper-keyword').element.value).toBe('')
+    wrapper.unmount()
+  })
+
+  it('omits a blank optional keyword from the segment request', async () => {
+    const wrapper = await mountView(SegmentsView, '/email/segments')
+    await click(wrapper, '新建分组')
+    await wrapper.get('#segment-name').setValue('AI researchers')
+    await wrapper.get('#segment-category').setValue('cs.AI')
+    await wrapper.get('#segment-paper-keyword').setValue('   ')
+    await wrapper.get('#segment-form').trigger('submit')
+    await flushPromises()
+
+    expect(campaignsApi.createSegment).toHaveBeenLastCalledWith({
+      name: 'AI researchers', description: '',
+      rules: [{ field: 'primaryCategory', operator: 'equals', value: 'cs.AI' }],
+    })
+    wrapper.unmount()
   })
 
   it('opens a real campaign from the list and explains why generation is unavailable', async () => {
@@ -147,7 +197,10 @@ function page<T>(items: T[]) {
 function segment(): SegmentView {
   return {
     id: 'segment-1', name: 'AI 已验证作者', description: '高可信联系人',
-    rules: [{ field: 'primaryCategory', operator: 'equals', value: 'cs.AI' }],
+    rules: [
+      { field: 'primaryCategory', operator: 'equals', value: 'cs.AI' },
+      { field: 'paperKeyword', operator: 'contains', value: 'agent' },
+    ],
     eligibleCount: 12, createdAt: '2026-08-10T00:00:00Z', updatedAt: '2026-08-10T00:00:00Z',
   }
 }

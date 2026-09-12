@@ -106,6 +106,7 @@ export interface SmtpAccountRequest {
   perMinuteLimit: number
   perHourLimit: number
   perDayLimit: number
+  perMonthLimit: number | null
   perDomainHourLimit: number
   enabled: boolean
 }

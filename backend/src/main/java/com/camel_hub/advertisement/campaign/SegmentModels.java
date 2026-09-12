@@ -17,21 +17,23 @@ public final class SegmentModels {
 	private SegmentModels() { }
 
 	public static SegmentCriteria criteria(List<RuleInput> rules) {
-		if (rules == null || rules.isEmpty() || rules.size() > 4) {
-			throw new SegmentValidationException("A segment must contain between 1 and 4 rules");
+		if (rules == null || rules.isEmpty() || rules.size() > 5) {
+			throw new SegmentValidationException("A segment must contain between 1 and 5 rules");
 		}
 		String category = null;
 		String confidence = null;
 		String verification = null;
 		Boolean corresponding = null;
+		String paperKeyword = null;
 		Set<String> seen = new HashSet<>();
 		for (RuleInput rule : rules) {
 			if (rule == null || rule.field() == null || rule.operator() == null || rule.value() == null) {
 				throw new SegmentValidationException("Segment rules must contain field, operator, and value");
 			}
 			String field = rule.field().strip();
-			if (!rule.operator().strip().equals("equals")) {
-				throw new SegmentValidationException("Segment rules support only the equals operator");
+			String expectedOperator = field.equals("paperKeyword") ? "contains" : "equals";
+			if (!rule.operator().strip().equals(expectedOperator)) {
+				throw new SegmentValidationException("Unsupported operator for segment field: " + field);
 			}
 			if (!seen.add(field)) {
 				throw new SegmentValidationException("A segment field may be used only once: " + field);
@@ -42,10 +44,20 @@ public final class SegmentModels {
 				case "verificationStatus" ->
 						verification = enumValue(rule.value(), VERIFICATION, "verification status");
 				case "corresponding" -> corresponding = booleanValue(rule.value());
+				case "paperKeyword" -> paperKeyword = keyword(rule.value());
 				default -> throw new SegmentValidationException("Unsupported segment field: " + field);
 			}
 		}
-		return new SegmentCriteria(category, confidence, verification, corresponding);
+		return new SegmentCriteria(category, confidence, verification, corresponding, paperKeyword);
+	}
+
+	private static String keyword(Object value) {
+		String text = textValue(value);
+		if (text == null || text.isBlank() || text.strip().length() > 160
+				|| text.codePoints().anyMatch(Character::isISOControl)) {
+			throw new SegmentValidationException("Paper keyword must contain 1 to 160 printable characters");
+		}
+		return text.strip();
 	}
 
 	private static String category(Object value) {
@@ -85,6 +97,11 @@ public final class SegmentModels {
 			String primaryCategory,
 			String confidence,
 			String verificationStatus,
-			Boolean corresponding
-	) { }
+			Boolean corresponding,
+			String paperKeyword
+	) {
+		public SegmentCriteria(String primaryCategory, String confidence, String verificationStatus, Boolean corresponding) {
+			this(primaryCategory, confidence, verificationStatus, corresponding, null);
+		}
+	}
 }

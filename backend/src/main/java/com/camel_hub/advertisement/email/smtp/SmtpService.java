@@ -175,7 +175,10 @@ public final class SmtpService {
 		String fromEmail = email(command.fromEmail(), "From email");
 		String replyTo = email(command.replyTo(), "Reply-To");
 		String fromName = safeText(command.defaultFromName(), 160, "Default sender name");
-		validateLimits(command);
+		// Older clients omit this optional field when editing an account; retain its configured cap.
+		Integer perMonthLimit = command.perMonthLimit() == null && existing != null
+				? existing.perMonthLimit() : command.perMonthLimit();
+		validateLimits(command, perMonthLimit);
 
 		byte[] ciphertext = existing == null ? null : existing.passwordCiphertext();
 		byte[] nonce = existing == null ? null : existing.passwordNonce();
@@ -195,13 +198,14 @@ public final class SmtpService {
 		}
 		return new SmtpRepository.SmtpWrite(
 				name, host, command.port(), tlsMode, username, ciphertext, nonce, fromEmail, fromName, replyTo,
-				command.perMinuteLimit(), command.perHourLimit(), command.perDayLimit(),
+				command.perMinuteLimit(), command.perHourLimit(), command.perDayLimit(), perMonthLimit,
 				command.perDomainHourLimit(), command.enabled());
 	}
 
-	private void validateLimits(SmtpCommand command) {
+	private void validateLimits(SmtpCommand command, Integer perMonthLimit) {
 		if (command.perMinuteLimit() < 1 || command.perHourLimit() < command.perMinuteLimit()
 				|| command.perDayLimit() < command.perHourLimit()
+				|| (perMonthLimit != null && perMonthLimit < command.perDayLimit())
 				|| command.perDomainHourLimit() < 1
 				|| command.perDomainHourLimit() > command.perHourLimit()) {
 			throw new SmtpValidationException("SMTP rate limits are invalid");
@@ -261,7 +265,7 @@ public final class SmtpService {
 		return new SmtpAccountView(
 				value.id(), value.name(), value.host(), value.port(), value.tlsMode(), value.username(),
 				value.passwordCiphertext() != null, value.fromEmail(), value.defaultFromName(), value.replyTo(),
-				value.perMinuteLimit(), value.perHourLimit(), value.perDayLimit(), value.perDomainHourLimit(),
+				value.perMinuteLimit(), value.perHourLimit(), value.perDayLimit(), value.perMonthLimit(), value.perDomainHourLimit(),
 				value.enabled(), value.lastTestedAt(), value.lastTestStatus(), value.lastTestError(),
 				value.lockVersion(), value.createdAt(), value.updatedAt());
 	}
@@ -269,13 +273,20 @@ public final class SmtpService {
 	public record SmtpCommand(
 			String name, String host, int port, String tlsMode, String username, String password,
 			String fromEmail, String defaultFromName, String replyTo, int perMinuteLimit,
-			int perHourLimit, int perDayLimit, int perDomainHourLimit, boolean enabled
-	) { }
+			int perHourLimit, int perDayLimit, Integer perMonthLimit, int perDomainHourLimit, boolean enabled
+	) {
+		public SmtpCommand(String name, String host, int port, String tlsMode, String username, String password,
+				String fromEmail, String defaultFromName, String replyTo, int perMinuteLimit,
+				int perHourLimit, int perDayLimit, int perDomainHourLimit, boolean enabled) {
+			this(name, host, port, tlsMode, username, password, fromEmail, defaultFromName, replyTo,
+					perMinuteLimit, perHourLimit, perDayLimit, null, perDomainHourLimit, enabled);
+		}
+	}
 
 	public record SmtpAccountView(
 			UUID id, String name, String host, int port, SmtpModels.TlsMode tlsMode, String username,
 			boolean passwordConfigured, String fromEmail, String defaultFromName, String replyTo,
-			int perMinuteLimit, int perHourLimit, int perDayLimit, int perDomainHourLimit,
+			int perMinuteLimit, int perHourLimit, int perDayLimit, Integer perMonthLimit, int perDomainHourLimit,
 			boolean enabled, Instant lastTestedAt, String lastTestStatus, String lastTestError,
 			long lockVersion, Instant createdAt, Instant updatedAt
 	) { }

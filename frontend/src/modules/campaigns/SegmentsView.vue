@@ -24,12 +24,13 @@ const createOpen = ref(false)
 const previewCount = ref<number | null>(null)
 const previewSample = ref<EligibleContactPreview[]>([])
 const form = ref({
-  name: '', description: '', category: '', confidence: '', verificationStatus: '', corresponding: '',
+  name: '', description: '', category: '', paperKeyword: '', confidence: '', verificationStatus: '', corresponding: '',
 })
 
 const rules = computed<SegmentRule[]>(() => {
   const next: SegmentRule[] = []
   if (form.value.category.trim()) next.push({ field: 'primaryCategory', operator: 'equals', value: form.value.category.trim() })
+  if (form.value.paperKeyword.trim()) next.push({ field: 'paperKeyword', operator: 'contains', value: form.value.paperKeyword.trim() })
   if (form.value.confidence) next.push({ field: 'confidence', operator: 'equals', value: form.value.confidence })
   if (form.value.verificationStatus) next.push({ field: 'verificationStatus', operator: 'equals', value: form.value.verificationStatus })
   if (form.value.corresponding) next.push({ field: 'corresponding', operator: 'equals', value: form.value.corresponding === 'true' })
@@ -52,7 +53,7 @@ async function load(target = page.value): Promise<void> {
 }
 
 function openCreate(): void {
-  form.value = { name: '', description: '', category: '', confidence: '', verificationStatus: '', corresponding: '' }
+  form.value = { name: '', description: '', category: '', paperKeyword: '', confidence: '', verificationStatus: '', corresponding: '' }
   previewCount.value = null
   previewSample.value = []
   notice.value = ''
@@ -100,9 +101,9 @@ async function create(): Promise<void> {
 
 function ruleLabel(rule: SegmentRule): string {
   const labels = {
-    primaryCategory: '主分类', confidence: '置信度', verificationStatus: '验证状态', corresponding: '通讯作者',
+    primaryCategory: '主分类', paperKeyword: '论文关键词', confidence: '置信度', verificationStatus: '验证状态', corresponding: '通讯作者',
   }
-  return `${labels[rule.field]} = ${typeof rule.value === 'boolean' ? (rule.value ? '是' : '否') : rule.value}`
+  return `${labels[rule.field]} ${rule.operator === 'contains' ? '包含' : '='} ${typeof rule.value === 'boolean' ? (rule.value ? '是' : '否') : rule.value}`
 }
 
 onMounted(load)
@@ -203,7 +204,7 @@ onMounted(load)
     >
       <DsEmptyState
         title="还没有收件人分组"
-        description="新建分组后可按论文分类、置信度和联系人状态筛选。"
+        description="新建分组后可按论文关键词、分类、置信度和联系人状态筛选。"
       >
         <template #icon>
           <UserGroupIcon class="size-9 text-slate-400" />
@@ -244,6 +245,14 @@ onMounted(load)
           v-model="form.category"
           label="arXiv 主分类"
           placeholder="例如 cs.AI"
+          autocomplete="off"
+        />
+        <DsInput
+          id="segment-paper-keyword"
+          v-model="form.paperKeyword"
+          label="论文关键词（可选）"
+          description="匹配标题或摘要中的文字，不区分大小写；最多 160 个字符。"
+          placeholder="例如 agent"
           autocomplete="off"
         />
         <DsSelect

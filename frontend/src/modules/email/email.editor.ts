@@ -49,6 +49,10 @@ export function previewWidthClass(device: PreviewDevice): string {
   return device === 'mobile' ? 'mx-auto max-w-sm' : 'mx-auto max-w-2xl'
 }
 
+export function requiresHtmlSourceEditing(html: string): boolean {
+  return /<(?:table|thead|tbody|tfoot|tr|td|th|style)\b|<[^>]*\sstyle\s*=/i.test(html)
+}
+
 export function passwordForUpdate(value: string, passwordConfigured: boolean): string | null {
   if (!value && passwordConfigured) return null
   return value || null
@@ -67,6 +71,6 @@ export function createSmtpDraft(): SmtpAccountRequest {
     name: '本机 Mailpit', host: 'mailpit', port: 1025, tlsMode: 'PLAIN_LOCAL_ONLY', username: null,
     password: null, fromEmail: 'research@example.org', defaultFromName: 'Research Team',
     replyTo: 'reply@example.org', perMinuteLimit: 10, perHourLimit: 100, perDayLimit: 1000,
-    perDomainHourLimit: 50, enabled: true,
+    perMonthLimit: 12_000, perDomainHourLimit: 50, enabled: true,
   }
 }

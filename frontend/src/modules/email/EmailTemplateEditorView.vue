@@ -17,7 +17,7 @@ import DsSelect from '@/components/design-skill/DsSelect.vue'
 import DsSwitch from '@/components/design-skill/DsSwitch.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { emailApi, emailErrorMessage } from '@/modules/email/email.api'
-import { createSampleValues, createTemplateDraft, insertPlaceholder, previewWidthClass } from '@/modules/email/email.editor'
+import { createSampleValues, createTemplateDraft, insertPlaceholder, previewWidthClass, requiresHtmlSourceEditing } from '@/modules/email/email.editor'
 import MailTrackingOption from '@/modules/email/MailTrackingOption.vue'
 import type {
   PreviewDevice, SmtpAccountView, TemplateAsset, TemplatePreview, TemplateSampleValues,
@@ -64,6 +64,7 @@ let autosaveTimer: number | undefined
 let previewTimer: number | undefined
 
 const canManage = computed(() => auth.hasPermission('template:manage'))
+const htmlSourceOnly = computed(() => requiresHtmlSourceEditing(draft.content.htmlContent))
 const editorTitle = computed(() => isNew.value ? '新建邮件模板' : draft.name || '邮件模板')
 const bytesPercent = computed(() => Math.min(100, Math.round(((preview.value?.contentSizeBytes ?? template.value?.contentSizeBytes ?? 0) / 102_400) * 100)))
 const hasUnsubscribe = computed(() => draft.content.htmlContent.includes('{{unsubscribe_url}}') || draft.content.textContent?.includes('{{unsubscribe_url}}'))
@@ -97,6 +98,10 @@ watch(draft, () => {
   if (!isNew.value) autosaveTimer = globalThis.window.setTimeout(() => save(false), 1_200)
 }, { deep: true })
 
+watch(htmlSourceOnly, (required) => {
+  if (required && editorMode.value === 'rich') editorMode.value = 'html'
+}, { flush: 'sync' })
+
 watch(routeId, (current, previous) => {
   if (current === previous) return
   if (autosaveTimer) globalThis.window.clearTimeout(autosaveTimer)
@@ -110,6 +115,7 @@ watch(routeId, (current, previous) => {
   successMessage.value = ''
   if (current === 'new') {
     Object.assign(draft, createTemplateDraft())
+    editorMode.value = 'rich'
     initialized = true
     loading.value = false
     return
@@ -124,6 +130,7 @@ async function loadTemplate(): Promise<void> {
     const loaded = await emailApi.getTemplate(requestedId)
     if (routeId.value !== requestedId) return
     applyTemplate(loaded)
+    editorMode.value = requiresHtmlSourceEditing(loaded.htmlContent) ? 'html' : 'rich'
     await Promise.all([loadVersions(), loadAssets()])
     await refreshPreview(false)
   } catch (error) {
@@ -256,7 +263,8 @@ async function uploadAsset(event: globalThis.Event): Promise<void> {
   try {
     const asset = await emailApi.uploadAsset(routeId.value, file)
     assets.value = [asset, ...assets.value]
-    richEditor.value?.insertImage(asset.objectUrl, asset.originalFilename)
+    if (richEditor.value) richEditor.value.insertImage(asset.objectUrl, asset.originalFilename)
+    else draft.content.htmlContent += `<p><img src="${escapeHtmlAttribute(asset.objectUrl)}" alt="${escapeHtmlAttribute(asset.originalFilename)}"></p>`
     lastTestRecordId.value = null
     successMessage.value = '图片已上传到私有资产库并插入正文。'
   } catch (error) {
@@ -264,6 +272,11 @@ async function uploadAsset(event: globalThis.Event): Promise<void> {
   } finally {
     if (uploadInput.value) uploadInput.value.value = ''
   }
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+    .replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
 async function openTestSend(): Promise<void> {
@@ -493,7 +506,9 @@ function formatDate(value: string): string {
                 v-for="mode in (['rich', 'html', 'text'] as const)"
                 :key="mode"
                 type="button"
-                :class="['min-h-9 rounded-md px-3', editorMode === mode ? 'bg-white text-brand-700 shadow-xs' : 'text-slate-500']"
+                :disabled="mode === 'rich' && htmlSourceOnly"
+                :aria-describedby="mode === 'rich' && htmlSourceOnly ? 'brand-template-html-note' : undefined"
+                :class="['min-h-9 rounded-md px-3 disabled:cursor-not-allowed disabled:opacity-40', editorMode === mode ? 'bg-white text-brand-700 shadow-xs' : 'text-slate-500']"
                 @click="editorMode = mode"
               >
                 {{ { rich: '富文本', html: 'HTML', text: '纯文本' }[mode] }}
@@ -501,7 +516,15 @@ function formatDate(value: string): string {
             </div>
           </div>
           <div class="p-5">
+            <p
+              v-if="htmlSourceOnly"
+              id="brand-template-html-note"
+              class="mb-4 rounded-lg bg-brand-50 px-3 py-2 text-sm/6 text-brand-800"
+            >
+              此模板包含品牌排版，请使用 HTML 模式编辑，右侧可查看效果。
+            </p>
             <TemplateRichTextEditor
+              v-if="!htmlSourceOnly"
               v-show="editorMode === 'rich'"
               ref="richEditor"
               v-model="draft.content.htmlContent"
