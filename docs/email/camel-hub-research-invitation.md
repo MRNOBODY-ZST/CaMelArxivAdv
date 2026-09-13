@@ -9,7 +9,10 @@ The template has an email-client-friendly fluid table layout, inline styling, a
 linked paper citation, a research proposal, a support panel, the official
 `https://api.camel-hub.com/` link, and an unsubscribe footer. The sender display name
 is **Camel Hub Research Team**. Deployment supplies the monitored Reply-To mailbox;
-the SMTP account supplies `no-reply@salmon.cloudflare.lat` as the From address.
+the selected SMTP account supplies the From address. The current primary identity
+is `hades@itshades.dev`, with `hades@salmon.cloudflare.lat` available separately.
+The earlier SendPulse `no-reply@salmon.cloudflare.lat` identity is retained for
+history but disabled for new sends. See the [cutover verification](salmon-smtp-cutover-2026-09-14.md).
 
 ## Install and use
 
