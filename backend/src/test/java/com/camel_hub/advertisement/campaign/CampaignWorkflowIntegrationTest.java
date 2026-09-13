@@ -277,6 +277,50 @@ class CampaignWorkflowIntegrationTest {
 	}
 
 	@Test
+	void preservesMultilinePurposeWhenConfiguringACampaignCreatedFromAnExistingTemplate() {
+		String purpose = "  We build an ＡＰＩ Gateway.\r\n\tCollaborate on agent research.\nOffer compute and token sponsorship.  ";
+		var created = campaigns.create(ACTOR, new CampaignService.CampaignCommand(
+				"Research collaboration", purpose, TEMPLATE, SEGMENT, SMTP)).block();
+		var updated = workflow.update(created.id(), ACTOR, CONTEXT, created.lockVersion(),
+				new CampaignWorkflowService.CampaignUpdateCommand(created.name(), created.purpose(), MAILBOX,
+						"Research Team", "research-replies@example.org", true, true)).block();
+
+		assertThat(updated.purpose()).isEqualTo(
+				"We build an API Gateway.\r\n\tCollaborate on agent research.\nOffer compute and token sponsorship.");
+		assertThat(campaigns.get(created.id()).block().purpose()).isEqualTo(updated.purpose());
+		assertThat(updated.templateId()).isEqualTo(TEMPLATE);
+		assertThat(updated.templateVersion()).isEqualTo(created.templateVersion()).isEqualTo(1);
+		assertThat(updated.mailboxAccountId()).isEqualTo(MAILBOX);
+		assertThat(updated.replyTo()).isEqualTo("research-replies@example.org");
+		assertThat(updated.trackingOpensEnabled()).isTrue();
+		assertThat(updated.trackingClicksEnabled()).isTrue();
+		assertThat(updated.lockVersion()).isEqualTo(created.lockVersion() + 1);
+	}
+
+	@Test
+	void multilinePurposeStillRejectsOtherControlsAndDoesNotRelaxNameOrHeaderValidation() {
+		UUID campaignId = insertCampaign("DRAFT");
+		for (String invalidPurpose : List.of("\t\r\n", "x".repeat(4_001), "A\u0000B", "A\u007fB", "\u000bHidden", "A\u0085B")) {
+			assertThatThrownBy(() -> workflow.update(campaignId, ACTOR, CONTEXT, 0,
+					new CampaignWorkflowService.CampaignUpdateCommand("Research", invalidPurpose, MAILBOX,
+							"Research Team", "reply@example.org", true, true)))
+					.isInstanceOf(CampaignValidationException.class).hasMessageContaining("purpose");
+		}
+		for (String invalidName : List.of("Research\nInjected", "Research\rInjected", "Research\tInjected")) {
+			assertThatThrownBy(() -> workflow.update(campaignId, ACTOR, CONTEXT, 0,
+					new CampaignWorkflowService.CampaignUpdateCommand(invalidName, "Valid\nPurpose", MAILBOX,
+							"Research Team", "reply@example.org", true, true)))
+					.isInstanceOf(CampaignValidationException.class).hasMessageContaining("name");
+			assertThatThrownBy(() -> workflow.update(campaignId, ACTOR, CONTEXT, 0,
+					new CampaignWorkflowService.CampaignUpdateCommand("Research", "Valid\nPurpose", MAILBOX,
+							invalidName, "reply@example.org", true, true)))
+					.isInstanceOf(CampaignValidationException.class).hasMessageContaining("sender name");
+		}
+		assertThat(campaigns.get(campaignId).block().lockVersion()).isZero();
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	@Test
 	void supportsEveryPermittedLifecycleTransitionAndWritesSafeAtomicAuditAndWakeups() throws Exception {
 		UUID campaignId = readyCampaign("DRAFT");
 		var updated = workflow.update(campaignId, ACTOR, CONTEXT, 0,

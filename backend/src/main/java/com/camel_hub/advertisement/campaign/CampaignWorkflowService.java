@@ -234,7 +234,7 @@ public final class CampaignWorkflowService {
 		}
 		return new CampaignUpdateCommand(
 				text(command.name(), 200, "Campaign name"),
-				text(command.purpose(), 4_000, "Campaign purpose"), command.mailboxAccountId(),
+				purpose(command.purpose()), command.mailboxAccountId(),
 				text(command.fromName(), 160, "Campaign sender name"),
 				email(command.replyTo()), command.trackingOpensEnabled(), command.trackingClicksEnabled());
 	}
@@ -244,6 +244,17 @@ public final class CampaignWorkflowService {
 		if (normalized.isEmpty() || normalized.length() > maximum
 				|| normalized.codePoints().anyMatch(Character::isISOControl)) {
 			throw new CampaignValidationException(label + " is invalid");
+		}
+		return normalized;
+	}
+
+	private String purpose(String value) {
+		String normalized = value == null ? "" : Normalizer.normalize(value, Normalizer.Form.NFKC);
+		boolean invalidControl = normalized.codePoints().anyMatch(codePoint -> Character.isISOControl(codePoint)
+				&& codePoint != '\r' && codePoint != '\n' && codePoint != '\t');
+		normalized = normalized.strip();
+		if (normalized.isEmpty() || normalized.length() > 4_000 || invalidControl) {
+			throw new CampaignValidationException("Campaign purpose is invalid");
 		}
 		return normalized;
 	}
