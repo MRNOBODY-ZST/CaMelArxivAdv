@@ -2,6 +2,7 @@
 
 - [Reusable invitation and AI workflow](camel-hub-research-invitation.md)
 - [Illustrative HTML preview](camel-hub-research-invitation-preview.html)
+- [Production verification and outstanding delivery check](production-validation-2026-09-13.md)
 
 Use `app.personalization.research_invitation.reusable_template(reply_to)` to build
 the template API payload and `CAMPAIGN_PURPOSE` from the same module for the draft
