@@ -162,6 +162,58 @@ class PublicationTest(unittest.TestCase):
         self.commit("remove synthetic contact")
         self.assertIn("EMAIL", self.rules())
 
+    def commit_mode_roundtrip(self):
+        self.git("update-index", "--chmod=+x", "README.md")
+        self.commit("synthetic intermediate executable mode")
+        self.assertTrue(self.git("ls-tree", "HEAD", "README.md").startswith("100755 "))
+        self.git("update-index", "--chmod=-x", "README.md")
+        self.commit("restore synthetic reviewed mode")
+        self.assertTrue(self.git("ls-tree", "HEAD", "README.md").startswith("100644 "))
+
+    def test_historicalModeCurrentHashDoesNotApproveWrongMode(self):
+        self.commit_mode_roundtrip()
+        self.assertEqual([("README.md", "HISTORY_UNREVIEWED")],
+                         [(f.path, f.rule_id) for f in self.inspect()])
+        result = self.cli()
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("README.md\tHISTORY_UNREVIEWED\nfindings\t1\n", result.stdout)
+        self.assertEqual("", result.stderr)
+
+    def test_historicalModeFallbackRequiresExactIdentity(self):
+        old = dict(self.files["README.md"])
+        self.commit_mode_roundtrip()
+        self.write("README.md", "synthetic current revision\n")
+        self.git("add", "README.md")
+        self.commit("synthetic current content")
+        self.refresh()
+        for field, wrong in (("mode", "100644"), ("sha256", "0" * 64)):
+            with self.subTest(field=field):
+                reviewed = {**old, "mode": "100755", field: wrong}
+                self.manifest["history_files"] = {"README.md": {old["sha256"]: reviewed}}
+                self.save()
+                self.assertIn("HISTORY_UNREVIEWED", self.rules())
+
+    def test_historicalModeExplicitSameHashIdentityAccepted(self):
+        self.commit_mode_roundtrip()
+        old = {**self.files["README.md"], "mode": "100755"}
+        self.manifest["history_files"] = {"README.md": {old["sha256"]: old}}
+        self.save()
+        self.assertEqual([], self.inspect())
+
+    def test_historicalModeExplicitDifferentHashIdentityAccepted(self):
+        old = dict(self.files["README.md"])
+        self.git("update-index", "--chmod=+x", "README.md")
+        self.commit("synthetic reviewed historical executable")
+        self.git("update-index", "--chmod=-x", "README.md")
+        self.write("README.md", "synthetic current revision\n")
+        self.git("add", "README.md")
+        self.commit("synthetic current content and mode")
+        self.refresh()
+        old["mode"] = "100755"
+        self.manifest["history_files"] = {"README.md": {old["sha256"]: old}}
+        self.save()
+        self.assertEqual([], self.inspect())
+
     def test_privateAncestorMergeRejected(self):
         self.git("merge", "--no-ff", "--no-commit", "private")
         self.git("rm", "-q", "-f", "private-note.md")

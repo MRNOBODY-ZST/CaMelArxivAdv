@@ -424,11 +424,12 @@ def inspect_publication(base: str, tree: Path, inventory: Path, source_head: str
                 add("<repository>", "HISTORY_COVERAGE")
             for name, (mode, data) in historical_tree.items():
                 entry = files.get(name)
-                if not entry or entry["sha256"] != _sha(data):
-                    entry = manifest["history_files"].get(name, {}).get(_sha(data))
+                identity = (mode, _sha(data))
+                if not entry or (entry["mode"], entry["sha256"]) != identity:
+                    entry = manifest["history_files"].get(name, {}).get(identity[1])
                     if entry:
                         _validate_entries({name: entry})
-                    else:
+                    if not entry or (entry["mode"], entry["sha256"]) != identity:
                         add(name, "HISTORY_UNREVIEWED")
                 if name not in safe:
                     add(name, "HISTORY_PATH")
