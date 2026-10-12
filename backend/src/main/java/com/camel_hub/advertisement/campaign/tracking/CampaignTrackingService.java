@@ -39,6 +39,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.*;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.PreparationStage.*;
 
 /** Final send-time rendering and production callback resolver. */
 public final class CampaignTrackingService implements CampaignOutboundPreparer, CampaignCallbackNamespace {
@@ -104,13 +106,13 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 
 	@Override
 	public Mono<PreparedOutbound> prepare(CampaignDeliveryRepository.ProductionClaim claim) {
-		return Mono.defer(() -> {
+		return at(CLAIM_VALIDATION, () -> {
 			Instant now = clock.instant();
 			byte[] leaseHash = CampaignTrackingSigner.sha256Bytes(claim.leaseDigest());
 			return repository.lockPreparation(claim, leaseHash, now)
 					.switchIfEmpty(Mono.error(new IllegalStateException("Campaign preparation lease is no longer active")))
 					.flatMap(state -> validateClaim(state, claim).then(Mono.defer(() ->
-							isFrozen(state) ? reuseFrozen(claim, state, leaseHash, now)
+							during(SOURCE_VALIDATION, () -> isFrozen(state)) ? reuseFrozen(claim, state, leaseHash, now)
 									: prepareInitial(claim, state, leaseHash, now))))
 					.as(transactions::transactional);
 		});
@@ -201,9 +203,10 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 			CampaignTrackingRepository.PreparationState state,
 			byte[] leaseHash, Instant now
 	) {
-		validateInitialDraft(state);
+		return at(TRACKING_RENDER, () -> {
+		during(SOURCE_VALIDATION, () -> { validateInitialDraft(state); return true; });
 		Instant expiresAt = now.plus(properties.tokenTtl()).truncatedTo(ChronoUnit.SECONDS);
-		String unsubscribeToken = signer.issueUnsubscribe(state.recipientId(), expiresAt);
+		String unsubscribeToken = crypto(TRACKING_RENDER, () -> signer.issueUnsubscribe(state.recipientId(), expiresAt));
 		String unsubscribeUrl = properties.publicBaseUrl() + "/u/" + unsubscribeToken;
 		String html = state.html().replace(PLACEHOLDER, unsubscribeUrl);
 		String text = state.text().replace(PLACEHOLDER, unsubscribeUrl);
@@ -214,41 +217,42 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 				: List.of();
 
 		return Flux.fromIterable(eligible)
-				.concatMap(link -> repository.ensureLink(
-						state.campaignId(), state.templateVersionId(), link.targetUrl(), link.label(), now))
+				.concatMap(link -> at(ARTIFACT_PERSIST, () -> repository.ensureLink(
+						state.campaignId(), state.templateVersionId(), link.targetUrl(), link.label(), now)))
 				.collectList()
 				.flatMap(links -> {
 					Map<String, String> callbacks = new LinkedHashMap<>();
 					List<TokenDraft> clickTokens = new java.util.ArrayList<>();
 					for (int index = 0; index < links.size(); index++) {
 						CampaignTrackingRepository.PersistedLink persisted = links.get(index);
-						String token = signer.issueClick(state.recipientId(), persisted.id(), expiresAt);
+						String token = crypto(TRACKING_RENDER, () -> signer.issueClick(state.recipientId(), persisted.id(), expiresAt));
 						callbacks.put(eligible.get(index).targetUrl(), token);
 						clickTokens.add(new TokenDraft(persisted.id(), "CLICK", token));
 					}
 					String rewritten = state.trackingClicks() ? linkRewriter.rewrite(html, callbacks) : html;
-					String openToken = state.trackingOpens() ? signer.issueOpen(state.recipientId(), expiresAt) : null;
+					String openToken = state.trackingOpens() ? crypto(TRACKING_RENDER, () -> signer.issueOpen(state.recipientId(), expiresAt)) : null;
 					String finalHtml = openToken == null ? rewritten : appendPixel(rewritten, openToken);
-					Mono<Void> tokens = repository.insertToken(
+					Mono<Void> tokens = at(ARTIFACT_PERSIST, () -> repository.insertToken(
 							state.recipientId(), null, "UNSUBSCRIBE", signer.digest(unsubscribeToken), expiresAt, now)
 							.then(openToken == null ? Mono.empty() : repository.insertToken(
 									state.recipientId(), null, "OPEN", signer.digest(openToken), expiresAt, now))
 							.thenMany(Flux.fromIterable(clickTokens).concatMap(token -> repository.insertToken(
 									state.recipientId(), token.linkId(), token.type(), signer.digest(token.value()),
-									expiresAt, now))).then();
-					return tokens.then(repository.persistPreparedBodies(
-							claim, leaseHash, state.subject(), finalHtml, text, clock.instant()))
+									expiresAt, now))).then());
+					return tokens.then(at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+							claim, leaseHash, state.subject(), finalHtml, text, clock.instant())))
 							.thenReturn(outbound(state.subject(), finalHtml, text, unsubscribeUrl));
 				});
+		});
 	}
 
 	private Mono<PreparedOutbound> reuseFrozen(
 			CampaignDeliveryRepository.ProductionClaim claim,
 			CampaignTrackingRepository.PreparationState state, byte[] leaseHash, Instant now
 	) {
-		return Mono.defer(() -> {
+		return at(SOURCE_VALIDATION, () -> {
 			FrozenCapabilities capabilities = parseFrozen(state);
-			return repository.frozenArtifacts(state.recipientId()).collectList()
+			return at(ARTIFACT_PERSIST, () -> repository.frozenArtifacts(state.recipientId()).collectList())
 					.flatMap(artifacts -> {
 						FrozenValidation validation = validateFrozen(state, capabilities, artifacts);
 						if (validation == null) return invalidFrozen();
@@ -257,10 +261,10 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 									? rotateFrozen(claim, state, capabilities, artifacts.size(), leaseHash, now)
 									: invalidFrozen();
 						}
-						return repository.persistPreparedBodies(
-								claim, leaseHash, state.subject(), state.html(), state.text(), clock.instant())
-								.thenReturn(outbound(state.subject(), state.html(), state.text(),
-										capabilities.unsubscribeUrl()));
+						return at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+								claim, leaseHash, state.subject(), state.html(), state.text(), clock.instant()))
+								.thenReturn(during(TRACKING_RENDER, () -> outbound(state.subject(), state.html(), state.text(),
+										capabilities.unsubscribeUrl())));
 					});
 		});
 	}
@@ -282,22 +286,23 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 			CampaignTrackingRepository.PreparationState state, FrozenCapabilities capabilities,
 			int oldTokenCount, byte[] leaseHash, Instant now
 	) {
+		return at(TRACKING_RENDER, () -> {
 		Instant expiresAt = now.plus(properties.tokenTtl()).truncatedTo(ChronoUnit.SECONDS);
 		Map<String, String> replacements = new LinkedHashMap<>();
 		List<TokenDraft> tokens = new ArrayList<>();
 
-		String unsubscribe = signer.issueUnsubscribe(state.recipientId(), expiresAt);
+		String unsubscribe = crypto(TRACKING_RENDER, () -> signer.issueUnsubscribe(state.recipientId(), expiresAt));
 		replacements.put(capabilities.unsubscribeToken(), unsubscribe);
 		tokens.add(new TokenDraft(null, "UNSUBSCRIBE", unsubscribe));
 		for (String old : capabilities.openTokens()) {
-			String replacement = signer.issueOpen(state.recipientId(), expiresAt);
+			String replacement = crypto(TRACKING_RENDER, () -> signer.issueOpen(state.recipientId(), expiresAt));
 			replacements.put(old, replacement);
 			tokens.add(new TokenDraft(null, "OPEN", replacement));
 		}
 		for (String old : capabilities.clickTokens()) {
 			CampaignTrackingSigner.VerifiedClick verified = signer.verifyClickIncludingExpired(old)
 					.orElseThrow(this::frozenError);
-			String replacement = signer.issueClick(state.recipientId(), verified.linkId(), expiresAt);
+			String replacement = crypto(TRACKING_RENDER, () -> signer.issueClick(state.recipientId(), verified.linkId(), expiresAt));
 			replacements.put(old, replacement);
 			tokens.add(new TokenDraft(verified.linkId(), "CLICK", replacement));
 		}
@@ -313,13 +318,14 @@ public final class CampaignTrackingService implements CampaignOutboundPreparer, 
 		if (newCapabilities.openTokens().size() != capabilities.openTokens().size()
 				|| newCapabilities.clickTokens().size() != capabilities.clickTokens().size()) return invalidFrozen();
 
-		return repository.deleteFrozenTokens(state.recipientId(), oldTokenCount)
+		return at(ARTIFACT_PERSIST, () -> repository.deleteFrozenTokens(state.recipientId(), oldTokenCount)
 				.thenMany(Flux.fromIterable(tokens).concatMap(token -> repository.insertToken(
 						state.recipientId(), token.linkId(), token.type(), signer.digest(token.value()),
-						expiresAt, now))).then()
-				.then(repository.persistPreparedBodies(
-						claim, leaseHash, state.subject(), html, text, clock.instant()))
+						expiresAt, now))).then())
+				.then(at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+						claim, leaseHash, state.subject(), html, text, clock.instant())))
 				.thenReturn(outbound(state.subject(), html, text, newCapabilities.unsubscribeUrl()));
+		});
 	}
 
 	private String replaceCapabilities(

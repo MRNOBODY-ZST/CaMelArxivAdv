@@ -51,6 +51,129 @@ def copy_payload() -> dict[str, str]:
     }
 
 
+def test_new_research_template_offers_fixed_password_only_partner_activation() -> None:
+    content = reusable_template("research@example.org")["content"]
+    assert isinstance(content, dict)
+    html = str(content["htmlContent"])
+    text = str(content["textContent"])
+    assert '<a href="{{partner_claim_url}}"' in html
+    for body in (html, text):
+        assert body.count("{{partner_claim_url}}") == 1
+        assert "set a password" in body.lower()
+        assert "log in" in body.lower()
+        assert "bind" in body.lower()
+        assert "$5" not in body and "$10" not in body
+
+
+def test_new_research_template_preserves_activation_placeholder_in_both_generated_formats() -> None:
+    active = invitation_command()
+    output = parse_generation(copy_payload(), active, active.payload.targets[0])
+    assert '<a href="{{partner_claim_url}}"' in output.html
+    for body in (output.html, output.text):
+        assert body.count("{{partner_claim_url}}") == 1
+        assert body.count("{{unsubscribe_url}}") == 1
+        assert "set a password" in body.lower()
+        assert "log in" in body.lower()
+        assert "$5" not in body and "$10" not in body
+
+
+def test_legacy_research_template_does_not_gain_partner_activation() -> None:
+    active = invitation_command()
+    active.payload.template_html = active.payload.template_html.replace(
+        "{{partner_claim_url}}", "https://api.camel-hub.com/"
+    )
+    active.payload.template_text = active.payload.template_text.replace(
+        "{{partner_claim_url}}", "https://api.camel-hub.com/"
+    )
+    output = parse_generation(copy_payload(), active, active.payload.targets[0])
+    assert "{{partner_claim_url}}" not in output.html
+    assert "{{partner_claim_url}}" not in output.text
+
+
+def test_research_generation_rejects_one_sided_partner_placeholder() -> None:
+    active = invitation_command()
+    active.payload.template_html = active.payload.template_html.replace(
+        "{{partner_claim_url}}", "https://api.camel-hub.com/"
+    )
+    with pytest.raises(ValueError, match="partner_claim_url"):
+        parse_generation(copy_payload(), active, active.payload.targets[0])
+
+
+def test_generic_generation_must_keep_optional_partner_placeholder_in_both_formats() -> None:
+    active = command(1)
+    active.payload.template_html += '<a href="{{partner_claim_url}}">Activate</a>'
+    active.payload.template_text += "\nActivate: {{partner_claim_url}}"
+    generated = {
+        "subject": "Research invitation",
+        "html": (
+            '<a href="{{partner_claim_url}}">Activate</a>'
+            '<a href="{{unsubscribe_url}}">Unsubscribe</a>'
+        ),
+        "text": "Activate: {{partner_claim_url}}\nUnsubscribe: {{unsubscribe_url}}",
+        "rationale": "Grounded in the public abstract.",
+    }
+    assert parse_generation(generated, active, active.payload.targets[0]).html == generated["html"]
+    with pytest.raises(ValueError, match="partner_claim_url"):
+        parse_generation(
+            {**generated, "text": "Unsubscribe: {{unsubscribe_url}}"},
+            active,
+            active.payload.targets[0],
+        )
+
+
+@pytest.mark.parametrize("field", ["subject", "rationale"])
+def test_generic_generation_rejects_partner_claim_placeholder_in_metadata(field: str) -> None:
+    active = command(1)
+    generated = {
+        "subject": "Research invitation",
+        "html": '<a href="{{unsubscribe_url}}">Unsubscribe</a>',
+        "text": "Unsubscribe: {{unsubscribe_url}}",
+        "rationale": "Grounded in the public abstract.",
+    }
+    generated[field] = "{{partner_claim_url}}"
+    with pytest.raises(ValidationError, match="partner_claim_url"):
+        parse_generation(generated, active, active.payload.targets[0])
+
+
+@pytest.mark.parametrize("promise", ["10 API token credits", "5 model API credits"])
+def test_research_generation_rejects_intervening_credit_unit_words(promise: str) -> None:
+    active = invitation_command()
+    prose = copy_payload()
+    prose["collaborationIdea"] = f"We could offer {promise} for the proposed experiment."
+    with pytest.raises(ValidationError, match="credit amount"):
+        parse_generation(prose, active, active.payload.targets[0])
+
+
+def test_unknown_author_has_neutral_greeting_citation_and_private_ai_input() -> None:
+    active = invitation_command()
+    target = PersonalizationTarget.model_validate(
+        {**active.payload.targets[0].model_dump(), "author_name": None, "organization": None}
+    )
+    prose = {**copy_payload(), "researchConnection": (
+        "The cited abstract describes evaluating tool selection by AI agents. "
+        "This evaluation setup suggests a useful starting point for a joint study."
+    )}
+    output = parse_generation(prose, active, target)
+    for body in (output.html, output.text):
+        assert "Hello research team," in body
+        assert "your publicly listed research" not in body
+        assert "{{unsubscribe_url}}" in body
+        assert "None" not in body
+    ai_input = public_generation_input(active, target)
+    assert "author" not in ai_input
+    assert "do not" in str(ai_input).lower()
+    assert "authorship" in str(ai_input).lower()
+    assert "recipientId" not in json.dumps(ai_input)
+
+
+@pytest.mark.parametrize("author", ["", "   "])
+def test_unknown_author_must_be_explicit_null_not_blank(author: str) -> None:
+    with pytest.raises(ValidationError):
+        PersonalizationTarget.model_validate(
+            {**invitation_command().payload.targets[0].model_dump(), "author_name": author}
+        )
+
+
 def test_renders_ai_prose_inside_branded_html_and_equivalent_plain_text() -> None:
     active = invitation_command()
     generated = parse_generation(copy_payload(), active, active.payload.targets[0])
@@ -121,7 +244,8 @@ def test_changed_or_duplicated_ai_slot_fails_instead_of_publishing_generic_copy(
 
 
 @pytest.mark.parametrize(
-    "unsafe", ["Bad\r\nBcc: other", "<b>bad</b>", "{{paper_title}}", "https://bad.invalid"]
+    "unsafe",
+    ["Bad\r\nBcc: other", "<b>bad</b>", "{{paper_title}}", "https://bad.invalid", "$10 credits"],
 )
 def test_rejects_provider_header_injection_markup_variables_and_external_links(unsafe: str) -> None:
     with pytest.raises(ValidationError):

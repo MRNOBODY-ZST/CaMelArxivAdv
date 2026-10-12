@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import type { Permission } from '@/modules/auth/auth.types'
 import CampaignDetailView from '@/modules/campaigns/CampaignDetailView.vue'
+import CampaignSettingsPanel from '@/modules/campaigns/CampaignSettingsPanel.vue'
 import DeliveriesView from '@/modules/campaigns/DeliveriesView.vue'
 import { campaignsApi } from '@/modules/campaigns/campaigns.api'
 import type { CampaignView, SafetyRunView } from '@/modules/campaigns/campaigns.types'
@@ -70,6 +71,23 @@ describe('campaign delivery operations', () => {
     expect(sender.text()).toContain('SAFETY_REDIRECT')
   })
 
+  it('exposes settings and each generated draft editor in the actual campaign route', async () => {
+    vi.mocked(campaignsApi.getCampaign).mockResolvedValue({ ...campaign(), status: 'DRAFT', mailboxAccountId: null })
+    vi.mocked(campaignsApi.listSafetyRuns).mockResolvedValue([])
+    vi.mocked(campaignsApi.listRecipients).mockResolvedValue(page([{
+      id: 'recipient-1', authorName: 'Yihao Ang', paperTitle: 'CTBench', category: 'q-fin.ST',
+      organization: 'NUS', personalizationStatus: 'GENERATED', subject: 'CTBench research',
+      html: '<p>{{unsubscribe_url}}</p>', text: 'Opt out {{unsubscribe_url}}', rationale: 'Public abstract',
+      errorCode: null, errorMessage: null, personalizedAt: '2026-09-21T14:00:00Z',
+      createdAt: '2026-09-21T14:00:00Z', trackingArtifactsRedacted: false,
+    }]))
+    const wrapper = await mountDetail(['campaign:read', 'campaign:create', 'mailbox:read'])
+    expect(wrapper.text()).toContain('发送设置')
+    expect(wrapper.text()).toContain('编辑草稿')
+    expect(wrapper.get('[data-testid="edit-recipient-content"]').attributes()).not.toHaveProperty('disabled')
+    wrapper.unmount()
+  })
+
   it('requires the literal confirmation and a 1–20 safety limit', async () => {
     vi.mocked(campaignsApi.listSafetyRuns).mockResolvedValue([])
     vi.mocked(campaignsApi.startSafetyRun).mockResolvedValue(safetyRun('QUEUED'))
@@ -89,6 +107,22 @@ describe('campaign delivery operations', () => {
     expect(campaignsApi.startSafetyRun).toHaveBeenCalledWith('campaign-1', {
       expectedLockVersion: 7, recipientLimit: 2, confirmation: 'SAFETY_REDIRECT',
     })
+  })
+
+  it('blocks stale workflow actions until post-edit refresh succeeds', async () => {
+    vi.mocked(campaignsApi.listSafetyRuns).mockResolvedValue([])
+    vi.mocked(campaignsApi.getCampaign).mockResolvedValue({ ...campaign(), status: 'DRAFT' })
+    const wrapper = await mountDetail(['campaign:read', 'campaign:create'])
+    let failReload!: (reason: Error) => void
+    vi.mocked(campaignsApi.getCampaign).mockImplementationOnce(() => new Promise((_resolve, reject) => { failReload = reject }))
+    wrapper.findComponent(CampaignSettingsPanel).vm.$emit('saved')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="primary-campaign-action"]').attributes()).toHaveProperty('disabled')
+    failReload(new Error('reload failed'))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="primary-campaign-action"]').attributes()).toHaveProperty('disabled')
+    expect(campaignsApi.submitCampaignForReview).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('polls nonterminal work every three seconds and stops after terminal state', async () => {

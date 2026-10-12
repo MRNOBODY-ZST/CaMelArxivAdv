@@ -6,6 +6,22 @@ from pydantic import ValidationError
 from app.config import PersonalizationSettings, Settings
 
 
+def test_source_lease_defaults_fit_issuer_cap_and_three_renewals() -> None:
+    settings = Settings(_env_file=None)
+    assert getattr(settings, "source_invocation_lease_seconds", None) == 120
+    assert getattr(settings, "source_invocation_renew_seconds", None) == 30
+
+
+@pytest.mark.parametrize("lease,renew", [(121, 30), (0, 1), (120, 0), (89, 30)])
+def test_source_lease_rejects_unrenewable_or_over_cap(lease: int, renew: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            source_invocation_lease_seconds=lease,
+            source_invocation_renew_seconds=renew,
+        )
+
+
 def test_defaults_enforce_safe_arxiv_rate_and_hosts() -> None:
     settings = Settings()
 

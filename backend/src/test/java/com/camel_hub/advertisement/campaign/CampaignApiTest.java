@@ -21,6 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class CampaignApiTest {
@@ -29,6 +31,7 @@ class CampaignApiTest {
 	private CampaignService service;
 	private CampaignWorkflowService workflow;
 	private CampaignPreflightService preflight;
+	private CampaignRecipientContentService recipientContent;
 	private WebTestClient client;
 
 	@BeforeEach
@@ -36,10 +39,11 @@ class CampaignApiTest {
 		service = mock(CampaignService.class);
 		workflow = mock(CampaignWorkflowService.class);
 		preflight = mock(CampaignPreflightService.class);
+		recipientContent = mock(CampaignRecipientContentService.class);
 		var authentication = new UsernamePasswordAuthenticationToken(ACTOR.toString(), "n/a");
 		WebFilter principal = (exchange, chain) -> chain.filter(
 				exchange.mutate().principal(Mono.just(authentication)).build());
-		client = WebTestClient.bindToController(new CampaignController(service, workflow, preflight))
+		client = WebTestClient.bindToController(new CampaignController(service, workflow, preflight, recipientContent))
 				.controllerAdvice(new GlobalExceptionHandler(null, null)).webFilter(principal).build();
 	}
 
@@ -78,6 +82,74 @@ class CampaignApiTest {
 	}
 
 	@Test
+	void acceptsAnExplicitPaperSelectionWithoutChangingTheLegacyEndpoint() {
+		UUID campaignId = UUID.randomUUID();
+		List<UUID> papers = List.of(UUID.randomUUID(), UUID.randomUUID());
+		when(service.startPersonalization(eq(campaignId), any(), eq(papers)))
+				.thenReturn(Mono.just(new CampaignService.GenerationStart(UUID.randomUUID(), 2)));
+
+		client.post().uri("/api/v1/campaigns/{id}/personalizations", campaignId)
+				.bodyValue(Map.of("paperIds", papers)).exchange()
+				.expectStatus().isAccepted().expectBody().jsonPath("$.queuedRecipients").isEqualTo(2);
+		verify(service).startPersonalization(eq(campaignId), any(), eq(papers));
+	}
+
+	@Test
+	void rejectsMalformedAndOversizedExplicitSelectionsBeforeCallingTheService() {
+		UUID campaignId = UUID.randomUUID();
+		List<String> malformed = List.of("{}", "{\"paperIds\":null}", "{\"paperIds\":[]}",
+				"{\"paperIds\":[null]}", "{\"paperIds\":[\"not-a-uuid\"]}",
+				"{\"paperIds\":\"not-an-array\"}");
+		for (String body : malformed) {
+			client.post().uri("/api/v1/campaigns/{id}/personalizations", campaignId)
+					.header("Content-Type", "application/json").bodyValue(body).exchange()
+					.expectStatus().isBadRequest();
+		}
+		client.post().uri("/api/v1/campaigns/{id}/personalizations", campaignId)
+				.bodyValue(Map.of("paperIds", java.util.stream.IntStream.range(0, 21)
+						.mapToObj(ignored -> UUID.randomUUID()).toList()))
+				.exchange().expectStatus().isBadRequest();
+		verifyNoInteractions(service);
+	}
+
+	@Test
+	void acceptsAnExplicitProductionLimitWithoutReusingThePaperSelectionOverload() {
+		UUID campaignId = UUID.randomUUID();
+		when(service.startPersonalization(eq(campaignId), any(), eq(null), eq(120)))
+				.thenReturn(Mono.just(new CampaignService.GenerationStart(UUID.randomUUID(), 120)));
+		client.post().uri("/api/v1/campaigns/{id}/personalizations", campaignId)
+				.bodyValue(Map.of("recipientLimit", 120)).exchange()
+				.expectStatus().isAccepted().expectBody().jsonPath("$.queuedRecipients").isEqualTo(120);
+		verify(service).startPersonalization(eq(campaignId), any(), eq(null), eq(120));
+	}
+
+	@Test
+	void rejectsCoercedUnknownDuplicateAndMixedProductionSelectors() {
+		for (String body : List.of("{\"recipientLimit\":0}", "{\"recipientLimit\":121}",
+				"{\"recipientLimit\":null}", "{\"recipientLimit\":1.0}", "{\"recipientLimit\":\"120\"}",
+				"{\"recipientLimit\":true}", "{\"recipientLimit\":9999999999999}",
+				"{\"recipientLimit\":1,\"recipientLimit\":2}",
+				"{\"recipientLimit\":1,\"email\":\"test@example.invalid\"}",
+				"{\"recipientLimit\":1,\"paperIds\":[\"" + UUID.randomUUID() + "\"]}")) {
+			client.post().uri("/api/v1/campaigns/{id}/personalizations", UUID.randomUUID())
+					.header("Content-Type", "application/json").bodyValue(body).exchange().expectStatus().isBadRequest();
+		}
+		verifyNoInteractions(service);
+	}
+
+	@Test
+	void routesPaperContactManifestToTheExplicitPolicyService() {
+		UUID campaignId = UUID.randomUUID();
+		List<UUID> papers = List.of(UUID.randomUUID());
+		when(service.startPaperContactPersonalization(eq(campaignId), any(), eq(papers)))
+				.thenReturn(Mono.just(new CampaignService.GenerationStart(UUID.randomUUID(), 3)));
+		client.post().uri("/api/v1/campaigns/{id}/personalizations", campaignId)
+				.bodyValue(Map.of("paperContactIds", papers)).exchange().expectStatus().isAccepted()
+				.expectBody().jsonPath("$.queuedRecipients").isEqualTo(3);
+		verify(service).startPaperContactPersonalization(eq(campaignId), any(), eq(papers));
+	}
+
+	@Test
 	void authenticatedRecipientHttpResponseKeepsFrozenCapabilitiesAndBodiesRedacted() {
 		UUID campaignId = UUID.randomUUID();
 		String capability = "campaign-click:v1.capability-must-not-leak";
@@ -106,6 +178,47 @@ class CampaignApiTest {
 				.bodyValue(Map.of("expectedLockVersion", 7)).exchange()
 				.expectStatus().isEqualTo(409).expectBody()
 				.jsonPath("$.type").isEqualTo("campaign_conflict");
+	}
+
+	@Test
+	void exposesAuthenticatedDraftRecipientContentCorrectionContract() {
+		UUID campaignId = UUID.randomUUID();
+		UUID recipientId = UUID.randomUUID();
+		var result = new CampaignRecipientContentService.EditResult(
+				campaignId, recipientId, 5, "A corrected research question",
+				"<p>Corrected note.</p><a href=\"{{unsubscribe_url}}\">Unsubscribe</a>",
+				"Corrected note. {{unsubscribe_url}}", "Corrected the paper-specific factual claim.", Instant.now());
+		when(recipientContent.update(eq(campaignId), eq(recipientId), eq(ACTOR), any(), any()))
+				.thenReturn(Mono.just(result));
+
+		client.put().uri("/api/v1/campaigns/{id}/recipients/{recipientId}/content", campaignId, recipientId)
+				.bodyValue(Map.of(
+						"expectedLockVersion", 4,
+						"subject", "A corrected research question",
+						"html", "<p>Corrected note.</p><a href=\"{{unsubscribe_url}}\">Unsubscribe</a>",
+						"text", "Corrected note. {{unsubscribe_url}}",
+						"rationale", "Corrected the paper-specific factual claim.",
+						"reason", "Editorial correction after source review"))
+				.exchange().expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$.campaignId").isEqualTo(campaignId.toString())
+				.jsonPath("$.recipientId").isEqualTo(recipientId.toString())
+				.jsonPath("$.lockVersion").isEqualTo(5);
+	}
+
+	@Test
+	void rejectsMalformedRecipientContentCorrectionBeforeCallingTheService() {
+		UUID campaignId = UUID.randomUUID();
+		UUID recipientId = UUID.randomUUID();
+		for (String body : List.of(
+				"{}",
+				"{\"expectedLockVersion\":-1,\"subject\":\"Subject\",\"html\":\"<p>{{unsubscribe_url}}</p>\",\"text\":\"{{unsubscribe_url}}\",\"rationale\":\"Fix\",\"reason\":\"Review\"}",
+				"{\"expectedLockVersion\":0,\"subject\":\"Subject\",\"html\":\"<p>{{unsubscribe_url}}</p>\",\"text\":\"{{unsubscribe_url}}\",\"rationale\":\"Fix\",\"reason\":\"   \"}")) {
+			client.put().uri("/api/v1/campaigns/{id}/recipients/{recipientId}/content", campaignId, recipientId)
+					.header("Content-Type", "application/json").bodyValue(body)
+					.exchange().expectStatus().isBadRequest();
+		}
+		verifyNoInteractions(recipientContent);
 	}
 
 	@Test
@@ -194,7 +307,7 @@ class CampaignApiTest {
 					PreAuthorize permission = method.getAnnotation(PreAuthorize.class);
 					assertThat(permission).isNotNull();
 					String expected = switch (method.getName()) {
-						case "create", "update", "startPersonalization", "submitReview" -> "campaign:create";
+					case "create", "update", "updateRecipientContent", "startPersonalization", "submitReview" -> "campaign:create";
 						case "approve", "reject" -> "campaign:approve";
 						case "schedule", "start" -> "campaign:send";
 						case "pause", "resume", "cancel" -> "campaign:pause";

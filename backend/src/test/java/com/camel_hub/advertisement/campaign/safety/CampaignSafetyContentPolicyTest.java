@@ -16,6 +16,16 @@ class CampaignSafetyContentPolicyTest {
 	private final CampaignSafetyContentPolicy policy = new CampaignSafetyContentPolicy();
 
 	@Test
+	void rejectsRawPartnerCapabilitiesButAcceptsOptInPlaceholder() {
+		assertThatCode(() -> policy.validateSource("Invite",
+				"<a href=\"{{partner_claim_url}}\">Activate</a><a href=\"{{unsubscribe_url}}\">Stop</a>",
+				"Activate {{partner_claim_url}} Stop {{unsubscribe_url}}" )).doesNotThrowAnyException();
+		assertThatThrownBy(() -> policy.validateSource("Invite",
+				"<a href=\"https://api.camel-hub.cn/partner/claim?token=private\">Activate</a><a href=\"{{unsubscribe_url}}\">Stop</a>",
+				"Stop {{unsubscribe_url}}" )).isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
 	void acceptsOrdinaryPaperUrlsAndOnlyStandaloneUnsubscribePlaceholders() {
 		assertThatCode(() -> policy.validateSource(
 				"A paper result", "<p>Read /u/profile and /t/c/docs.</p>"

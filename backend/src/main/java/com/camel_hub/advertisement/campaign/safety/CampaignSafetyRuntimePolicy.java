@@ -11,7 +11,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Objects;
 
-/** Revalidates the fixed live-test destination and its external callback boundary. */
+/** Revalidates the server-allowlisted live-test destination and its external callback boundary. */
 public final class CampaignSafetyRuntimePolicy {
 	private final CampaignSafetyProperties safety;
 	private final SmtpProperties smtp;
@@ -34,6 +34,10 @@ public final class CampaignSafetyRuntimePolicy {
 	}
 
 	public Destination requireReady() {
+		return requireReady(null);
+	}
+
+	public Destination requireReady(String destinationKey) {
 		if (!safety.enabled()) throw rejected("Campaign safety mode is disabled");
 		if (!smtp.liveAllowed()) throw rejected("Live SMTP is disabled");
 		if (!tracking.enabled()
@@ -46,17 +50,32 @@ public final class CampaignSafetyRuntimePolicy {
 		if (tracking.tokenTtl().compareTo(deliveryLeaseDuration.plusSeconds(1)) < 0) {
 			throw rejected("Campaign safety tracking lifetime must safely exceed the delivery lease");
 		}
-		String address = safety.validatedRecipient();
-		return new Destination(address, safety.recipientDomain(), safety.maskedRecipient(),
-				signer.destinationHmac(address));
+		if (destinationKey == null || "default".equals(destinationKey)) {
+			return destination(safety.validatedRecipient());
+		}
+		if (!CampaignSafetyProperties.validDestinationKey(destinationKey)
+				|| !safety.destinations().containsKey(destinationKey)) {
+			throw rejected("Campaign safety destination key is not configured");
+		}
+		return destination(safety.destinations().get(destinationKey));
 	}
 
 	public Destination requireMatching(byte[] persistedHmac) {
 		Destination current = requireReady();
-		if (persistedHmac == null || !MessageDigest.isEqual(current.hmac(), persistedHmac)) {
-			throw rejected("Campaign safety destination configuration changed");
+		if (persistedHmac != null) {
+			if (MessageDigest.isEqual(current.hmac(), persistedHmac)) return current;
+			for (String address : safety.destinations().values()) {
+				Destination allowed = destination(address);
+				if (MessageDigest.isEqual(allowed.hmac(), persistedHmac)) return allowed;
+			}
 		}
-		return current;
+		throw rejected("Campaign safety destination configuration changed");
+	}
+
+	private Destination destination(String address) {
+		String domain = address.substring(address.indexOf('@') + 1);
+		return new Destination(address, domain, address.substring(0, 1) + "***@" + domain,
+				signer.destinationHmac(address));
 	}
 
 	private CampaignValidationException rejected(String message) {

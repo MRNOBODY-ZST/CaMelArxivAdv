@@ -20,3 +20,11 @@
 **/playwright-report
 **/test-results
 docs/design/*.png
+
+.superpowers
+docs/superpowers
+docs/design
+docs/email/production-*.md
+docs/email/salmon-*.md
+**/build-*
+**/build_*

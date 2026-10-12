@@ -420,6 +420,8 @@ public final class SmtpTransport {
 			String html, String text, String correlationId,
 			String fromEmail, String rfcMessageId, Map<String, String> headers
 	) {
+		@Override public String toString() { return "OutboundMessage[redacted]"; }
+
 		public OutboundMessage(
 				String recipient, String subject, String fromName, String replyTo,
 				String html, String text, String correlationId

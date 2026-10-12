@@ -24,7 +24,10 @@ public final class CampaignTrackingRepository {
 	public Mono<PreparationState> lockPreparation(
 			CampaignDeliveryRepository.ProductionClaim claim, byte[] leaseHash, Instant now
 	) {
-		return database.sql("""
+		return new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
+				// The fence inspects persisted generated bodies; claim bodies may predate an idempotent preparation.
+				.lockAndVerify(claim.campaignId(), claim.recipientId(), claim.emailHmac(), false)
+				.filter(Boolean::booleanValue).flatMap(allowed -> database.sql("""
 				SELECT r.id, r.campaign_id, c.template_version_id,
 				       r.rendered_subject, r.rendered_html, r.rendered_text,
 				       c.tracking_opens_enabled, c.tracking_clicks_enabled, c.unsubscribe_enabled,
@@ -59,7 +62,7 @@ public final class CampaignTrackingRepository {
 						row.get("previous_retryable", Boolean.class),
 						row.get("previous_response_code", Integer.class),
 						row.get("previous_failure_category", String.class)))
-				.one();
+				.one());
 	}
 
 	public Mono<PersistedLink> ensureLink(
@@ -103,11 +106,14 @@ public final class CampaignTrackingRepository {
 						: Mono.error(new IllegalStateException("Frozen campaign tracking tokens changed concurrently")));
 	}
 
-	public Mono<Void> persistPreparedBodies(
+	// Only called after CampaignTrackingService validates initial transformation or exact frozen reuse/rotation.
+	Mono<Void> persistPreparedBodies(
 			CampaignDeliveryRepository.ProductionClaim claim, byte[] leaseHash,
 			String subject, String html, String text, Instant now
 	) {
-		return database.sql("""
+		return new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
+				.lockAndVerify(claim.campaignId(), claim.recipientId(), claim.emailHmac(), false)
+				.flatMap(allowed -> allowed ? database.sql("""
 				UPDATE campaign_recipients
 				SET rendered_subject = :subject, rendered_html = :html, rendered_text = :text
 				WHERE id = :recipient AND campaign_id = :campaign AND status = 'CONNECTING'
@@ -119,8 +125,30 @@ public final class CampaignTrackingRepository {
 				.bind("recipient", claim.recipientId()).bind("campaign", claim.campaignId())
 				.bind("lease", leaseHash).bind("now", now).bind("attempt", claim.attemptId())
 				.bind("attemptNumber", claim.attemptNumber())
-				.fetch().rowsUpdated().flatMap(rows -> rows.longValue() == 1L ? Mono.empty()
-						: Mono.error(new IllegalStateException("Campaign preparation lease is no longer active")));
+				.fetch().rowsUpdated().flatMap(rows -> rows.longValue() == 1L ? recordPreparedProof(claim, subject, html, text)
+						: Mono.error(new IllegalStateException("Campaign preparation lease is no longer active")))
+						: Mono.error(new IllegalStateException("Campaign preparation content proof is no longer valid")));
+	}
+
+	private Mono<Void> recordPreparedProof(CampaignDeliveryRepository.ProductionClaim claim, String subject, String html, String text) {
+		byte[] hash = com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence.preparedContentHash(subject, html, text);
+		return database.sql("""
+			INSERT INTO campaign_prepared_content_proofs(campaign_id,recipient_id,attempt_id,attempt_number,
+			  source_hash,review_content_hash,prepared_content_hash)
+			SELECT t.target_campaign_id,t.target_recipient_id,:attempt,:number,t.source_hash,t.content_hash,:hash
+			FROM campaign_recipient_transfers t WHERE t.target_campaign_id=:campaign AND t.target_recipient_id=:recipient
+			ON CONFLICT(attempt_id) DO NOTHING
+			""").bind("campaign",claim.campaignId()).bind("recipient",claim.recipientId()).bind("attempt",claim.attemptId())
+				.bind("number",claim.attemptNumber()).bind("hash",hash).fetch().rowsUpdated()
+				.then(database.sql("""
+			SELECT NOT EXISTS(SELECT 1 FROM campaign_recipient_transfers t WHERE t.target_recipient_id=:recipient)
+			  OR EXISTS(SELECT 1 FROM campaign_prepared_content_proofs p JOIN campaign_recipient_transfers t
+			    ON t.target_recipient_id=p.recipient_id AND t.target_campaign_id=p.campaign_id
+			    WHERE p.attempt_id=:attempt AND p.recipient_id=:recipient AND p.prepared_content_hash=:hash
+			      AND p.source_hash=t.source_hash AND p.review_content_hash=t.content_hash) AS valid
+			""").bind("recipient",claim.recipientId()).bind("attempt",claim.attemptId()).bind("hash",hash)
+				.map((r,m)->Boolean.TRUE.equals(r.get("valid",Boolean.class))).one())
+				.flatMap(valid -> valid ? Mono.empty() : Mono.error(new IllegalStateException("Prepared content receipt changed")));
 	}
 
 	public Flux<FrozenArtifact> frozenArtifacts(UUID recipientId) {

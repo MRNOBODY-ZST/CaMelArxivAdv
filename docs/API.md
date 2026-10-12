@@ -34,6 +34,40 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 ## 已认证端点
 
+### 持久化自动论文推广
+
+| 方法与路径 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/outreach-runs/options` | `campaign:read` | 不含密钥的 SMTP / 模板概要、数量上限及生产 hold |
+| `GET /api/v1/outreach-runs` | `campaign:read` | 标准 `PageResponse` 分页，默认 `page=1&pageSize=20` |
+| `GET /api/v1/outreach-runs/{id}` | `campaign:read` | 持久运行状态；浏览器关闭或 API 重启不会丢失 |
+| `POST /api/v1/outreach-runs` | 同时具有 `paper:import`、`campaign:create`、`campaign:approve`、`campaign:send` | 显式确认后创建；相同用户+幂等键+载荷返回原运行，改变载荷返回 409 |
+| `POST /api/v1/outreach-runs/{id}/cancel` | `campaign:pause` | 请求 `{"expectedLockVersion":0}`；旧版本/终态返回 409；正常取消已运行活动，不能撤回已接受或在途邮件 |
+
+创建 JSON 示例：
+
+```json
+{
+  "name":"论文邀请",
+  "targetMode":"EMAILS",
+  "targetCount":100,
+  "smtpAccountId":"00000000-0000-0000-0000-000000000001",
+  "templateId":"00000000-0000-0000-0000-000000000002",
+  "purpose":"研究合作邀请",
+  "criteria":{"categoryIds":["cs.AI"],"titleKeywords":"agents","page":1,"pageSize":100},
+  "confirmation":"AUTO_OUTREACH_SEND",
+  "idempotencyKey":"client-generated-unique-key"
+}
+```
+
+`EMAILS` 目标 1–120 个唯一可发送地址，搜索预算最多 100 篇；不足进入 `BLOCKED`，不自动无限补搜。`PAPERS` 目标 1–100 篇，不要求每篇有联系人；地址超过 120 时阻塞而不裁剪。结构化 `criteria` 与现有 arXiv 搜索相同；相同条件+上限沿用现有幂等导入结果。实际论文清单只读取对应导入的 `paper_imports(job_id)`，不使用全库搜索或未完成的 job items。
+
+创建返回直接 `RunView` JSON（201），字段为 `id,name,targetMode,targetCount,status,stage,message,paperCount,extractedCount,eligibleCount,selectedCount,smtpAccepted,failedCount,unknownCount,campaignId,importJobId,extractionJobId,smtpAccountId,templateId,lockVersion,createdAt,updatedAt,allowedActions`。`ACTIVE/SENDING` 可取消；`BLOCKED/FAILED/CANCELED/COMPLETED` 为终态。阶段为 `IMPORT,WAIT_IMPORT,EXTRACT,WAIT_EXTRACTION,PREPARE,REVIEW,APPROVE,START,SENDING,DONE`。配额等待仍为 `SENDING`；`smtpAccepted` 仅说明服务器接受，不能表示收件箱投递。
+
+Options JSON 为 `senders:[{id,name,fromEmail,replyToEmail,available,message}]`、`templates:[{id,name,currentVersion,available,message}]`、`limits:{maxEmails:120,maxPapers:100,searchPaperBudget:100}` 与 `productionHoldReason:string|null`。发件选项要求 SMTP 启用且最近测试 `SUCCEEDED` 并仍对应当前配置，同时自动匹配启用、当前测试成功、用户名等于 Reply-To 的 IMAP 监控邮箱。响应不包含主机、用户名、密码或加密字段。
+
+创建冻结模板 version ID、实际 From / Reply-To 与 SMTP / IMAP 配置版本。自动推进前重新检查账号实时权限；配置变化、已完成提取失败/不安全/部分结果、已有非本运行提取、联系人数量或机器内容摘要不一致均阻塞，不假装“无邮箱”，不盲重放。正常 `submitReview → approve → start` 每步先验证机器内容审核与 `TOTAL=ELIGIBLE=selectedCount`，并读取最新活动锁版本。`app.outreach.production-hold-reason` 默认为空；非空只阻止启动发送，绝不自动清除。
+
 ### 当前账号
 
 - `GET /api/v1/auth/me`：返回数据库中的实时账号、角色、权限和 `mustChangePassword`，不返回邮箱或凭据。
@@ -183,6 +217,88 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 
 `ALLOW_LIVE_SMTP` 与 `ALLOW_PUBLIC_MAILBOX` 分别控制公网 SMTP 和 IMAP/POP3。`PLAIN_LOCAL_ONLY` 只用于精确匹配的本地白名单；公网目标必须使用要求证书与主机名校验的 STARTTLS 或隐式 TLS。邮箱预览只以 `READ_ONLY` 打开文件夹，不删除邮件、不更改 flag，也不返回正文或附件。
 
+### 指定论文生成与多邮箱安全实流
+
+`POST /api/v1/campaigns/{id}/personalizations` 需要 `campaign:create`。不带请求体时保留原分群生成行为；指定论文时接受：
+
+```json
+{"paperIds":["615e263f-0041-48f6-9331-7a3e909344c6"]}
+```
+
+指定列表须为 1–20 个不同 UUID，且不超过运行时生成上限。每篇论文必须在活动分群中存在合格联系人；服务为每篇分配不同邮箱的联系人，共同作者不会掩盖其他候选。论文缺失、联系人不足或现有活动收件人与本次选择不一致时，事务整体拒绝，不静默缩小批次。选文清单与首次排队在同一事务中持久化；之后省略请求体仍复用该清单，不扩大到整个分群。更换选文须新建草稿。新建活动第一次生成应核对响应 `queuedRecipients` 等于所选论文数；相同选择的 HTTP 失败重试只重新排队失败项，已生成内容保留。活动仍须是 `DRAFT`。
+
+### 固定人数的正式批次生成
+
+新的空白 `DRAFT` 活动可显式请求恰好 N 位作者，仍使用 `POST /api/v1/campaigns/{id}/personalizations`：
+
+```json
+{"recipientLimit":120}
+```
+
+`recipientLimit` 必须是 1–120 的 JSON 整数，与 `paperIds` 互斥；字符串、浮点数、重复或未知字段均拒绝。此显式正式模式不受旧分群生成默认数量（例如 20）限制，但不会改变旧接口、指定论文最多 20 篇或安全实流最多 20 封的限制。
+
+首次选择必须恰好 N 个不同 `author_id` 和不同邮箱 HMAC，满足活动分群规则和原 Prompt 的证据门槛：最新成功提取中的 `HIGH`，或同时满足 `human_verified=true`、`verification_status=CONFIRMED` 的 `MEDIUM`。两者都必须有有效作者关系与可追溯源码证据，`REJECTED` 始终排除；还需有效、未退订、未抑制的联系人及完整论文公开输入。`HIGH` 不再额外要求人工确认；自动源码审核不会伪写人工标记，真正的位置对应或共享邮箱也不会批量提升为 `HIGH`。已触发冷却、正在发送或发送结果未知的地址，以及全部已配置安全自测邮箱（默认与命名白名单）均排除。查询最多检查 12,000 条合格作者/邮箱关联；无法选足 N 时整体拒绝，零新增 recipient、零生成 outbox，不以不合格联系人补足。分群规则仍可进一步缩小范围：旧的 `HIGH + CONFIRMED` 分群不会因恢复基础策略而自动扩大，应通过正常接口创建相应新分群和草稿。
+
+名单和联系人、作者、论文、加密邮箱、公开论文输入快照与首次排队在同一事务冻结；活动行锁防止并发请求改变模式。重试可省略请求体或重复相同 `recipientLimit`，仅重排 `PENDING` / `FAILED`，`GENERATED` 不重新生成，后续新增联系人和改动的论文内容不会加入或替换原快照。重试排队前仍检查所有冻结收件人的最新资格：原始证据门槛、有效作者关系、未删除的论文／联系人、证据、抑制／退订／排除、冷却和未决发送状态；有任意失效则整体回滚，不能靠旧快照重新放行。更改数量/模式、将已有旧批次改为正式模式、损坏或缺失快照时必须新建草稿。首次响应 `queuedRecipients` 必须等于 N；重试响应是本次待生成数。
+
+正式生成命令的完整 UTF-8 序列化大小不得超过 900 KiB（不是字符数）；超限时同样整体回滚，需在新草稿请求较小批次，避免消息进入 Kafka 后因尺寸过大卡住。此限制不更改旧生成模式或 Kafka 配置。
+
+此调用仅生成草稿，不审批或发送。随后仍需原有内容审核、发件配置、正式预检、审批和启动；真正启动前应检查 `ELIGIBLE = TOTAL = N`。生成后新发生的退订、抑制、证据失效和冷却仍由预检及发送 worker 拦截，不会为了凑满 N 自动换人。N 表示冻结目标数，不代表保证 N 封送达。
+
+### 论文公开联系人模式（不按映射置信度筛选）
+
+新的空白 `DRAFT` 可使用第三种互斥选择器：
+
+```json
+{"paperContactIds":["615e263f-0041-48f6-9331-7a3e909344c6"]}
+```
+
+接受 1–100 个不同 UUID；禁止空值、强制类型转换、重复或未知字段，以及与 `paperIds` / `recipientLimit` 混用。该显式模式以论文清单代替分群筛选，选择论文的全部合格公开邮箱，按邮箱 HMAC 去重；结果为 0 或超过 120 时整体拒绝，不截断。响应仍为 `{jobId, queuedRecipients}`。论文没有合格邮箱时不会换入清单外论文。
+
+首次生成原子冻结 `recipient_policy=PAPER_CONTACT`、`paper_contact_ids`、`paper_contact_recipient_count`（1–120）、原始置信度及公开输入快照；重试时冻结成员数量改变也整体拒绝。旧活动默认 `AUTHOR_VERIFIED`，原选择与发送门槛不变；旧模式不允许空作者身份生成命令。该模式允许 HIGH / MEDIUM / LOW / UNMAPPED，且不要求作者映射或人工确认，但必须有未删除论文、最新成功提取关联和真实提取证据；REJECTED、无效／示例／删除邮箱、退订、抑制、活动排除、180 天冷却、发送中／未知结果和安全自测邮箱仍不可进入。跨活动选择使用事务级 advisory lock；其他未结束的 PAPER_CONTACT 活动中 QUEUED / TEMPORARY_FAILURE 邮箱仍被预留。已完成历史不形成永久预留，但仍执行正常冷却；任何活动的 CONNECTING / OUTCOME_UNKNOWN 始终阻止重复选择。
+
+重试必须重复相同 `paperContactIds`，只生成原冻结集合中的 PENDING / FAILED；已 GENERATED 不重做，新增联系人或改变后的论文输入不替换旧快照。任一冻结成员失效或已有发送尝试则整体失败。改变模式或清单必须新建草稿。预检指纹包含策略和论文清单；发送阶段仍在原子预留流程内复查实际证据和所有安全限制。
+
+仅直接 HIGH 证据或真实人工确认的作者映射可用于具名问候。新证据不再支持原冻结姓名时，重试、预检和发送均拒绝旧具名内容；原本中性的联系人仍不受置信度门槛限制。其他情况生成目标的 `authorName` 显式为 null，AI 公开输入不含 author 身份；研究邀请使用 `Hello research team,`，中性引用论文，不宣称收件人是作者。空白作者名仍无效；AI 输入不含收件邮箱或凭据，退订占位符与 HTML 转义保持不变。
+
+### 已生成草稿的逐封内容校正
+
+`PUT /api/v1/campaigns/{id}/recipients/{recipientId}/content` 需要 `campaign:create`，由已登录操作者提交：
+
+```json
+{
+  "expectedLockVersion": 1,
+  "subject": "A research collaboration idea",
+  "html": "<p>Research-specific invitation. <a href=\"{{unsubscribe_url}}\" rel=\"noopener noreferrer\">Unsubscribe</a></p>",
+  "text": "Research-specific invitation. Unsubscribe: {{unsubscribe_url}}",
+  "rationale": "The proposal is grounded in the frozen paper abstract.",
+  "reason": "Correct an unsupported experimental claim before campaign review."
+}
+```
+
+仅允许 `DRAFT` 活动，生成状态须为 `COMPLETED`、`PARTIALLY_FAILED` 或 `FAILED`；目标须为同一活动内已 `GENERATED`、尚未开始发送的 `QUEUED` 收件人。版本冲突、发送尝试／租约、Message-ID、追踪／退订／安全自测／收信关联记录均会阻止修改。活动与收件人加锁，并在同一事务写入内容、递增活动版本、清除旧审批摘要与审批标记、记录操作者／原因和修改前后内容 SHA-256。审核日志不保存整封邮件或邮箱正文。
+
+主题、HTML、纯文本和理由一起校验／更新；保留唯一的 `unsubscribe_url` 模板变量，继续采用模板引擎的 HTML、邮件头和字节数限制。不会改动作者、论文、邮箱与公开输入快照，也不会改动 AI provider/model/job、原生成时间或生成尝试次数。响应包含 `campaignId`、`recipientId`、新 `lockVersion`、校验后的四项内容和 `updatedAt`。修改后必须重新预检、审批和启动；本接口不发送邮件，也不写入联系人“人工核验”标记。
+
+主题不得包含退订占位符或任何 ISO 控制字符；HTML 和纯文本必须各自含精确 `{{unsubscribe_url}}`。提交 HTML 应保留模板引擎输出的规范格式；如果安全过滤仍需移除或改写输入内容，接口会拒绝而非悄悄改写后保存。
+
+### 多邮箱安全实流
+
+`POST /api/v1/campaigns/{id}/safety-runs` 需要 `campaign:send`，接受：
+
+```json
+{
+  "expectedLockVersion": 1,
+  "recipientLimit": 20,
+  "confirmation": "SAFETY_REDIRECT",
+  "destinationKey": "qq"
+}
+```
+
+省略 `destinationKey` 或指定 `default` 使用原 `CAMPAIGN_SAFETY_RECIPIENT`；`qq` / `gmail` 分别使用运行时 `CAMPAIGN_SAFETY_RECIPIENT_QQ` / `CAMPAIGN_SAFETY_RECIPIENT_GMAIL`。空配置不会启用目标。请求不能直接提供邮箱、多个目标或未知字段；未知目标在创建运行前拒绝。白名单只配置所有者明确提供的测试邮箱，不猜测地址。
+
+同一活动同时只允许一个活跃安全实流。20 篇分别测试三个邮箱时，依次创建三个 20 份运行，共 60 封；每封拥有独立邮件 ID 和回传 token，并按实际目标域名及同一 SMTP 配额计数。不要复制已渲染 MIME，也不要临时轮换原固定收件地址；须保留旧地址和仍需验证历史回传的白名单地址。安全实流不会审批或启动正式活动，不修改真实联系人的退订状态。SMTP 接受、外部收件箱收到、自然打开和合成回传是不同验证结果。
+
 ### 数据统计
 
 所有分析端点需要 `analytics:read`，共享 `from`、`to`、`categoryId`、`relation`、`jobId`、`userId`、`domain` 和 `confidence` 查询参数。`from`/`to` 是包含首尾两天的 UTC `papers.imported_at` 日期队列，默认 30 天、最大 10 年。筛选接口中的用户目录仅对同时拥有 `user:read` 的调用者返回；其他分析用户收到空 `users` 数组。
@@ -197,6 +313,27 @@ Actuator readiness/liveness 只用于容器探针，不应作为业务 API 扩�
 | `GET /api/v1/analytics/{view}/export?dataset=...` | 按固定数据集 allowlist 导出聚合 CSV 并写 `ANALYTICS_EXPORT_CREATED` 审计；默认 `dataset=all` |
 
 比率指标固定返回 `value`、`numerator`、`denominator`、`unit` 和 `definition`；零分母返回 0。`freshness.status` 为 `CURRENT` 或 `NO_DATA`，后者的 `dataThrough` 为 `null`。联系人响应/CSV 只包含域名和聚合，不包含完整邮箱。完整数据集名称和口径见 [ANALYTICS.md](ANALYTICS.md)。
+
+## 个性化模型设置
+
+管理页 `/admin/settings` 和以下接口需要 `system:manage` 权限：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/v1/system/personalization` | 读取当前生效的配置及版本；仅返回 `keyConfigured`，不返回密钥 |
+| `PUT /api/v1/system/personalization` | 加密保存配置；保存后新生成任务立即生效，无需重启 Worker |
+| `POST /api/v1/system/personalization/test` | 使用表单草稿执行小额模型连接测试，不保存草稿、不发送邮件 |
+
+保存与测试请求包含 `version`、`enabled`、`provider`（`openai` / `anthropic`）、`model`、`apiOrigin`、`authScheme`（`bearer` / `x-api-key`），以及可选的只写字段 `apiKey`。
+
+- 初次读取使用环境配置（`source=ENVIRONMENT`）；保存后使用数据库配置（`source=DATABASE`）。
+- `apiOrigin` 必须为公网 HTTPS，不接受用户信息、查询参数或片段；裸域名规范为 `/v1`，已有路径前缀保留。实际连接再次检查 DNS，拒绝私网地址和重定向。
+- `apiKey` 留空仅在服务商及规范化地址未改变时保留旧密钥；更换服务商或地址必须提供新密钥。未配置密钥时，可以保存相同目标的停用配置，但不能通过连接测试或启用生成。
+- 保存成功返回安全配置及递增版本。过期版本返回 `409`，前端要求显式重新加载，不自动重试覆盖他人修改。
+- 连接测试返回 `{success,message,provider,model,latencyMs}`；错误提示不包含供应商原始响应或密钥。测试成功不代表已保存。
+- 每个新生成任务在入队事务中冻结独立的加密配置快照；后续修改配置不会改变已创建任务的供应商、模型或密钥。
+
+内部 `GET /internal/personalization/jobs/{jobId}/configuration` 只允许独立服务 Bearer Token，管理员 JWT 不能替代它。接口不通过公开 Nginx 代理暴露，响应为 `Cache-Control: no-store`；无快照返回 `404`，Worker 不回退到当前环境配置。密钥只在内部任务配置传输中提供给执行 Worker，不进入 Kafka 消息或 Ray 调用参数、返回值。
 
 ## 统一错误
 

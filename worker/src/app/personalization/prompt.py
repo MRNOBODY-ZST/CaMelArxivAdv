@@ -12,6 +12,8 @@ Follow the campaign purpose. Use professional English unless it explicitly reque
 another language.
 Return the requested JSON only. When the schema requests HTML and text, preserve the literal
 {{unsubscribe_url}} token in both, and preserve the supplied template's visual style.
+If the supplied template contains the literal {{partner_claim_url}} token, preserve it in
+both HTML and text. Never invent a claim URL or substitute a signup URL.
 Do not add tracking pixels, external images, forms, scripts, or attachments.
 The draft is never auto-sent and must be suitable for an operator to review."""
 
@@ -39,6 +41,13 @@ def public_generation_input(
             "text": command.payload.template_text,
         },
     }
+    if target.author_name is None:
+        del generation_input["author"]
+        generation_input["identityInstructions"] = (
+            "The recipient is a public paper contact with unknown identity. "
+            "Do not infer authorship or address a guessed person. Use Hello research team, "
+            "and cite the paper neutrally; do not call it your paper, your work, or your abstract."
+        )
     if uses_research_invitation(command):
         generation_input["copyInstructions"] = COPY_INSTRUCTIONS
     return generation_input

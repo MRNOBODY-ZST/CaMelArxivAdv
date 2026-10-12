@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import datetime
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from app.arxiv.source_errors import SourceUpstreamReason
+    from app.jobs.source_retry import SourceHoldReason, SourceScope, SourceState
+    from app.messaging.contracts import SourceExtractionResult
 
 
 class AsyncRedisStore(Protocol):
@@ -94,7 +100,74 @@ class SourceProgress:
 
 class RedisJobStore:
     def __init__(self, redis: AsyncRedisStore) -> None:
+        from app.jobs.source_admission import SourceStateStore
+
         self._redis = redis
+        self._source = SourceStateStore(redis)
+
+    @property
+    def source_owner_id(self) -> UUID:
+        return self._source.admission.owner_id
+
+    async def load_or_bind_source(self, scope: SourceScope) -> SourceState:
+        return await self._source.load_or_bind(scope)
+
+    async def get_source(self, scope: SourceScope) -> SourceState:
+        """Authority-verified read; RESERVED returned here is always non-executing."""
+        return await self._source.load_or_bind(scope)
+
+    async def get_source_retirement(self, scope: SourceScope) -> SourceState | None:
+        return await self._source.get_retirement(scope)
+
+    async def reserve_source_invocation(
+        self,
+        scope: SourceScope,
+        expected_generation: int,
+        index: int,
+        owner_id: UUID,
+        deadline: datetime,
+    ) -> SourceState:
+        return await self._source.reserve(scope, expected_generation, index, owner_id, deadline)
+
+    async def take_source_invocation(
+        self, scope: SourceScope, original_reservation: SourceState
+    ) -> bool:
+        return await self._source.take(scope, original_reservation)
+
+    async def renew_source_invocation(
+        self, scope: SourceScope, token: UUID, deadline: datetime
+    ) -> bool:
+        return await self._source.renew(scope, token, deadline)
+
+    async def stage_source_result(
+        self, scope: SourceScope, token: UUID, result: SourceExtractionResult
+    ) -> SourceState:
+        return await self._source.stage(scope, token, result)
+
+    async def record_source_transient(
+        self, scope: SourceScope, token: UUID, reason: SourceUpstreamReason
+    ) -> SourceState:
+        return await self._source.transient(scope, token, reason)
+
+    async def hold_source(
+        self, scope: SourceScope, expected_generation: int, reason: SourceHoldReason
+    ) -> SourceState:
+        return await self._source.hold(scope, expected_generation, reason)
+
+    async def advance_source(
+        self, scope: SourceScope, expected_generation: int, index: int
+    ) -> SourceState:
+        return await self._source.advance(scope, expected_generation, index)
+
+    async def record_source_terminal(
+        self, scope: SourceScope, expected_generation: int, status: str
+    ) -> SourceState:
+        return await self._source.terminal(scope, expected_generation, status)
+
+    async def retire_source_terminal(
+        self, scope: SourceScope, expected_generation: int
+    ) -> SourceState:
+        return await self._source.retire(scope, expected_generation)
 
     async def is_processed(self, idempotency_key: str) -> bool:
         return await self._redis.get(self._processed_key(idempotency_key)) is not None
@@ -129,9 +202,7 @@ class RedisJobStore:
             return None
         return SourceProgress.from_json(value) if isinstance(value, str) and value else None
 
-    async def save_source_progress(
-        self, idempotency_key: str, progress: SourceProgress
-    ) -> bool:
+    async def save_source_progress(self, idempotency_key: str, progress: SourceProgress) -> bool:
         saved = await self._redis.eval(
             _SAVE_SOURCE_PROGRESS,
             1,

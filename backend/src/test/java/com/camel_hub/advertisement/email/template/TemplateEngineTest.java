@@ -12,6 +12,34 @@ class TemplateEngineTest {
 	private final TemplateEngine engine = new TemplateEngine(102_400);
 
 	@Test
+	void preservesPartnerOptInAndRendersOnlyInertPreview() {
+		var prepared = engine.prepare(new TemplateModels.TemplateDraft("Invitation", "Team", "reply@example.org",
+				"<a href=\"{{partner_claim_url}}\">Activate CaMeL</a>", "Activate {{partner_claim_url}}", false));
+		assertThat(prepared.validation().valid()).isTrue();
+		assertThat(prepared.sanitizedHtml()).contains("{{partner_claim_url}}");
+		var preview = engine.render(prepared, Map.of("partner_claim_url", "https://api.camel-hub.cn/partner/claim?token=secret"));
+		assertThat(preview.html()).contains("https://example.invalid/partner-activation-preview").doesNotContain("secret");
+		assertThat(preview.text()).isEqualTo("Activate https://example.invalid/partner-activation-preview");
+	}
+
+	@Test
+	void rejectsPartnerCapabilitiesAndDangerousPlaceholderContexts() {
+		for (String html : java.util.List.of(
+				"<a href=\"https://api.camel-hub.cn/partner/claim?token=secret\">Activate</a>",
+				"<p>https://api.camel-hub.cn/partner/claim?token=secret</p>",
+				"<p>https://evil.example/?redirect={{partner_claim_url}}</p>",
+				"<img src=\"{{partner_claim_url}}\">",
+				"<p title=\"{{partner_claim_url}}\">Activate</p>")) {
+			assertThatThrownBy(() -> engine.prepare(new TemplateModels.TemplateDraft("Invitation", "Team",
+					"reply@example.org", html, "Activate {{partner_claim_url}}", false)))
+					.isInstanceOf(TemplateValidationException.class);
+		}
+		assertThatThrownBy(() -> engine.prepare(new TemplateModels.TemplateDraft("{{partner_claim_url}}", "Team",
+				"reply@example.org", "<a href=\"{{partner_claim_url}}\">Activate</a>", "{{partner_claim_url}}", false)))
+				.isInstanceOf(TemplateValidationException.class);
+	}
+
+	@Test
 	void preservesEmailLayoutThroughSaveAndRenderWithoutAllowingActiveCss() {
 		var prepared = engine.prepare(new TemplateModels.TemplateDraft(
 				"Research invitation", "Camel Hub", "reply@example.org",

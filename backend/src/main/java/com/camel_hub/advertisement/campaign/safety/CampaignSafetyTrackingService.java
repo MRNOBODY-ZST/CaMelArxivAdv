@@ -33,6 +33,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.*;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.PreparationStage.*;
 
 /** Final safety rendering plus an isolated callback namespace backed only by safety tables. */
 public final class CampaignSafetyTrackingService
@@ -95,7 +97,7 @@ public final class CampaignSafetyTrackingService
 
 	@Override
 	public Mono<PreparedSafetyOutbound> prepare(CampaignDeliveryRepository.SafetyClaim claim) {
-		return Mono.defer(() -> {
+		return at(CLAIM_VALIDATION, () -> {
 			Instant now = clock.instant();
 			CampaignSafetyRuntimePolicy.Destination destination = policy.requireMatching(claim.destinationHmac());
 			byte[] leaseHash = sha256(claim.leaseDigest());
@@ -104,12 +106,14 @@ public final class CampaignSafetyTrackingService
 							"Campaign safety preparation lease is no longer active")))
 					.flatMap(state -> {
 						validateState(claim, state, destination);
+						return at(SOURCE_VALIDATION, () -> {
 						boolean htmlPlaceholder = state.html().contains(PLACEHOLDER);
 						boolean textPlaceholder = state.text().contains(PLACEHOLDER);
 						if (htmlPlaceholder != textPlaceholder) return invalid();
 						return htmlPlaceholder
 								? prepareInitial(claim, state, destination, leaseHash, now)
 								: reuseFrozen(claim, state, destination, leaseHash, now);
+						});
 					})
 					.as(transactions::transactional);
 		});
@@ -129,12 +133,13 @@ public final class CampaignSafetyTrackingService
 			CampaignDeliveryRepository.SafetyClaim claim, CampaignSafetyRepository.PreparationState state,
 			CampaignSafetyRuntimePolicy.Destination destination, byte[] leaseHash, Instant now
 	) {
-		validateSource(state);
+		return at(TRACKING_RENDER, () -> {
+		during(SOURCE_VALIDATION, () -> { validateSource(state); return true; });
 		Instant expiresAt = now.plus(tracking.tokenTtl()).truncatedTo(ChronoUnit.SECONDS);
 		if (!expiresAt.isAfter(state.leaseExpiresAt())) return invalid();
 
 		UUID unsubscribeId = UUID.randomUUID();
-		String unsubscribeToken = signer.issueUnsubscribe(state.messageId(), expiresAt);
+		String unsubscribeToken = crypto(TRACKING_RENDER, () -> signer.issueUnsubscribe(state.messageId(), expiresAt));
 		String unsubscribeUrl = tracking.publicBaseUrl() + "/u/" + unsubscribeToken;
 		String html = state.html().replace(PLACEHOLDER, unsubscribeUrl);
 		String text = state.text().replace(PLACEHOLDER, unsubscribeUrl);
@@ -146,31 +151,32 @@ public final class CampaignSafetyTrackingService
 		List<LinkDraft> links = new ArrayList<>();
 		for (CampaignLinkRewriter.EligibleLink item : eligible) {
 			UUID linkId = UUID.randomUUID();
-			String token = signer.issueClick(state.messageId(), linkId, expiresAt);
+			String token = crypto(TRACKING_RENDER, () -> signer.issueClick(state.messageId(), linkId, expiresAt));
 			clickTokens.put(item.targetUrl(), token);
 			links.add(new LinkDraft(linkId, "CLICK", item.targetUrl(), sha256(item.targetUrl()), token));
 		}
 		String rewritten = state.trackingClicks() ? linkRewriter.rewrite(html, clickTokens) : html;
-		String openToken = state.trackingOpens() ? signer.issueOpen(state.messageId(), expiresAt) : null;
+		String openToken = state.trackingOpens() ? crypto(TRACKING_RENDER, () -> signer.issueOpen(state.messageId(), expiresAt)) : null;
 		String finalHtml = openToken == null ? rewritten : appendPixel(rewritten, openToken);
 		links.add(new LinkDraft(unsubscribeId, "UNSUBSCRIBE", null, null, unsubscribeToken));
 		if (openToken != null) links.add(new LinkDraft(UUID.randomUUID(), "OPEN", null, null, openToken));
 
 		PreparedSafetyOutbound outbound = outbound(destination.address(), state.subject(), finalHtml, text, unsubscribeUrl);
 		validateFinal(claim, outbound);
-		return Flux.fromIterable(links).concatMap(link -> repository.insertLink(
+		return at(ARTIFACT_PERSIST, () -> Flux.fromIterable(links).concatMap(link -> repository.insertLink(
 				link.id(), state.messageId(), link.type(), link.target(), link.targetHash(),
-				signer.digest(link.token()), expiresAt, now)).then()
-				.then(repository.persistPreparedBodies(
-						claim, leaseHash, state.subject(), finalHtml, text, clock.instant()))
+				signer.digest(link.token()), expiresAt, now)).then())
+				.then(at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+						claim, leaseHash, outbound.subject(), outbound.html(), outbound.text(), clock.instant())))
 				.thenReturn(outbound);
+		});
 	}
 
 	private Mono<PreparedSafetyOutbound> reuseFrozen(
 			CampaignDeliveryRepository.SafetyClaim claim, CampaignSafetyRepository.PreparationState state,
 			CampaignSafetyRuntimePolicy.Destination destination, byte[] leaseHash, Instant now
 	) {
-		return repository.artifacts(state.messageId()).collectList().flatMap(artifacts -> {
+		return at(ARTIFACT_PERSIST, () -> repository.artifacts(state.messageId()).collectList()).flatMap(artifacts -> at(SOURCE_VALIDATION, () -> {
 			FrozenValidation validation = validateFrozen(state, artifacts);
 			if (!validation.expiresAt().isAfter(state.leaseExpiresAt())) {
 				return rotationAllowed(state, claim)
@@ -178,14 +184,14 @@ public final class CampaignSafetyTrackingService
 								artifacts, leaseHash, now)
 						: invalid();
 			}
-			PreparedSafetyOutbound outbound = outbound(
+			PreparedSafetyOutbound outbound = during(TRACKING_RENDER, () -> outbound(
 					destination.address(), state.subject(), state.html(), state.text(),
-					validation.capabilities().unsubscribeHtml().url());
-			validateFinal(claim, outbound);
-			return repository.persistPreparedBodies(
-					claim, leaseHash, state.subject(), state.html(), state.text(), clock.instant())
+					validation.capabilities().unsubscribeHtml().url()));
+			during(TRACKING_RENDER, () -> { validateFinal(claim, outbound); return true; });
+			return at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+					claim, leaseHash, outbound.subject(), outbound.html(), outbound.text(), clock.instant()))
 					.thenReturn(outbound);
-		});
+		}));
 	}
 
 	private FrozenValidation validateFrozen(
@@ -241,6 +247,7 @@ public final class CampaignSafetyTrackingService
 			List<CampaignSafetyRepository.TrackingArtifact> artifacts,
 			byte[] leaseHash, Instant now
 	) {
+		return at(TRACKING_RENDER, () -> {
 		Instant expiresAt = now.plus(tracking.tokenTtl()).truncatedTo(ChronoUnit.SECONDS);
 		if (!expiresAt.isAfter(state.leaseExpiresAt())) return invalid();
 		Map<String, String> replacements = new LinkedHashMap<>();
@@ -249,11 +256,11 @@ public final class CampaignSafetyTrackingService
 			VerifiedCapability verified = verify(reference, state.messageId(), null);
 			CampaignSafetyRepository.TrackingArtifact artifact = matchingArtifact(
 					artifacts, reference, verified);
-			String token = switch (reference.kind()) {
+			String token = crypto(TRACKING_RENDER, () -> switch (reference.kind()) {
 				case OPEN -> signer.issueOpen(state.messageId(), expiresAt);
 				case CLICK -> signer.issueClick(state.messageId(), artifact.id(), expiresAt);
 				case UNSUBSCRIBE -> signer.issueUnsubscribe(state.messageId(), expiresAt);
-			};
+			});
 			replacements.put(reference.token(), token);
 			rotated.add(new RotationDraft(artifact, token));
 		}
@@ -266,11 +273,12 @@ public final class CampaignSafetyTrackingService
 				destination.address(), state.subject(), html, text, unsubscribeUrl);
 		validateFinal(claim, outbound);
 
-		return Flux.fromIterable(rotated).concatMap(link -> repository.rotateFrozenLink(
-					state.messageId(), link.expected(), signer.digest(link.token()), expiresAt)).then()
-				.then(repository.persistPreparedBodies(
-						claim, leaseHash, state.subject(), html, text, clock.instant()))
+		return at(ARTIFACT_PERSIST, () -> Flux.fromIterable(rotated).concatMap(link -> repository.rotateFrozenLink(
+					state.messageId(), link.expected(), signer.digest(link.token()), expiresAt)).then())
+				.then(at(BODY_PERSIST, () -> repository.persistPreparedBodies(
+						claim, leaseHash, outbound.subject(), outbound.html(), outbound.text(), clock.instant())))
 				.thenReturn(outbound);
+		});
 	}
 
 	private CampaignSafetyRepository.TrackingArtifact matchingArtifact(

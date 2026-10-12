@@ -38,7 +38,7 @@ public class CampaignSafetyService {
 		if (policy == null) {
 			return Mono.error(new CampaignValidationException("Campaign safety mode is unavailable"));
 		}
-		CampaignSafetyRuntimePolicy.Destination destination = policy.requireReady();
+		CampaignSafetyRuntimePolicy.Destination destination = policy.requireReady(command.destinationKey());
 		return repository.materialize(new CampaignSafetyRepository.MaterializeCommand(
 				campaignId, actorId, command.expectedLockVersion(), command.recipientLimit(), destination.hmac(),
 				destination.masked(), clock.instant(), context.traceId()))
@@ -82,7 +82,13 @@ public class CampaignSafetyService {
 						message.smtpAcceptedAt(), message.outcomeUnknownAt(), message.outcomeUnknownReason())).toList());
 	}
 
-	public record StartCommand(long expectedLockVersion, int recipientLimit, String confirmation) { }
+	public record StartCommand(
+			long expectedLockVersion, int recipientLimit, String confirmation, String destinationKey
+	) {
+		public StartCommand(long expectedLockVersion, int recipientLimit, String confirmation) {
+			this(expectedLockVersion, recipientLimit, confirmation, null);
+		}
+	}
 
 	public record SafetyRunView(
 			UUID id, UUID campaignId, String status, int recipientLimit, String destinationMasked,

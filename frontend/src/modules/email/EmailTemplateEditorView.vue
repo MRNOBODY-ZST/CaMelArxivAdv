@@ -17,7 +17,7 @@ import DsSelect from '@/components/design-skill/DsSelect.vue'
 import DsSwitch from '@/components/design-skill/DsSwitch.vue'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { emailApi, emailErrorMessage } from '@/modules/email/email.api'
-import { createSampleValues, createTemplateDraft, insertPlaceholder, previewWidthClass, requiresHtmlSourceEditing } from '@/modules/email/email.editor'
+import { createSampleValues, createTemplateDraft, inertTemplatePreviewHtml, insertPlaceholder, previewWidthClass, requiresHtmlSourceEditing } from '@/modules/email/email.editor'
 import MailTrackingOption from '@/modules/email/MailTrackingOption.vue'
 import type {
   PreviewDevice, SmtpAccountView, TemplateAsset, TemplatePreview, TemplateSampleValues,
@@ -59,6 +59,7 @@ const activeScalar = ref<'subjectTemplate' | 'fromNameTemplate' | 'textContent'>
 const richEditor = ref<InstanceType<typeof TemplateRichTextEditor> | null>(null)
 const uploadInput = ref<globalThis.HTMLInputElement | null>(null)
 const unsubscribeToken = '{{unsubscribe_url}}'
+const activationTextModeMessage = '自动纯文本由 HTML 正文生成。请先在 HTML 正文中加入开通链接，或关闭自动生成并编写包含退订链接的完整纯文本。'
 let initialized = false
 let autosaveTimer: number | undefined
 let previewTimer: number | undefined
@@ -68,7 +69,7 @@ const htmlSourceOnly = computed(() => requiresHtmlSourceEditing(draft.content.ht
 const editorTitle = computed(() => isNew.value ? '新建邮件模板' : draft.name || '邮件模板')
 const bytesPercent = computed(() => Math.min(100, Math.round(((preview.value?.contentSizeBytes ?? template.value?.contentSizeBytes ?? 0) / 102_400) * 100)))
 const hasUnsubscribe = computed(() => draft.content.htmlContent.includes('{{unsubscribe_url}}') || draft.content.textContent?.includes('{{unsubscribe_url}}'))
-const previewHtml = computed(() => preview.value?.rendered.html ?? '<p style="color:#64748b">填写必填字段后点击“刷新预览”。</p>')
+const previewHtml = computed(() => inertTemplatePreviewHtml(preview.value?.rendered.html ?? '<p style="color:#64748b">填写必填字段后点击“刷新预览”。</p>'))
 const smtpOptions = computed(() => smtpAccounts.value.map((account) => ({ label: `${account.name} · ${account.host}:${account.port}`, value: account.id })))
 const statusOptions = [
   { label: '草稿', value: 'DRAFT' }, { label: '启用', value: 'ACTIVE' }, { label: '归档', value: 'ARCHIVED' },
@@ -76,6 +77,7 @@ const statusOptions = [
 const variableLabels: Record<TemplateVariable, string> = {
   author_name: '作者全名', first_name: '名字', paper_title: '论文标题', arxiv_id: 'arXiv ID',
   primary_category: '主分类', paper_url: '论文链接', organization: '机构名称', unsubscribe_url: '退订链接',
+  partner_claim_url: '开通 CaMel 账户',
 }
 
 onMounted(async () => {
@@ -239,12 +241,23 @@ async function archive(): Promise<void> {
 }
 
 function insertVariable(variable: TemplateVariable): void {
+  if (variable === 'partner_claim_url' && editorMode.value === 'text' && draft.content.autoGenerateText) {
+    errorMessage.value = activationTextModeMessage
+    return
+  }
+  if (errorMessage.value === activationTextModeMessage) errorMessage.value = ''
   if (editorMode.value === 'rich') {
     richEditor.value?.insertContent(`{{${variable}}}`)
     return
   }
   if (editorMode.value === 'html') {
     draft.content.htmlContent = insertPlaceholder(draft.content.htmlContent, variable)
+    return
+  }
+  if (variable === 'partner_claim_url') {
+    draft.content.autoGenerateText = false
+    const text = draft.content.textContent ?? ''
+    draft.content.textContent = insertPlaceholder(text && !/\s$/.test(text) ? `${text} ` : text, variable)
     return
   }
   const key = activeScalar.value
@@ -474,14 +487,14 @@ function formatDate(value: string): string {
               id="template-subject"
               v-model="draft.content.subjectTemplate"
               label="主题"
-              @focus="activeScalar = 'subjectTemplate'"
+              @focusin="activeScalar = 'subjectTemplate'"
             />
             <div class="grid gap-4 sm:grid-cols-2">
               <DsInput
                 id="template-from-name"
                 v-model="draft.content.fromNameTemplate"
                 label="发件人名称"
-                @focus="activeScalar = 'fromNameTemplate'"
+                @focusin="activeScalar = 'fromNameTemplate'"
               /><DsInput
                 id="template-reply"
                 v-model="draft.content.replyTo"
@@ -600,6 +613,9 @@ function formatDate(value: string): string {
               {{ variableLabels[variable] }}
             </button>
           </div>
+          <p class="mt-3 text-xs/5 text-slate-500">
+            开通 CaMel 账户链接由服务端在正式发送时填入。新用户只需设置密码；已有账户请登录后绑定。预览使用不可用的示例地址，不会创建邀请。
+          </p>
         </DsCard>
       </div>
 
@@ -681,7 +697,7 @@ function formatDate(value: string): string {
           </p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
             <DsInput
-              v-for="variable in TEMPLATE_VARIABLES"
+              v-for="variable in TEMPLATE_VARIABLES.filter((item) => item !== 'partner_claim_url')"
               :id="`sample-${variable}`"
               :key="variable"
               v-model="sampleValues[variable]"

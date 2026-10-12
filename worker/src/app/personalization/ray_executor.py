@@ -24,40 +24,81 @@ from app.personalization.openai_client import (
     OpenAIEmailClient,
     PermanentGenerationError,
 )
+from app.personalization.runtime_config import (
+    PublicProviderTransport,
+    resolve_configuration,
+)
 
 
 class RemoteFunction(Protocol):
     def remote(self, command_json: str, target_json: str) -> object: ...
 
 
-def _generate_personalization(command_json: str, target_json: str) -> dict[str, str]:
-    settings = PersonalizationSettings()
-    api_key = settings.api_key
-    if not settings.enabled or api_key is None:
-        raise RuntimeError("Personalization provider is disabled")
+def _generate_personalization(command_json: str, target_json: str) -> dict[str, object]:
+    try:
+        settings = PersonalizationSettings()
+    except Exception:
+        # Pydantic display redaction does not remove raw input from pickled errors.
+        raise RuntimeError("Personalization worker configuration is invalid") from None
     command = PersonalizationCommand.model_validate_json(command_json)
     target = PersonalizationTarget.model_validate_json(target_json)
 
-    async def generate() -> GeneratedEmail:
+    async def generate() -> dict[str, object]:
         timeout = httpx.Timeout(settings.request_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as http:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+        ) as internal_http:
+            config = await resolve_configuration(settings, str(command.job_id), internal_http)
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicProviderTransport(),
+        ) as http:
             client: AnthropicEmailClient | OpenAIEmailClient
-            if settings.provider == "anthropic":
+            if config.provider == "anthropic":
                 client = AnthropicEmailClient(
-                    http, api_key, settings.model, settings.api_base_url,
-                    auth_scheme=settings.api_auth_scheme,
+                    http,
+                    config.api_key,
+                    config.model,
+                    config.api_base_url,
+                    auth_scheme=config.api_auth_scheme,
                 )
             else:
-                client = OpenAIEmailClient(http, api_key, settings.model, settings.api_base_url)
-            return await client.generate(command, target)
+                client = OpenAIEmailClient(
+                    http,
+                    config.api_key,
+                    config.model,
+                    config.api_base_url,
+                    auth_scheme=config.api_auth_scheme,
+                )
+            envelope: dict[str, object] = {"provider": config.provider, "model": config.model}
+            try:
+                envelope["email"] = (await client.generate(command, target)).model_dump()
+            except PermanentGenerationError as exception:
+                envelope["errorCode"] = exception.code
+            except Exception as exception:
+                # Never serialize provider exceptions, response bodies or request headers into Ray.
+                failure = RuntimeError("Generation failed after provider request")
+                failure.provider = config.provider  # type: ignore[attr-defined]
+                failure.model = config.model  # type: ignore[attr-defined]
+                code = getattr(exception, "code", None)
+                failure.code = (  # type: ignore[attr-defined]
+                    code
+                    if code
+                    in {
+                        "RATE_LIMITED",
+                        "PROVIDER_UNAVAILABLE",
+                        "INVALID_PROVIDER_OUTPUT",
+                    }
+                    else "GENERATION_FAILED"
+                )
+                raise failure from None
+            return envelope
 
-    try:
-        return asyncio.run(generate()).model_dump()
-    except PermanentGenerationError as exception:
-        return {
-            "errorCode": exception.code,
-            "errorMessage": "Generation was permanently rejected by the provider",
-        }
+    return asyncio.run(generate())
 
 
 generate_personalization_task = cast(
@@ -88,7 +129,7 @@ class RayPersonalizationExecutor:
         self._started = False
 
     async def execute(self, command: PersonalizationCommand) -> list[PersonalizationResult]:
-        if not self._settings.enabled:
+        if not self._settings.enabled and not self._settings.runtime_config_url:
             return [
                 self._failed(command, target, "PROVIDER_DISABLED", "Personalization is disabled")
                 for target in command.payload.targets
@@ -126,13 +167,24 @@ class RayPersonalizationExecutor:
     ) -> PersonalizationResult:
         try:
             value = await asyncio.to_thread(self._result_getter, reference)
+            provider = self._settings.provider
+            model = self._settings.model
+            if isinstance(value, dict) and "provider" in value and "model" in value:
+                provider = str(value["provider"])
+                model = str(value["model"])
+            elif self._settings.runtime_config_url:
+                raise ValueError("Missing runtime generation metadata")
             if isinstance(value, dict) and isinstance(value.get("errorCode"), str):
                 return self._failed(
                     command,
                     target,
                     value["errorCode"],
                     "Generation was permanently rejected by the provider",
+                    provider=provider,
+                    model=model,
                 )
+            if isinstance(value, dict) and "email" in value:
+                value = value["email"]
             generated = (
                 value if isinstance(value, GeneratedEmail) else GeneratedEmail.model_validate(value)
             )
@@ -142,8 +194,8 @@ class RayPersonalizationExecutor:
                 html=generated.html,
                 text=generated.text,
                 rationale=generated.rationale,
-                provider=self._settings.provider,
-                model=self._settings.model,
+                provider=provider,
+                model=model,
             )
             return self._result(command, target, payload)
         except Exception as exception:
@@ -156,6 +208,8 @@ class RayPersonalizationExecutor:
                 target,
                 code,
                 "Generation failed after bounded retries",
+                provider=getattr(cause, "provider", None),
+                model=getattr(cause, "model", None),
             )
 
     def _failed(
@@ -164,14 +218,19 @@ class RayPersonalizationExecutor:
         target: PersonalizationTarget,
         code: str,
         message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> PersonalizationResult:
         return self._result(
             command,
             target,
             PersonalizationResultPayload(
                 status="FAILED",
-                provider=self._settings.provider,
-                model=self._settings.model,
+                provider=provider
+                or ("unknown" if self._settings.runtime_config_url else self._settings.provider),
+                model=model
+                or ("unknown" if self._settings.runtime_config_url else self._settings.model),
                 error_code=code,
                 error_message=message,
             ),

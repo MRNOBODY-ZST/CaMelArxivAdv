@@ -2,7 +2,7 @@
 import { Dialog, DialogPanel, DialogTitle, TransitionChild, TransitionRoot } from '@headlessui/vue'
 import { XMarkIcon } from '@heroicons/vue/24/outline'
 
-defineProps<{ open: boolean; title: string; description?: string }>()
+withDefaults(defineProps<{ open: boolean; title: string; description?: string; size?: 'md' | 'xl' }>(), { size: 'md' })
 defineEmits<{ close: [] }>()
 </script>
 
@@ -37,7 +37,7 @@ defineEmits<{ close: [] }>()
             leave-from="translate-y-0 opacity-100 sm:scale-100"
             leave-to="translate-y-4 opacity-0 sm:scale-95"
           >
-            <DialogPanel class="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl ring-1 ring-slate-900/10 sm:p-6">
+            <DialogPanel :class="['w-full rounded-xl bg-white p-5 shadow-xl ring-1 ring-slate-900/10 sm:p-6', size === 'xl' ? 'max-w-6xl' : 'max-w-lg']">
               <div class="flex items-start justify-between gap-4">
                 <div>
                   <DialogTitle class="text-base font-semibold text-slate-900">

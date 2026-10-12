@@ -111,6 +111,9 @@ public class ArxivResultHandler {
 		if (isTerminalStatus(job.status())) {
 			return Mono.empty();
 		}
+		if (isMetadataJob(job.type()) && Set.of("ARXIV_JOB_BATCH", "ARXIV_JOB_PROGRESS").contains(message.type())) {
+			return applyMetadataUpdate(message, job);
+		}
 		Mono<Void> mutation = switch (message.type()) {
 			case "ARXIV_JOB_STARTED" -> repository.applyStarted(job.id(), payload);
 			case "ARXIV_JOB_BATCH" -> papers.upsertBatch(
@@ -138,6 +141,9 @@ public class ArxivResultHandler {
 			return "CANCELED".equals(payload.status())
 					? applyCanceledSourceCompletion(message, job, true)
 					: applySourceTerminalForJob(message, job);
+		}
+		if (isMetadataJob(job.type())) {
+			return applyMetadataTerminal(message, job);
 		}
 		Mono<Void> preparation = Mono.empty();
 		if ("ARXIV_JOB_COMPLETED".equals(message.type())) {
@@ -178,7 +184,7 @@ public class ArxivResultHandler {
 			ArxivResultMessage.Payload authoritative = sourceTerminalPayload(
 					message.payload(), totals, status, message.payload().stage(),
 					message.payload().errorCode(), message.payload().errorSummary());
-			return repository.applySourceTerminalExact(job.id(), authoritative)
+			return repository.applyTerminalExact(job.id(), authoritative)
 					.flatMap(applied -> applied
 							? repository.appendEvent(
 									job.id(), message.type(), authoritative, details(authoritative))
@@ -209,7 +215,7 @@ public class ArxivResultHandler {
 					}
 					ArxivResultMessage.Payload authoritative = sourceTerminalPayload(
 							message.payload(), totals, sourceStatus(totals), "COMPLETED", null, null);
-					return repository.applySourceTerminalExact(job.id(), authoritative)
+					return repository.applyTerminalExact(job.id(), authoritative)
 							.flatMap(applied -> applied
 									? repository.appendEvent(job.id(), "ARXIV_JOB_COMPLETED",
 											authoritative, details(authoritative))
@@ -298,22 +304,75 @@ public class ArxivResultHandler {
 		return extractions.apply(message, values.getFirst());
 	}
 
-	private Mono<Void> applyOaiProgress(UUID jobId, ArxivResultMessage.Payload payload) {
-		String checkpointJson = checkpoint(payload.checkpoint());
-		validateOaiCheckpoint(payload.checkpoint());
-		Mono<Void> progress = repository.applyProgress(jobId, payload, checkpointJson);
-		return payload.checkpoint() == null || payload.checkpoint().isNull()
-				|| payload.checkpoint().isEmpty()
-				? progress : progress.then(repository.upsertSyncCursor(jobId, checkpointJson));
+	private boolean isMetadataJob(String type) {
+		return Set.of("ARXIV_IMPORT_METADATA", "ARXIV_SYNC_OAI").contains(type);
+	}
+
+	private Mono<Void> applyMetadataUpdate(ArxivResultMessage message, ArxivResultRepository.JobRecord job) {
+		ArxivResultMessage.Payload payload = message.payload();
+		boolean oai = "ARXIV_SYNC_OAI".equals(job.type());
+		if (oai) validateOaiCheckpoint(payload.checkpoint());
+		Mono<Void> persist = "ARXIV_JOB_BATCH".equals(message.type())
+				? papers.upsertBatch(job.id(), safePapers(payload.papers()), oai ? "OAI_PMH" : "LEGACY_API")
+				: Mono.empty();
+		return persist.then(repository.metadataTotals(job.id())).flatMap(totals -> {
+			ArxivResultMessage.Payload authoritative = metadataPayload(payload, totals, false);
+			String checkpointJson = checkpoint(payload.checkpoint());
+			boolean safeCheckpoint = reportedMetadataSuccess(payload) <= totals.persisted();
+			Mono<Void> cursor = oai && safeCheckpoint && !"{}".equals(checkpointJson)
+					? repository.upsertSyncCursor(job.id(), checkpointJson) : Mono.empty();
+			return repository.applyMetadataProgress(job.id(), authoritative,
+					safeCheckpoint ? checkpointJson : "{}")
+					.then(cursor).then(repository.appendEvent(job.id(), message.type(), authoritative, details(authoritative)));
+		});
+	}
+
+	private Mono<Void> applyMetadataTerminal(ArxivResultMessage message, ArxivResultRepository.JobRecord job) {
+		// Metadata batches and terminal are awaited, ordered messages on the same Kafka job key.
+		// A deficit here is failed persistence, unlike independently delivered source-item results.
+		return repository.metadataTotals(job.id()).flatMap(totals -> {
+			ArxivResultMessage.Payload authoritative = metadataPayload(message.payload(), totals, true);
+			return repository.applyTerminalExact(job.id(), authoritative).flatMap(applied -> {
+				if (!applied) return Mono.empty();
+				Mono<Void> completion = "ARXIV_SYNC_OAI".equals(job.type())
+						&& "ARXIV_JOB_COMPLETED".equals(message.type())
+						&& "SUCCEEDED".equals(authoritative.status())
+						? repository.markSyncComplete(job.id()) : Mono.empty();
+				return completion.then(repository.appendEvent(job.id(), message.type(), authoritative, details(authoritative)));
+			});
+		});
+	}
+
+	private long reportedMetadataSuccess(ArxivResultMessage.Payload payload) {
+		return Math.max(payload.successCount(), payload.processedCount() - payload.skippedCount() - payload.failedCount());
+	}
+
+	private ArxivResultMessage.Payload metadataPayload(ArxivResultMessage.Payload source,
+			ArxivResultRepository.MetadataTotals totals, boolean terminal) {
+		long skipped = Math.max(totals.skipped(), source.skippedCount());
+		long missing = terminal ? Math.max(0, reportedMetadataSuccess(source) - totals.persisted()) : 0;
+		long failed = Math.max(totals.failed(), source.failedCount()) + missing;
+		long processed = totals.persisted() + skipped + failed;
+		long total = terminal ? Math.max(source.totalCount(), processed) : Math.max(totals.total(), source.totalCount());
+		if (total > 0) total = Math.max(total, processed);
+		String status = source.status();
+		if (terminal && !Set.of("FAILED", "CANCELED").contains(status) && failed > 0) {
+			status = totals.persisted() + skipped > 0 ? "PARTIALLY_SUCCEEDED" : "FAILED";
+		}
+		double progress = total == 0 ? 0 : processed * 100.0 / total;
+		return new ArxivResultMessage.Payload(status, source.stage(), processed, totals.persisted(), skipped, failed,
+				total, progress, source.checkpoint(), source.papers(),
+				missing > 0 ? "METADATA_PERSISTENCE_INCOMPLETE" : source.errorCode(),
+				missing > 0 ? "Metadata persistence is incomplete: " + missing + " reported papers were not stored"
+						: source.errorSummary(),
+				source.workerId(), source.workerType(), source.version(), source.currentJobId(), source.snapshotVersion(),
+				source.taxonomySourceUpdatedAt(), source.taxonomyCategories(), source.extractions());
 	}
 
 	private Mono<Void> applyProgressForJob(
 			ArxivResultRepository.JobRecord job,
 			ArxivResultMessage.Payload payload
 	) {
-		if ("ARXIV_SYNC_OAI".equals(job.type())) {
-			return applyOaiProgress(job.id(), payload);
-		}
 		if (isExtractionJob(job.type())) {
 			return repository.hasDeferredSourceCompletion(job.id())
 					.flatMap(deferred -> deferred ? Mono.empty() : repository.applyProgress(

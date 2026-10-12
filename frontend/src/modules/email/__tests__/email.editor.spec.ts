@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  createSampleValues,
   createTemplateDraft,
   insertPlaceholder,
   maskEmailAddress,
   passwordForUpdate,
   previewWidthClass,
 } from '@/modules/email/email.editor'
+import { TEMPLATE_VARIABLES } from '@/modules/email/email.types'
 
 describe('email editor state', () => {
   it('starts with a safe unsubscribe-aware draft', () => {
@@ -19,6 +21,13 @@ describe('email editor state', () => {
 
   it('inserts a supported placeholder at the current selection', () => {
     expect(insertPlaceholder('Hello name', 'author_name', 6, 10)).toBe('Hello {{author_name}}')
+  })
+
+  it('offers partner activation with a fixed inert preview sample', () => {
+    expect(TEMPLATE_VARIABLES).toContain('partner_claim_url')
+    expect(createSampleValues().partner_claim_url).toBe('https://example.invalid/partner-activation-preview')
+    expect(insertPlaceholder('<a href="">Activate</a>', 'partner_claim_url', 9, 9))
+      .toBe('<a href="{{partner_claim_url}}">Activate</a>')
   })
 
   it('uses stable preview widths and preserves an existing SMTP password', () => {

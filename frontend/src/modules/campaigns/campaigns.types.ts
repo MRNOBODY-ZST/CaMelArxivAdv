@@ -68,7 +68,18 @@ export interface DeliveryCounts {
   total: number
 }
 
-export interface CampaignView {
+export interface MigrationReference {
+  migrationId: string
+  sourceCampaignId: string
+  targetCampaignId: string
+}
+
+export interface CampaignSelectionMetadata {
+  selectionCounts?: Partial<import('./template-migrations.types').SelectionCounts> | null
+  migrationReferences?: MigrationReference[] | null
+}
+
+export interface CampaignView extends CampaignSelectionMetadata {
   id: string
   name: string
   purpose: string
@@ -110,6 +121,7 @@ export interface CampaignView {
 }
 
 export interface CampaignRecipient {
+  transfer?: (MigrationReference & { status: 'TRANSFERRED' | 'MIGRATED_TARGET' }) | null
   id: string
   authorName: string
   paperTitle: string
@@ -129,6 +141,37 @@ export interface CampaignRecipient {
 
 export interface GenerationStart { jobId: string; queuedRecipients: number }
 
+export interface CampaignSettingsUpdate {
+  expectedLockVersion: number
+  name: string
+  purpose: string
+  mailboxAccountId: string
+  fromName: string
+  replyTo: string
+  trackingOpensEnabled: boolean
+  trackingClicksEnabled: boolean
+}
+
+export interface CampaignRecipientContentUpdate {
+  expectedLockVersion: number
+  subject: string
+  html: string
+  text: string
+  rationale: string
+  reason: string
+}
+
+export interface CampaignRecipientContentEditResult {
+  campaignId: string
+  recipientId: string
+  lockVersion: number
+  subject: string
+  html: string
+  text: string
+  rationale: string
+  updatedAt: string
+}
+
 export interface DeliveryView {
   id: string
   campaignId: string
@@ -146,7 +189,7 @@ export interface DeliveryView {
   completedAt: string | null
 }
 
-export interface CampaignAnalyticsView {
+export interface CampaignAnalyticsView extends CampaignSelectionMetadata {
   id: string
   name: string
   status: string

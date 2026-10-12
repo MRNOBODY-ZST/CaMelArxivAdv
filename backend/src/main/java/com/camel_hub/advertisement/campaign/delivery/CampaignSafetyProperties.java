@@ -1,16 +1,47 @@
 package com.camel_hub.advertisement.campaign.delivery;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
+
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @ConfigurationProperties("app.campaign-safety")
-public record CampaignSafetyProperties(boolean enabled, String recipient, int maximumRecipients) {
+public record CampaignSafetyProperties(
+		boolean enabled, String recipient, int maximumRecipients, Map<String, String> destinations
+) {
 	private static final String LOCAL_ATOM = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+";
 
+	public CampaignSafetyProperties(boolean enabled, String recipient, int maximumRecipients) {
+		this(enabled, recipient, maximumRecipients, Map.of());
+	}
+
+	@ConstructorBinding
 	public CampaignSafetyProperties {
 		if (maximumRecipients < 1 || maximumRecipients > 20) {
 			throw new IllegalArgumentException("Campaign safety recipient limit must be between 1 and 20");
 		}
 		recipient = canonicalRecipient(recipient, enabled);
+		Map<String, String> validated = new LinkedHashMap<>();
+		if (destinations != null) {
+			if (destinations.size() > 10) {
+				throw new IllegalArgumentException("Campaign safety supports at most 10 named destinations");
+			}
+			destinations.forEach((key, value) -> {
+				if (!validDestinationKey(key) || "default".equals(key)) {
+					throw new IllegalArgumentException("Campaign safety destination key is invalid or reserved");
+				}
+				// Empty optional environment values do not enable a destination.
+				String address = canonicalRecipient(value, false);
+				if (!address.isBlank()) validated.put(key, address);
+			});
+		}
+		destinations = Collections.unmodifiableMap(validated);
+	}
+
+	public static boolean validDestinationKey(String key) {
+		return key != null && key.matches("[a-z][a-z0-9-]{0,31}");
 	}
 
 	public String validatedRecipient() {

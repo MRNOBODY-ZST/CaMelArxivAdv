@@ -17,6 +17,28 @@ class CampaignReportingIntegrationTest {
 	private static DatabaseClient databaseClient;
 	private CampaignReportingService service;
 
+	@Test
+	void historicalNullIsUnknownOnlyForActualPreparationFailureCategories() throws Exception {
+		var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+		for (String category : new String[]{"PREPARATION_FAILED", "PARTNER_INVITE_DISABLED", "PARTNER_INVITE_HELD",
+				"PARTNER_INVITE_EXPIRED", "PARTNER_INVITE_CLAIMED", "PARTNER_INVITE_INVALID_INPUT",
+				"PARTNER_INVITE_UNAVAILABLE", "PARTNER_INVITE_PREPARATION_INTERRUPTED", "SMTP_REJECTED", "UNEXPECTED_FAILURE"}) {
+			sql("UPDATE delivery_attempts SET status='PERMANENT_FAILURE',failure_category='" + category + "'");
+			var result = service.deliveries(null, 1, 20).block();
+			assertThat(result.total()).isEqualTo(1);
+			var json = mapper.valueToTree(result.items().getFirst());
+			assertThat(json.has("preparationDiagnostic")).isTrue();
+			assertThat(json.get("preparationDiagnostic").isNull()).isTrue();
+			if (category.equals("PREPARATION_FAILED") || category.startsWith("PARTNER_INVITE_")) {
+				assertThat(json.path("preparationDiagnosticExplanation").asText()).isEqualTo("ROOT_CAUSE_UNKNOWN");
+			} else assertThat(json.get("preparationDiagnosticExplanation").isNull()).isTrue();
+		}
+		sql("UPDATE delivery_attempts SET status='SMTP_ACCEPTED',failure_category='PREPARATION_FAILED'");
+		var json = mapper.valueToTree(service.deliveries(null,1,20).block().items().getFirst());
+		assertThat(json.get("preparationDiagnosticExplanation").isNull()).isTrue();
+		assertThat(databaseClient.sql("SELECT count(*) AS n FROM campaign_preparation_diagnostics").map((r,m)->r.get("n",Long.class)).one().block()).isZero();
+	}
+
 	@BeforeAll
 	static void startDatabase() {
 		POSTGRES.start();
@@ -31,6 +53,41 @@ class CampaignReportingIntegrationTest {
 				+ "segments, smtp_accounts, email_template_versions, email_templates, users CASCADE");
 		seedReportingData();
 		service = new CampaignReportingService(new CampaignReportingRepository(databaseClient));
+	}
+
+	@Test
+	void configuredInventoryPreservesAcceptedBouncedUnknownAndFeedbackHistory() {
+		byte[] hmac=new byte[32];java.util.Arrays.fill(hmac,(byte)1);
+		var inventory=new CampaignSelectionInventory(new CampaignProductionSelectionPolicy(
+			new com.camel_hub.advertisement.contact.security.ContactCrypto(new com.camel_hub.advertisement.contact.config.ContactDataProtectionProperties(
+				java.util.Base64.getEncoder().encodeToString(new byte[32]),java.util.Base64.getEncoder().encodeToString(hmac))),
+			new com.camel_hub.advertisement.campaign.delivery.CampaignSafetyProperties(false,null,20,java.util.Map.of()),java.time.Duration.ofDays(180)));
+		sql("INSERT INTO campaign_recipients(campaign_id,email_ciphertext,email_nonce,email_hmac,email_domain,confidence,status,attempt_count,smtp_accepted_at) VALUES "
+			+"('50000000-0000-0000-0000-000000000001',decode('01','hex'),decode('02','hex'),decode('07','hex'),'synthetic.test','HIGH','BOUNCED',1,now()),"
+			+"('50000000-0000-0000-0000-000000000001',decode('01','hex'),decode('02','hex'),decode('08','hex'),'synthetic.test','HIGH','OUTCOME_UNKNOWN',1,NULL)");
+		var item=new CampaignReportingRepository(databaseClient,inventory).campaigns(java.util.UUID.fromString("50000000-0000-0000-0000-000000000001"),0,20).blockFirst();
+		assertThat(item.selectionCounts()).isEqualTo(new com.camel_hub.advertisement.campaign.migration.CampaignTemplateMigrationDtos.SelectionCounts(3,0,0,3));
+		assertThat(item.recipients()).isEqualTo(3);
+		assertThat(item.smtpAccepted()).isEqualTo(2);
+		assertThat(item.bounced()).isEqualTo(1);
+		assertThat(item.outcomeUnknown()).isEqualTo(1);
+		assertThat(item.replied()).isEqualTo(1);
+		assertThat(item.rawOpens()).isEqualTo(2);
+		assertThat(item.humanClicks()).isEqualTo(1);
+		assertThat(item.rates().smtpAcceptance()).isEqualTo(2.0/3.0);
+		assertThat(item.rates().bounce()).isEqualTo(0.5);
+		assertThat(item.safety().smtpAccepted()).isEqualTo(1);
+	}
+
+	@Test
+	void historicalCountersRemainIndependentOfUnavailableInventory() {
+		var item = service.campaigns(java.util.UUID.fromString("50000000-0000-0000-0000-000000000001"), 1, 20).block().items().getFirst();
+		var json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules().valueToTree(item);
+		assertThat(json.has("selectionCounts")).isTrue();
+		assertThat(json.get("selectionCounts").isNull()).isTrue();
+		assertThat(item.recipients()).isEqualTo(1);
+		assertThat(item.smtpAccepted()).isEqualTo(1);
+		assertThat(item.replied()).isEqualTo(1);
 	}
 
 	@Test

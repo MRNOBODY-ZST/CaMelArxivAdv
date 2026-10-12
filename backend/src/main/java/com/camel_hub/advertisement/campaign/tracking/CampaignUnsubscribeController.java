@@ -28,19 +28,9 @@ import java.util.Map;
 public final class CampaignUnsubscribeController {
 	private static final Logger LOGGER = LoggerFactory.getLogger(CampaignUnsubscribeController.class);
 
-	private static final byte[] CONFIRMATION = ("<!doctype html><html><head><meta charset=\"utf-8\">"
-			+ "<title>Unsubscribe</title></head><body><main><h1>Confirm unsubscribe</h1>"
-			+ "<p>Submit this form to stop future campaign messages.</p>"
-			+ "<form method=\"post\" action=\"\"><button type=\"submit\">Unsubscribe</button></form>"
-			+ "</main></body></html>").getBytes(StandardCharsets.UTF_8);
-	private static final byte[] COMPLETE = ("<!doctype html><html><head><meta charset=\"utf-8\">"
-			+ "<title>Unsubscribe</title></head><body><main><h1>Request received</h1>"
-			+ "<p>Your preference has been recorded.</p></main></body></html>")
-			.getBytes(StandardCharsets.UTF_8);
-	private static final byte[] RETRY = ("<!doctype html><html><head><meta charset=\"utf-8\">"
-			+ "<title>Unsubscribe</title></head><body><main><h1>Request not completed</h1>"
-			+ "<p>Please retry this request.</p></main></body></html>")
-			.getBytes(StandardCharsets.UTF_8);
+	private static final byte[] CONFIRMATION = CampaignUnsubscribePage.render(CampaignUnsubscribePage.State.CONFIRMATION);
+	private static final byte[] COMPLETE = CampaignUnsubscribePage.render(CampaignUnsubscribePage.State.COMPLETE);
+	private static final byte[] RETRY = CampaignUnsubscribePage.render(CampaignUnsubscribePage.State.RETRY);
 
 	private final List<CampaignCallbackNamespace> namespaces;
 
@@ -91,7 +81,7 @@ public final class CampaignUnsubscribeController {
 				.header("Pragma", "no-cache").header("Expires", "0")
 				.header("Referrer-Policy", "no-referrer")
 				.header("X-Content-Type-Options", "nosniff")
-				.header("Content-Security-Policy",
-						"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+				.header("X-Robots-Tag", "noindex, nofollow")
+				.header("Content-Security-Policy", CampaignUnsubscribePage.contentSecurityPolicy());
 	}
 }

@@ -76,6 +76,7 @@ const navigation: readonly NavigationSection[] = [
     { label: '作者与联系人', href: '/contacts', icon: UsersIcon, permission: 'contact:read_masked' },
   ] },
   { id: 'outreach', label: '邮件触达', defaultOpenOnWorkbench: true, items: [
+    { label: '一键触达', href: '/email/automation', icon: PaperAirplaneIcon, permission: 'campaign:read' },
     { label: '邮件模板', href: '/email/templates', icon: DocumentTextIcon, permission: 'template:read' },
     { label: '收件人分组', href: '/email/segments', icon: FolderIcon, permission: 'campaign:read' },
     { label: '邮件活动', href: '/email/campaigns', icon: PaperAirplaneIcon, permission: 'campaign:read' },

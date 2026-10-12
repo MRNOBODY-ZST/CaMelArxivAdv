@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Never
 from uuid import uuid4
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from app.arxiv.source_downloader import (
     SourceDownloadSecurityError,
     SourceUnavailableError,
 )
+from app.arxiv.source_errors import SourceUpstreamReason, SourceUpstreamTransientError
 from app.extraction.archive_guard import ArchiveLimits, ArchiveReport, extract_source
 from app.extraction.contact_extractor import extract_contacts
 from app.extraction.models import (
@@ -67,7 +69,9 @@ class InvalidMetadataDownloader:
         path = destination / "source.tar.gz"
         content = (
             b"\\documentclass{article}\n"
-            + b"\\author{" + (b"A" * 301) + b"}\n"
+            + b"\\author{"
+            + (b"A" * 301)
+            + b"}\n"
             + b"\\begin{document}\n"
         )
         with tarfile.open(path, "w:gz") as archive:
@@ -251,6 +255,132 @@ async def test_download_timeout_propagates_for_command_retry(tmp_path: Path) -> 
     with pytest.raises(TimeoutError, match="upstream request timed out"):
         await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
 
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", list(SourceUpstreamReason))
+async def test_typed_downloader_transient_propagates_unchanged_after_temp_cleanup(
+    tmp_path: Path,
+    reason: SourceUpstreamReason,
+) -> None:
+    failure = SourceUpstreamTransientError(reason)
+
+    class TransientDownloader:
+        async def download(self, arxiv_id: str, destination: Path) -> DownloadedSource:
+            (destination / "partial-source").write_bytes(b"partial")
+            raise failure
+
+    runner = SourceExtractionRunner(
+        TransientDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+    with pytest.raises(SourceUpstreamTransientError) as caught:
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+    assert caught.value is failure
+    assert caught.value.reason == reason
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 403, 429, 501, 505])
+async def test_parser_http_status_error_is_not_an_official_download_rejection(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    request = httpx.Request("GET", "https://parser-dependency.invalid")
+    failure = httpx.HTTPStatusError(
+        "parser dependency rejected",
+        request=request,
+        response=httpx.Response(status, request=request),
+    )
+
+    def fail_parser(source: Path, destination: Path, limits: ArchiveLimits) -> Never:
+        raise failure
+
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+        parser=DirectSourceParser(archive_parser=fail_parser),
+    )
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+    assert caught.value is failure
+    assert not hasattr(caught.value, "reason")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 403, 501, 505])
+async def test_download_http_rejection_preserves_existing_terminal_or_propagated_outcome(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    request = httpx.Request("GET", "https://export.arxiv.org/e-print/2608.00001")
+    failure = httpx.HTTPStatusError(
+        "download rejected", request=request, response=httpx.Response(status, request=request)
+    )
+
+    class RejectedDownloader:
+        async def download(self, arxiv_id: str, destination: Path) -> DownloadedSource:
+            raise failure
+
+    runner = SourceExtractionRunner(
+        RejectedDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+    )
+    if status >= 500:
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+        assert caught.value is failure
+    else:
+        result = await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+        assert result.status == "FAILED"
+        assert result.error_code == "SOURCE_HTTP_REJECTED"
+        assert result.cleanup_confirmed
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ReadTimeout("parser dependency timeout"),
+        httpx.ConnectError("parser dependency network"),
+    ],
+)
+async def test_parser_httpx_network_shapes_remain_untyped_after_cleanup(
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    def fail_parser(source: Path, destination: Path, limits: ArchiveLimits) -> Never:
+        raise failure
+
+    runner = SourceExtractionRunner(
+        TarDownloader(),
+        archive_limits=extraction_limits(),
+        maximum_include_depth=8,
+        maximum_parse_seconds=5,
+        temporary_root=tmp_path,
+        parser_version="phase4-test",
+        parser=DirectSourceParser(archive_parser=fail_parser),
+    )
+    with pytest.raises(type(failure)) as caught:
+        await runner.run(SourceTarget(paper_id=uuid4(), arxiv_id="2608.00001"))
+    assert caught.value is failure
+    assert not hasattr(caught.value, "reason")
     assert list(tmp_path.iterdir()) == []
 
 

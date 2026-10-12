@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.campaign;
 import com.camel_hub.advertisement.audit.AuditService;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryProperties;
 import com.camel_hub.advertisement.email.tracking.MailTrackingProperties;
+import com.camel_hub.advertisement.email.template.TemplateEngine;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.identity.service.AuthenticationRequestContext;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -65,6 +66,7 @@ class CampaignWorkflowIntegrationTest {
 	private CampaignPreflightService preflight;
 	private CampaignWorkflowService workflow;
 	private CampaignService campaigns;
+	private CampaignRecipientContentService recipientContent;
 
 	@BeforeAll
 	static void startDatabase() {
@@ -104,6 +106,191 @@ class CampaignWorkflowIntegrationTest {
 		workflow = new CampaignWorkflowService(
 				workflowRepository, preflight, campaigns, new AuditService(databaseClient, objectMapper),
 				hasher, objectMapper, transactions);
+		recipientContent = new CampaignRecipientContentService(
+				new CampaignRecipientContentRepository(databaseClient), new TemplateEngine(102_400),
+				new AuditService(databaseClient, objectMapper), hasher, transactions);
+	}
+
+	@Test
+	void correctsOnlyContentForAPristineGeneratedDraftAndAuditsHashesWithoutLeakingBodies() {
+		UUID campaignId = editableCampaign();
+		UUID recipientId = recipientId(campaignId);
+		String provenanceBefore = provenance(campaignId, recipientId);
+		var command = editCommand(4, "A corrected research question",
+				"<p>Corrected note. <a href=\"https://arxiv.org/abs/2608.00001\" rel=\"noopener noreferrer\">Paper</a></p>\n"
+						+ "<p><a href=\"{{unsubscribe_url}}\" rel=\"noopener noreferrer\">Unsubscribe</a></p>",
+				"Corrected note. Unsubscribe: {{unsubscribe_url}}",
+				"Corrected the paper-specific factual claim.", "Editorial correction after source review");
+
+		var result = recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT, command).block();
+
+		assertThat(result).isNotNull();
+		assertThat(result.campaignId()).isEqualTo(campaignId);
+		assertThat(result.recipientId()).isEqualTo(recipientId);
+		assertThat(result.lockVersion()).isEqualTo(5);
+		assertThat(result.subject()).isEqualTo(command.subject());
+		assertThat(result.html()).isEqualTo(command.html());
+		assertThat(result.text()).isEqualTo(command.text());
+		assertThat(result.rationale()).isEqualTo(command.rationale());
+		assertThat(provenance(campaignId, recipientId)).isEqualTo(provenanceBefore);
+		UUID generationJobId = UUID.fromString(text("SELECT generation_job_id::text FROM campaigns WHERE id = '"
+				+ campaignId + "'"));
+		assertThat(new CampaignRepository(databaseClient).storeGenerated(
+				campaignId, recipientId, generationJobId,
+				new CampaignRepository.GeneratedDraft(
+						"Late worker subject", "<p>Late worker</p>", "Late worker text", "Late rationale"))
+				.block()).isFalse();
+		assertThat(content(recipientId)).contains(command.subject()).doesNotContain("Late worker");
+		assertThat(longValue("SELECT count(*) FROM campaigns WHERE id = '" + campaignId
+				+ "' AND review_preflight_digest IS NULL AND review_preflight_at IS NULL "
+				+ "AND submitted_for_review_at IS NULL AND approved_at IS NULL AND approved_by IS NULL"))
+				.isEqualTo(1);
+		assertThat(longValue("SELECT count(*) FROM audit_logs WHERE action = "
+				+ "'CAMPAIGN_RECIPIENT_CONTENT_UPDATED' AND actor_user_id = '" + ACTOR
+				+ "' AND resource_type = 'CAMPAIGN_RECIPIENT' AND resource_id = '" + recipientId + "'"))
+				.isEqualTo(1);
+		JsonNode before = json("SELECT before_summary::text FROM audit_logs");
+		JsonNode after = json("SELECT after_summary::text FROM audit_logs");
+		assertThat(fieldNames(before)).containsExactlyInAnyOrder("campaignId", "lockVersion", "contentHash");
+		assertThat(fieldNames(after)).containsExactlyInAnyOrder(
+				"campaignId", "lockVersion", "contentHash", "reason");
+		assertThat(before.path("contentHash").asText()).matches("[0-9a-f]{64}")
+				.isNotEqualTo(after.path("contentHash").asText());
+		assertThat(after.path("reason").asText()).isEqualTo(command.reason());
+		String audit = text("SELECT before_summary::text || after_summary::text FROM audit_logs");
+		assertThat(audit).doesNotContain(command.subject(), command.html(), command.text(), command.rationale(),
+				"eligible-" + campaignId, "university.edu");
+	}
+
+	@Test
+	void rejectsStaleVersionAndCrossCampaignRecipientWithoutMutationOrAudit() {
+		UUID campaignId = editableCampaign();
+		UUID recipientId = recipientId(campaignId);
+		String contentBefore = content(recipientId);
+
+		assertThatThrownBy(() -> recipientContent.update(
+				campaignId, recipientId, ACTOR, CONTEXT, editCommand(3)).block())
+				.isInstanceOf(CampaignConflictException.class);
+
+		UUID otherCampaign = editableCampaign();
+		UUID otherRecipient = recipientId(otherCampaign);
+		assertThatThrownBy(() -> recipientContent.update(
+				campaignId, otherRecipient, ACTOR, CONTEXT, editCommand(4)).block())
+				.isInstanceOf(CampaignConflictException.class);
+
+		assertThat(content(recipientId)).isEqualTo(contentBefore);
+		assertThat(content(otherRecipient)).doesNotContain("Corrected");
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(4);
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	@ParameterizedTest(name = "recipient edit rejects {0}")
+	@MethodSource("nonEditableRecipientStates")
+	void rejectsNonDraftInFlightAttemptedAndArtifactBearingRecipients(String label, String mutation) {
+		UUID campaignId = editableCampaign();
+		UUID recipientId = recipientId(campaignId);
+		sql(mutation.formatted(campaignId, recipientId, SMTP));
+
+		assertThatThrownBy(() -> recipientContent.update(
+				campaignId, recipientId, ACTOR, CONTEXT, editCommand(4)).block())
+				.isInstanceOf(CampaignConflictException.class);
+
+		assertThat(content(recipientId)).doesNotContain("Corrected");
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(4);
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	@Test
+	void rejectsUnsafeHtmlAndMissingUnsubscribeWithoutSanitizingOrPartiallyWriting() {
+		UUID campaignId = editableCampaign();
+		UUID recipientId = recipientId(campaignId);
+		String contentBefore = content(recipientId);
+
+		assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+				editCommand(4, "Safe subject",
+						"<p onclick=\"steal()\">Hello</p><script>alert(1)</script>"
+								+ "<p>{{unsubscribe_url}}</p>",
+						"Hello {{unsubscribe_url}}", "Source correction", "Editorial correction")).block())
+				.isInstanceOf(CampaignValidationException.class).hasMessageContaining("HTML");
+		assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+				editCommand(4, "Safe subject", "<p>Hello</p>", "Hello", "Source correction",
+						"Editorial correction")).block())
+				.isInstanceOf(CampaignValidationException.class).hasMessageContaining("unsubscribe_url");
+		assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+				editCommand(4, "Safe subject\r\nBcc: injected@example.org",
+						"<p>Hello {{unsubscribe_url}}</p>", "Hello {{unsubscribe_url}}",
+						"Source correction", "Editorial correction")).block())
+				.isInstanceOf(CampaignValidationException.class).hasMessageContaining("safety validation");
+		assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+				editCommand(4, "Safe subject", "<p>" + "x".repeat(102_400)
+						+ " {{unsubscribe_url}}</p>", "Hello {{unsubscribe_url}}",
+						"Source correction", "Editorial correction")).block())
+				.isInstanceOf(CampaignValidationException.class).hasMessageContaining("safety validation");
+
+		assertThat(content(recipientId)).isEqualTo(contentBefore);
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(4);
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	@ParameterizedTest(name = "recipient edit rejects unsubscribe placement: {0}")
+	@MethodSource("invalidUnsubscribePlacements")
+	void requiresExactUnsubscribePlaceholderInBothMimeBodiesAndNeverInSubject(
+			String label, String subject, String html, String plainText
+	) {
+		UUID campaignId = editableCampaign();
+		UUID recipientId = recipientId(campaignId);
+		String contentBefore = content(recipientId);
+
+		assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+				editCommand(4, subject, html, plainText, "Source correction", "Editorial correction")).block())
+				.isInstanceOf(CampaignValidationException.class).hasMessageContaining("unsubscribe_url");
+
+		assertThat(content(recipientId)).isEqualTo(contentBefore);
+		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+				.isEqualTo(4);
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	@Test
+	void rejectsEveryIsoControlCharacterInRecipientSubject() {
+		for (String subject : List.of("Subject\u0000hidden", "Subject\u000bhidden")) {
+			UUID campaignId = editableCampaign();
+			UUID recipientId = recipientId(campaignId);
+
+			assertThatThrownBy(() -> recipientContent.update(campaignId, recipientId, ACTOR, CONTEXT,
+					editCommand(4, subject, "<p>{{unsubscribe_url}}</p>", "{{unsubscribe_url}}",
+							"Source correction", "Editorial correction")).block())
+					.isInstanceOf(CampaignValidationException.class).hasMessageContaining("subject");
+
+			assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'"))
+					.isEqualTo(4);
+		}
+		assertThat(count("audit_logs")).isZero();
+	}
+
+	private static Stream<Arguments> invalidUnsubscribePlacements() {
+		return Stream.of(
+				Arguments.of("subject", "Correction {{ unsubscribe_url }}",
+						"<p>{{unsubscribe_url}}</p>", "{{unsubscribe_url}}"),
+				Arguments.of("html only", "Correction", "<p>{{unsubscribe_url}}</p>", "Plain text"),
+				Arguments.of("text only", "Correction", "<p>HTML body</p>", "{{unsubscribe_url}}")
+		);
+	}
+
+	private static Stream<Arguments> nonEditableRecipientStates() {
+		return Stream.of(
+				Arguments.of("non-draft campaign", "UPDATE campaigns SET status = 'READY_FOR_REVIEW' WHERE id = '%s'"),
+				Arguments.of("generation not requested", "UPDATE campaigns SET generation_status = 'NOT_REQUESTED' WHERE id = '%s'"),
+				Arguments.of("generation in flight", "UPDATE campaigns SET generation_status = 'RUNNING' WHERE id = '%s'"),
+				Arguments.of("personalization in flight", "UPDATE campaign_recipients SET personalization_status = 'RUNNING', personalized_at = NULL WHERE id = '%2$s'"),
+				Arguments.of("delivery in flight", "UPDATE campaign_recipients SET status = 'CONNECTING', delivery_lease_hash = digest('lease', 'sha256'), delivery_lease_expires_at = now() + interval '1 minute' WHERE id = '%2$s'"),
+				Arguments.of("delivery attempted", "WITH changed AS (UPDATE campaign_recipients SET attempt_count = 1, first_attempt_at = now() WHERE id = '%2$s' RETURNING id) INSERT INTO delivery_attempts (campaign_recipient_id, smtp_account_id, attempt_number, idempotency_key, status, started_at) SELECT id, '%3$s', 1, 'edit-attempt-%2$s', 'CONNECTING', now() FROM changed"),
+				Arguments.of("tracking artifact", "INSERT INTO tracking_tokens (campaign_recipient_id, token_type, token_hash, expires_at) VALUES ('%2$s', 'UNSUBSCRIBE', digest('edit-token-%2$s', 'sha256'), now() + interval '1 day')"),
+				Arguments.of("safety-send artifact", "WITH run AS (INSERT INTO campaign_safety_runs (campaign_id, smtp_account_id, created_by, recipient_limit, destination_hmac, destination_masked, from_name_snapshot, from_email_snapshot, reply_to_snapshot, tracking_opens_enabled, tracking_clicks_enabled) VALUES ('%1$s', '%3$s', '" + ACTOR + "', 1, digest('destination-%1$s', 'sha256'), 'o***@example.org', 'Research Team', 'research@example.org', 'reply@example.org', false, false) RETURNING id) INSERT INTO campaign_safety_messages (run_id, campaign_recipient_id, smtp_account_id) SELECT id, '%2$s', '%3$s' FROM run")
+		);
 	}
 
 	@Test
@@ -111,13 +298,13 @@ class CampaignWorkflowIntegrationTest {
 		UUID campaignId = insertCampaign("DRAFT");
 		insertRecipient(campaignId, "eligible", "HIGH", true, false, "ACTIVE", true,
 				AUTHOR, true, "HIGH", true, "CONFIRMED", true);
-		insertRecipient(campaignId, "medium", "MEDIUM", true, false, "ACTIVE", true,
-				AUTHOR, true, "HIGH", true, "CONFIRMED", true);
+		insertRecipient(campaignId, "medium-snapshot", "MEDIUM", true, false, "ACTIVE", true,
+				AUTHOR, true, "MEDIUM", true, "UNVERIFIED", true);
 		insertRecipient(campaignId, "unverified", "HIGH", true, false, "ACTIVE", true,
-				AUTHOR, true, "HIGH", false, "CONFIRMED", true);
+				AUTHOR, true, "MEDIUM", false, "CONFIRMED", true);
 		insertHistoricalVerifiedEvidence(campaignId, "unverified");
 		insertRecipient(campaignId, "unconfirmed", "HIGH", true, false, "ACTIVE", true,
-				AUTHOR, true, "HIGH", true, "UNVERIFIED", true);
+				AUTHOR, true, "MEDIUM", true, "UNVERIFIED", true);
 		insertRecipient(campaignId, "authorless", "HIGH", true, false, "ACTIVE", true,
 				null, true, "HIGH", true, "CONFIRMED", true);
 		insertRecipient(campaignId, "syntax", "HIGH", false, false, "ACTIVE", true,
@@ -129,7 +316,7 @@ class CampaignWorkflowIntegrationTest {
 		insertRecipient(campaignId, "deleted", "HIGH", true, false, "ACTIVE", false,
 				AUTHOR, true, "HIGH", true, "CONFIRMED", true);
 		insertRecipient(campaignId, "low-evidence", "HIGH", true, false, "ACTIVE", true,
-				AUTHOR, true, "MEDIUM", true, "CONFIRMED", true);
+				AUTHOR, true, "LOW", true, "CONFIRMED", true);
 		insertRecipient(campaignId, "no-evidence", "HIGH", true, false, "ACTIVE", true,
 				AUTHOR, true, "HIGH", true, "CONFIRMED", false);
 		insertRecipient(campaignId, "suppressed", "HIGH", true, false, "ACTIVE", true,
@@ -165,18 +352,18 @@ class CampaignWorkflowIntegrationTest {
 		assertThat(result.ready()).isTrue();
 		assertThat(result.checks()).containsOnlyKeys(
 				"CONTENT_READY", "UNSUBSCRIBE_PRESENT", "SENDER_VALID", "SMTP_READY",
-				"MAILBOX_READY", "TRACKING_READY", "RECIPIENTS_ELIGIBLE");
+				"MAILBOX_READY", "TRACKING_READY", "RECIPIENTS_ELIGIBLE", "PARTNER_INVITE_READY", "TRANSFERRED");
 		assertThat(result.checks().values()).allMatch(CampaignPreflightService.PreflightCheck::passed);
 		assertThat(result.counts()).containsEntry("TOTAL", 16L).containsEntry("ELIGIBLE", 1L)
-				.containsEntry("CONFIDENCE_NOT_HIGH", 1L)
-				.containsEntry("EVIDENCE_UNVERIFIED", 1L)
-				.containsEntry("EVIDENCE_UNCONFIRMED", 1L)
+					.containsEntry("CONFIDENCE_NOT_HIGH", 0L)
+					.containsEntry("EVIDENCE_UNVERIFIED", 1L)
+					.containsEntry("EVIDENCE_UNCONFIRMED", 2L)
 				.containsEntry("AUTHOR_RELATION_MISSING", 2L)
 				.containsEntry("SYNTAX_INVALID", 1L)
 				.containsEntry("EXAMPLE_ADDRESS", 1L)
 				.containsEntry("CONTACT_INACTIVE", 2L)
 				.containsEntry("CONTACT_DELETED", 1L)
-				.containsEntry("EVIDENCE_NOT_HIGH", 1L)
+					.containsEntry("EVIDENCE_NOT_HIGH", 1L)
 				.containsEntry("EVIDENCE_MISSING", 1L)
 				.containsEntry("SUPPRESSED", 1L)
 				.containsEntry("UNSUBSCRIBED", 1L)
@@ -186,6 +373,36 @@ class CampaignWorkflowIntegrationTest {
 		assertThat(count("audit_logs")).isEqualTo(auditBefore);
 		assertThat(count("outbox_messages")).isEqualTo(outboxBefore);
 		assertThat(longValue("SELECT lock_version FROM campaigns WHERE id = '" + campaignId + "'")).isZero();
+	}
+
+	@Test
+	void preflightAllowsSourceSupportedHighWithoutHumanReviewAndOnlyConfirmedHumanMedium() {
+		UUID campaignId = insertCampaign("DRAFT");
+		insertRecipient(campaignId, "high-unreviewed", "HIGH", true, false, "ACTIVE", true,
+				AUTHOR, true, "HIGH", false, "UNVERIFIED", true);
+		insertRecipient(campaignId, "medium-confirmed", "MEDIUM", true, false, "ACTIVE", true,
+				AUTHOR, true, "MEDIUM", true, "CONFIRMED", true);
+		insertRecipient(campaignId, "medium-unreviewed", "MEDIUM", true, false, "ACTIVE", true,
+				AUTHOR, true, "MEDIUM", false, "CONFIRMED", true);
+		insertRecipient(campaignId, "high-rejected", "HIGH", true, false, "ACTIVE", true,
+				AUTHOR, true, "HIGH", true, "REJECTED", true);
+
+		var result = preflight.preflight(campaignId).block();
+
+		assertThat(result.ready()).isTrue();
+		assertThat(result.counts()).containsEntry("TOTAL", 4L).containsEntry("ELIGIBLE", 2L);
+	}
+
+	@Test
+	void preflightRejectsRecipientWhosePaperWasSoftDeletedAfterFreeze() {
+		UUID campaignId = readyCampaign("DRAFT");
+		sql("UPDATE papers SET deleted_at = now() WHERE id = '" + PAPER + "'");
+
+		var result = preflight.preflight(campaignId).block();
+
+		assertThat(result.ready()).isFalse();
+		assertThat(result.counts()).containsEntry("ELIGIBLE", 0L)
+				.containsEntry("AUTHOR_RELATION_MISSING", 1L);
 	}
 
 	@Test
@@ -232,7 +449,7 @@ class CampaignWorkflowIntegrationTest {
 		var rejected = preflight.preflight(rejectedCampaign).block();
 		assertThat(rejected.ready()).isFalse();
 		assertThat(rejected.counts()).containsEntry("ELIGIBLE", 0L)
-				.containsEntry("EVIDENCE_NOT_HIGH", 1L)
+				.containsEntry("EVIDENCE_NOT_HIGH", 0L)
 				.containsEntry("EVIDENCE_UNVERIFIED", 1L)
 				.containsEntry("EVIDENCE_UNCONFIRMED", 1L);
 
@@ -674,6 +891,63 @@ class CampaignWorkflowIntegrationTest {
 		if (evidencePresent) {
 			sql("INSERT INTO extraction_evidence (paper_author_contact_id, source_relative_path, rule_name, masked_context) "
 					+ "VALUES ('" + mappingId + "', 'review.tex', 'review-decision', 'masked')");
+		}
+	}
+
+	private UUID editableCampaign() {
+		UUID campaignId = readyCampaign("DRAFT");
+		sql("UPDATE campaigns SET generation_status = 'COMPLETED', generation_provider = 'openai', "
+				+ "generation_model = 'gpt-test', generation_job_id = '" + UUID.randomUUID() + "', "
+				+ "generation_requested_at = now() - interval '2 minutes', generation_completed_at = now(), "
+				+ "lock_version = 4, review_preflight_digest = digest('old-preflight', 'sha256'), "
+				+ "review_preflight_at = now(), submitted_for_review_at = now() - interval '1 minute', "
+				+ "approved_at = now(), approved_by = '" + ACTOR + "' WHERE id = '" + campaignId + "'");
+		sql("UPDATE campaign_recipients SET personalization_rationale = 'Original AI rationale', "
+				+ "personalization_attempts = 1, paper_abstract_snapshot = 'Frozen abstract', "
+				+ "arxiv_id_snapshot = '2608.00001' WHERE campaign_id = '" + campaignId + "'");
+		return campaignId;
+	}
+
+	private UUID recipientId(UUID campaignId) {
+		return UUID.fromString(text("SELECT id::text FROM campaign_recipients WHERE campaign_id = '"
+				+ campaignId + "'"));
+	}
+
+	private CampaignRecipientContentService.EditCommand editCommand(long expectedLockVersion) {
+		return editCommand(expectedLockVersion, "Corrected subject",
+				"<p>Corrected HTML. Unsubscribe: {{unsubscribe_url}}</p>",
+				"Corrected text. Unsubscribe: {{unsubscribe_url}}", "Corrected rationale",
+				"Editorial correction after source review");
+	}
+
+	private CampaignRecipientContentService.EditCommand editCommand(
+			long expectedLockVersion, String subject, String html, String text, String rationale, String reason
+	) {
+		return new CampaignRecipientContentService.EditCommand(
+				expectedLockVersion, subject, html, text, rationale, reason);
+	}
+
+	private String content(UUID recipientId) {
+		return text("SELECT concat_ws(E'\\n--FIELD--\\n', rendered_subject, rendered_html, rendered_text, "
+				+ "personalization_rationale) FROM campaign_recipients WHERE id = '" + recipientId + "'");
+	}
+
+	private String provenance(UUID campaignId, UUID recipientId) {
+		return text("SELECT concat_ws('|', c.generation_provider, c.generation_model, c.generation_job_id::text, "
+				+ "c.generation_requested_at::text, c.generation_completed_at::text, r.personalized_at::text, "
+				+ "r.personalization_attempts::text, r.contact_id::text, r.paper_id::text, r.author_id::text, "
+				+ "encode(r.email_hmac, 'hex'), r.author_name_snapshot, r.paper_title_snapshot, "
+				+ "r.paper_abstract_snapshot, r.arxiv_id_snapshot, r.category_snapshot, "
+				+ "r.organization_snapshot) FROM campaigns c JOIN campaign_recipients r ON r.campaign_id = c.id "
+				+ "WHERE c.id = '" + campaignId + "' AND r.id = '" + recipientId + "'");
+	}
+
+	private JsonNode json(String statement) {
+		try {
+			return objectMapper.readTree(text(statement));
+		}
+		catch (Exception exception) {
+			throw new IllegalStateException(exception);
 		}
 	}
 

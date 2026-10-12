@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
 import pytest
 
@@ -71,9 +72,7 @@ async def test_source_progress_cannot_regress_or_repeat_an_existing_index() -> N
     redis = FakeRedis()
     store = job_control.RedisJobStore(redis)
 
-    assert await store.save_source_progress(
-        "source:job-1", job_control.SourceProgress(2, 2, 0, 0)
-    )
+    assert await store.save_source_progress("source:job-1", job_control.SourceProgress(2, 2, 0, 0))
     assert not await store.save_source_progress(
         "source:job-1", job_control.SourceProgress(1, 0, 0, 1)
     )
@@ -81,9 +80,7 @@ async def test_source_progress_cannot_regress_or_repeat_an_existing_index() -> N
         "source:job-1", job_control.SourceProgress(2, 1, 0, 1)
     )
 
-    assert await store.source_progress_for("source:job-1") == job_control.SourceProgress(
-        2, 2, 0, 0
-    )
+    assert await store.source_progress_for("source:job-1") == job_control.SourceProgress(2, 2, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -95,12 +92,8 @@ async def test_invalid_numeric_source_progress_is_replaced_instead_of_blocking_r
     store = job_control.RedisJobStore(redis)
 
     assert await store.source_progress_for("source:job-1") is None
-    assert await store.save_source_progress(
-        "source:job-1", job_control.SourceProgress(1, 1, 0, 0)
-    )
-    assert await store.source_progress_for("source:job-1") == job_control.SourceProgress(
-        1, 1, 0, 0
-    )
+    assert await store.save_source_progress("source:job-1", job_control.SourceProgress(1, 1, 0, 0))
+    assert await store.source_progress_for("source:job-1") == job_control.SourceProgress(1, 1, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -117,9 +110,7 @@ async def test_noncanonical_numeric_source_progress_cannot_block_resume(raw: str
     store = job_control.RedisJobStore(redis)
 
     assert await store.source_progress_for("source:job-1") is None
-    assert await store.save_source_progress(
-        "source:job-1", job_control.SourceProgress(1, 1, 0, 0)
-    )
+    assert await store.save_source_progress("source:job-1", job_control.SourceProgress(1, 1, 0, 0))
 
 
 @pytest.mark.asyncio
@@ -135,10 +126,7 @@ async def test_noncanonical_numeric_source_progress_cannot_block_resume(raw: str
         '{"version":1,"nextIndex":1,"success":1,"skipped":0,"failed":0,"extra":0}',
         '{ "version":1,"nextIndex":1,"success":1,"skipped":0,"failed":0 }',
         '{"nextIndex":1,"version":1,"success":1,"skipped":0,"failed":0}',
-        (
-            '{"version":1,"nextIndex":1,"success":0,"success":1,'
-            '"skipped":0,"failed":0}'
-        ),
+        ('{"version":1,"nextIndex":1,"success":0,"success":1,"skipped":0,"failed":0}'),
     ],
 )
 async def test_invalid_source_progress_is_ignored(raw: str) -> None:
@@ -168,3 +156,28 @@ async def test_source_progress_redis_failure_is_not_treated_as_missing_checkpoin
 
     with pytest.raises(ConnectionError, match="redis unavailable"):
         await store.source_progress_for("source:job-1")
+
+
+async def test_source_v2_does_not_activate_or_change_generic_keys_and_ttls() -> None:
+    redis = FakeRedis()
+    store = job_control.RedisJobStore(redis)
+    assert not redis.values and not redis.eval_calls and not redis.set_calls
+    assert store.source_owner_id != job_control.RedisJobStore(redis).source_owner_id
+    job = uuid4()
+    assert await store.control_for(job) == "RUN"
+    redis.values[f"camel:jobs:control:{job}"] = "pause"
+    assert await store.control_for(job) == "PAUSE"
+    await store.mark_processed("synthetic:generic")
+    await store.save_cursor("synthetic:generic", "synthetic-cursor")
+    assert await store.is_processed("synthetic:generic")
+    assert await store.cursor_for("synthetic:generic") == "synthetic-cursor"
+    assert redis.set_calls == [
+        ("camel:worker:processed:synthetic:generic", "1", 30 * 24 * 60 * 60),
+        ("camel:worker:oai-cursor:synthetic:generic", "synthetic-cursor", 7 * 24 * 60 * 60),
+    ]
+    await store.clear_cursor("synthetic:generic")
+    assert await store.cursor_for("synthetic:generic") is None
+    # v2's <=100 bound must not narrow the separately preserved v1 interface.
+    progress = job_control.SourceProgress(101, 101, 0, 0)
+    assert await store.save_source_progress("synthetic:v1", progress)
+    assert await store.source_progress_for("synthetic:v1") == progress

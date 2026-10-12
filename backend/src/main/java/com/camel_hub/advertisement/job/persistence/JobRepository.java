@@ -1,6 +1,8 @@
 package com.camel_hub.advertisement.job.persistence;
 
 import com.camel_hub.advertisement.job.domain.JobStatus;
+import com.camel_hub.advertisement.arxiv.extraction.admission.SourceAdmissionRepository;
+import com.camel_hub.advertisement.arxiv.extraction.admission.SourceCommandIdentity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.r2dbc.core.DatabaseClient;
 import reactor.core.publisher.Flux;
@@ -16,10 +18,16 @@ public class JobRepository {
 	private final DatabaseClient databaseClient;
 	@SuppressWarnings("unused")
 	private final ObjectMapper objectMapper;
+	private final SourceAdmissionRepository admission;
 
 	public JobRepository(DatabaseClient databaseClient, ObjectMapper objectMapper) {
+		this(databaseClient, objectMapper, new SourceAdmissionRepository(databaseClient));
+	}
+
+	public JobRepository(DatabaseClient databaseClient, ObjectMapper objectMapper, SourceAdmissionRepository admission) {
 		this.databaseClient = databaseClient;
 		this.objectMapper = objectMapper;
+		this.admission = admission;
 	}
 
 	public Mono<Long> count(String status, String type) {
@@ -102,8 +110,19 @@ public class JobRepository {
 				.flatMap(rows -> rows == 1
 						? copyRetrySourceItems(original, newId).then(insertRetryOutbox(
 								newId, messageId, original.type(), routingKey,
-								idempotencyKey, safeTrace(traceId))).then(find(newId))
+								idempotencyKey, safeTrace(traceId)))
+								.then(initializeRetrySource(newId,messageId,original.type(),idempotencyKey)).then(find(newId))
 						: Mono.empty());
+	}
+
+	private Mono<Void> initializeRetrySource(UUID jobId,UUID messageId,String type,String key) {
+		if (!isExtractionJob(type)) return Mono.empty();
+		return databaseClient.sql("SELECT parameters::text FROM jobs WHERE id=:id").bind("id",jobId)
+				.map((row,metadata)->row.get(0,String.class)).one()
+				.switchIfEmpty(Mono.error(new IllegalStateException("SOURCE_RETRY_IDENTITY_MISSING")))
+				.flatMap(payload -> admission.initializeCommand(jobId,messageId,type,key,
+						SourceCommandIdentity.fingerprint(payload),
+						SourceCommandIdentity.validatedPayload(payload).get("targets").size()));
 	}
 
 	private Mono<Void> copyRetrySourceItems(JobRecord original, UUID newJobId) {

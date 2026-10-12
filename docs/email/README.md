@@ -1,20 +1,11 @@
-# Research outreach email assets
+# Research outreach email fixtures
 
-- [Reusable invitation and AI workflow](camel-hub-research-invitation.md)
-- [Illustrative HTML preview](camel-hub-research-invitation-preview.html)
-- [Production verification and outstanding delivery check](production-validation-2026-09-13.md)
-- [Current Salmon SMTP configuration and verification](salmon-smtp-cutover-2026-09-14.md)
+[Branded automatic-outreach JSON](camel-hub-auto-outreach-template.json) is a synthetic layout and rendering fixture used by `OutreachBrandedTemplateTest`. Its reply address and Research Team sign-off are fictional; the arXiv paper and unsubscribe variables remain late-bound by the application. It is not deployment configuration, approval to contact anyone, or evidence of delivery. The only fixed website link in the fixture is the official Camel Hub website.
 
-Use `app.personalization.research_invitation.reusable_template(reply_to)` to build
-the template API payload and `CAMPAIGN_PURPOSE` from the same module for the draft
-campaign objective. Supply the monitored reply mailbox from deployment settings.
-Credentials and live message tracking links do not belong in these files.
+The fixture retains table layout, inline styles, frozen-paper binding, hostile-input checks, and unsubscribe safeguards. Do not substitute real author contacts, tracking capabilities, operational accounts, or production message content. Synthetic test literals elsewhere require exact path/value/byte review, not a domain-wide exception.
 
-The AI receives the actual public paper title, abstract, category, author, and URL,
-alongside the operator's current campaign purpose. It writes a specific research
-connection and one proposed experiment into two marked template spans. Styling and
-other operator edits stay intact; the text alternative is derived from the final
-HTML. See the workflow document for slot editing and review details.
+[Static synthetic HTML preview](camel-hub-auto-outreach-preview.html) uses the exact sanitized JSON HTML body and layout, with its five variables replaced by a fictional researcher, paper title, `SYNTHETIC-PAPER` label, and non-issued `.invalid` paper/unsubscribe URLs. It has no JavaScript, images, external stylesheets, or automatic network loads. The fictional paper label is a layout sample, not a valid arXiv identifier or a runtime rendering test. The official Camel Hub website remains the only real fixed website link; do not treat this preview as a sent message, an issued unsubscribe capability, or permission to contact anyone.
 
-The HTML example uses a fictional researcher and paper for layout review. It is not
-a production AI result or evidence of message delivery.
+Use `app.personalization.research_invitation.reusable_template(reply_to)` only with operator-controlled runtime settings. The generation workflow preserves its marked spans and derives plain text from the final HTML; generation does not authorize sending.
+
+[Preparation diagnostics](preparation-diagnostics.md) describes safe failure fields and outcome limits. Private operational reports, historical previews, contact lists, and screenshots are intentionally not distributed.

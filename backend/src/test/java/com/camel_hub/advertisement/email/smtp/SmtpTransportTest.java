@@ -8,6 +8,7 @@ import com.camel_hub.advertisement.email.tracking.MailTrackingSigner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -306,6 +307,35 @@ class SmtpTransportTest {
 						}));
 	}
 
+	@ParameterizedTest
+	@MethodSource("encodedPartnerCapabilities")
+	void redactsEncodedPartnerCapabilitiesInSuccessAndFailureSummaries(String encoded) {
+		var accepted = new SmtpTransport.SmtpOutcome(AttemptStatus.SMTP_ACCEPTED,
+				TransportStage.POST_DATA, 250, "250 queued " + encoded);
+		var rejected = new SmtpTransportException(SmtpTransportException.FailureCategory.SMTP_REJECTED,
+				AttemptStatus.PERMANENT_FAILURE, TransportStage.RCPT_TO, 550, "550 blocked " + encoded, false);
+		assertThat(accepted.responseSummary()).isEqualTo("[redacted-capability]");
+		assertThat(rejected.responseSummary()).isEqualTo("[redacted-capability]");
+		assertThat(accepted.status()).isEqualTo(AttemptStatus.SMTP_ACCEPTED);
+		assertThat(accepted.responseCode()).isEqualTo(250);
+		assertThat(rejected.status()).isEqualTo(AttemptStatus.PERMANENT_FAILURE);
+		assertThat(rejected.responseCode()).isEqualTo(550);
+		assertThat(rejected.retryable()).isFalse();
+	}
+
+	private static java.util.stream.Stream<String> encodedPartnerCapabilities() {
+		String url = "https://api.camel-hub.cn/partner/claim?token=private_token";
+		String percent = "https%3A%2F%2Fapi.camel-hub.cn%2Fpartner%2Fclaim%3Ftoken%3Dprivate_token";
+		String entity = "https&#58;&#47;&#47;api.camel-hub.cn&#47;partner&#47;claim&#63;token&#61;private_token";
+		String mime = "=?UTF-8?B?" + java.util.Base64.getEncoder()
+				.encodeToString(url.getBytes(StandardCharsets.UTF_8)) + "?=";
+		return java.util.stream.Stream.of(percent, entity, mime, percent.replace("%", "%25"),
+				compatibilityPercentEncoded(url), "x".repeat(490) + percent,
+				"x".repeat(700) + mime,
+				"=?UTF-8?B?" + java.util.Base64.getEncoder()
+						.encodeToString(entity.getBytes(StandardCharsets.UTF_8)) + "?=");
+	}
+
 	@Test
 	void keepsPreDataConnectionFailureDefiniteAndNonRetryable() throws Exception {
 		int unavailablePort;
@@ -398,7 +428,7 @@ class SmtpTransportTest {
 		return transport(false);
 	}
 
-	private String compatibilityPercentEncoded(String value) {
+	private static String compatibilityPercentEncoded(String value) {
 		StringBuilder encoded = new StringBuilder(value.length() * 3);
 		for (byte octet : value.getBytes(java.nio.charset.StandardCharsets.US_ASCII)) {
 			int unsigned = Byte.toUnsignedInt(octet);

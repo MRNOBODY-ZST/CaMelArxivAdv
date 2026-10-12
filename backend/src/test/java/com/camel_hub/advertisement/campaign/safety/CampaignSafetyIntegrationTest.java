@@ -92,6 +92,65 @@ import static org.mockito.Mockito.when;
 @ExtendWith(OutputCaptureExtension.class)
 class CampaignSafetyIntegrationTest {
 
+	@Test void safetyPreparationRollbackKeepsDiagnosticAndNoArtifactsOrSmtp(CapturedOutput output) {
+		insertRecipient("00000000-0000-0000-0000-000000000001","Synthetic diagnostic");
+		var runtime=safetyRuntime();var run=materialize(runtime,1,"synthetic-diagnostic");
+		database.sql("ALTER TABLE campaign_safety_messages ADD CONSTRAINT synthetic_safety_body_rejection CHECK (rendered_html LIKE '%{{unsubscribe_url}}%')").fetch().rowsUpdated().block();
+		var signer=new CampaignSafetySigner(SAFETY_KEY);
+		var tracking=new CampaignSafetyTrackingService(runtime.repository(),runtime.policy(),
+			new MailTrackingProperties(true,"https://tracking.example.test",SAFETY_KEY,Duration.ofDays(30)),signer,new MailOpenClassifier(),Clock.fixed(NOW,ZoneOffset.UTC),transactions);
+		AtomicInteger sends=new AtomicInteger();
+		try {
+			var executor=new CampaignDeliveryExecutor(runtime.delivery(),claim->reactor.core.publisher.Mono.error(new AssertionError("production")),runtime.repository(),tracking,mock(ContactCrypto.class),
+				(account,message)->{sends.incrementAndGet();throw new AssertionError("SMTP");},Clock.fixed(NOW,ZoneOffset.UTC));
+			assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.PERMANENT_FAILURE);
+			assertThat(sends).hasValue(0);
+			assertThat(database.sql("SELECT count(*) AS n FROM campaign_safety_links").map((r,m)->r.get("n",Long.class)).one().block()).isZero();
+			var snapshot=runtime.repository().get(CAMPAIGN,run.id()).block();
+			assertThat(snapshot.status()).isEqualTo("FAILED");assertThat(snapshot.permanentFailure()).isEqualTo(1);assertThat(snapshot.accepted()).isZero();
+			var attempt=snapshot.messages().getFirst().attempts().getFirst();
+			assertThat(attempt.status()).isEqualTo("PERMANENT_FAILURE");
+			assertThat(attempt.preparationDiagnostic().stage().name()).isEqualTo("BODY_PERSIST");
+			assertThat(attempt.preparationDiagnostic().exceptionType().name()).isEqualTo("PERSISTENCE");
+			assertThat(attempt.preparationDiagnosticExplanation()).isNull();
+			assertThat(output.getAll()).doesNotContain("synthetic-private-token");
+		} finally {database.sql("ALTER TABLE campaign_safety_messages DROP CONSTRAINT synthetic_safety_body_rejection").fetch().rowsUpdated().block();}
+	}
+
+	@Test void safetyRejectedLeaseAndDiagnosticSaveFailureDoNotCommitAndHistoryKeepsAllAttempts() {
+		insertRecipient("00000000-0000-0000-0000-000000000001","Synthetic history");
+		var runtime=safetyRuntime();var run=materialize(runtime,1,"synthetic-history");
+		var first=(CampaignDeliveryRepository.SafetyClaim)runtime.delivery().claimNext(NOW).block();
+		var temporary=new SmtpTransportException(SmtpTransportException.FailureCategory.SMTP_REJECTED,
+			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus.TEMPORARY_FAILURE,
+			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage.RCPT_TO,450,"temporary",true);
+		runtime.repository().completeFailure(first.messageId(),first.attemptId(),first.leaseDigest(),temporary,NOW,3,Duration.ofMinutes(1),Duration.ofMinutes(5)).block();
+		var second=(CampaignDeliveryRepository.SafetyClaim)runtime.delivery().claimNext(NOW.plusSeconds(61)).block();
+		var diagnostic=new com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic(
+			com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.PreparationStage.SOURCE_VALIDATION,
+			com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.SafeExceptionType.VALIDATION,
+			com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.PreparationErrorCode.PREP_SOURCE_VALIDATION_FAILED,UUID.randomUUID());
+		var failure=new SmtpTransportException(SmtpTransportException.FailureCategory.PREPARATION_FAILED,
+			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus.PERMANENT_FAILURE,
+			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage.MAIL_FROM,null,null,false);
+		assertThat(runtime.repository().completeFailure(second.messageId(),second.attemptId(),new byte[32],failure,NOW.plusSeconds(61),3,Duration.ofMinutes(1),Duration.ofMinutes(5),diagnostic).block().applied()).isFalse();
+		database.sql("ALTER TABLE campaign_preparation_diagnostics ADD CONSTRAINT synthetic_safety_diagnostic_rejection CHECK (safety_attempt_id IS NULL)").fetch().rowsUpdated().block();
+		try {
+			assertThatThrownBy(() -> runtime.repository().completeFailure(second.messageId(),second.attemptId(),second.leaseDigest(),failure,NOW.plusSeconds(61),3,Duration.ofMinutes(1),Duration.ofMinutes(5),diagnostic).block()).isInstanceOf(org.springframework.dao.DataAccessException.class);
+			assertThat(runtime.repository().get(CAMPAIGN,run.id()).block().messages().getFirst().status()).isEqualTo("CONNECTING");
+		} finally {database.sql("ALTER TABLE campaign_preparation_diagnostics DROP CONSTRAINT synthetic_safety_diagnostic_rejection").fetch().rowsUpdated().block();}
+		assertThat(runtime.repository().completeFailure(second.messageId(),second.attemptId(),second.leaseDigest(),failure,NOW.plusSeconds(61),3,Duration.ofMinutes(1),Duration.ofMinutes(5),diagnostic).block().applied()).isTrue();
+		var history=runtime.repository().get(CAMPAIGN,run.id()).block().messages().getFirst().attempts();
+		assertThat(history).extracting(CampaignSafetyRepository.AttemptSnapshot::attemptNumber).containsExactly(1,2);
+		assertThat(history.getFirst().preparationDiagnostic()).isNull();assertThat(history.getFirst().preparationDiagnosticExplanation()).isNull();
+		assertThat(history.getLast().preparationDiagnostic()).isEqualTo(diagnostic);
+		// An actual legacy preparation failure has no new diagnosis; only its read explanation changes.
+		database.sql("UPDATE campaign_safety_attempts SET failure_category='PREPARATION_FAILED' WHERE id=:id").bind("id",first.attemptId()).fetch().rowsUpdated().block();
+		var legacy=runtime.repository().get(CAMPAIGN,run.id()).block().messages().getFirst().attempts().getFirst();
+		assertThat(legacy.preparationDiagnostic()).isNull();assertThat(legacy.preparationDiagnosticExplanation()).isEqualTo("ROOT_CAUSE_UNKNOWN");
+		assertThatThrownBy(() -> history.clear()).isInstanceOf(UnsupportedOperationException.class);
+	}
+
 	private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17.5-alpine")
 			.withDatabaseName("campaign_safety_test").withUsername("camel").withPassword("camel-test-only");
 	private static final Instant NOW = Instant.parse("2030-04-05T10:15:30Z");
@@ -249,6 +308,7 @@ class CampaignSafetyIntegrationTest {
 				claim -> reactor.core.publisher.Mono.just(new CampaignSafetyOutboundPreparer.PreparedSafetyOutbound(
 						"fixed@example.test", claim.renderedSubject(), claim.renderedHtml(), claim.renderedText(), Map.of())),
 				contactCrypto, (account, message) -> {
+					assertThat(integer("SELECT count(*)::int FROM campaign_safety_attempts WHERE smtp_started_at IS NOT NULL")).isEqualTo(1);
 					sent.set(message);
 					return new SmtpTransport.SmtpOutcome(
 							com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus.SMTP_ACCEPTED,
@@ -1030,6 +1090,66 @@ class CampaignSafetyIntegrationTest {
 	}
 
 	@Test
+	void namedDestinationsKeepOldMessagesValidAndEachRunHasIsolatedDeliveryAndCallbacks() {
+		insertRecipient("00000000-0000-0000-0000-000000000073", "Three owner destinations");
+		database.sql("UPDATE campaigns SET tracking_opens_enabled = true WHERE id = '" + CAMPAIGN + "'")
+				.fetch().rowsUpdated().block();
+		Map<String, String> productionBefore = productionSnapshot();
+		SafetyRuntime original = safetyRuntime();
+		CampaignSafetyRepository.MaterializedRun oldRun = materialize(original, 1, "safety-default-before-expansion");
+		SafetyRuntime expanded = safetyRuntime(new CampaignSafetyProperties(true, "fixed@example.test", 20,
+				Map.of("qq", "owner@qq.com", "gmail", "owner@gmail.com")));
+		CampaignSafetySigner signer = new CampaignSafetySigner(SAFETY_KEY);
+		MailTrackingProperties tracking = new MailTrackingProperties(true, "https://tracking.example.test",
+				SAFETY_KEY, Duration.ofDays(30), Duration.ofMinutes(15));
+		CampaignSafetyTrackingService namespace = new CampaignSafetyTrackingService(
+				expanded.repository(), expanded.policy(), tracking, signer, new MailOpenClassifier(),
+				Clock.fixed(NOW, ZoneOffset.UTC), transactions);
+		List<SmtpTransport.OutboundMessage> sent = new ArrayList<>();
+		CampaignDeliveryExecutor executor = new CampaignDeliveryExecutor(
+				expanded.delivery(), claim -> reactor.core.publisher.Mono.error(
+						new AssertionError("production preparer must not run")), expanded.repository(), namespace,
+				mock(ContactCrypto.class), (account, message) -> {
+					sent.add(message);
+					return new SmtpTransport.SmtpOutcome(
+							com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus.SMTP_ACCEPTED,
+							com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage.POST_DATA,
+							250, "250 queued");
+				}, Clock.fixed(NOW, ZoneOffset.UTC));
+		CampaignSafetyService service = new CampaignSafetyService(
+				expanded.repository(), expanded.policy(), 20, Clock.fixed(NOW, ZoneOffset.UTC));
+		AuthenticationRequestContext request = new AuthenticationRequestContext(
+				"198.51.100.44", "Owner test fixture", "safety-multi-destination");
+		assertThatThrownBy(() -> service.start(CAMPAIGN, ACTOR, request,
+				new CampaignSafetyService.StartCommand(0, 1, "SAFETY_REDIRECT", "qq")).block())
+				.hasMessageContaining("active safety run");
+		assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.SMTP_ACCEPTED);
+		List<UUID> runs = new ArrayList<>(List.of(oldRun.id()));
+		for (String key : List.of("qq", "gmail")) {
+			CampaignSafetyService.SafetyRunView run = service.start(CAMPAIGN, ACTOR, request,
+					new CampaignSafetyService.StartCommand(0, 1, "SAFETY_REDIRECT", key)).block();
+			runs.add(run.id());
+			assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.SMTP_ACCEPTED);
+		}
+		assertThat(sent).extracting(SmtpTransport.OutboundMessage::recipient)
+				.containsExactly("fixed@example.test", "owner@qq.com", "owner@gmail.com");
+		assertThat(integer("SELECT count(DISTINCT rfc_message_id)::int FROM campaign_safety_messages"))
+				.isEqualTo(3);
+		for (int index = 0; index < sent.size(); index++) {
+			String open = callbackUrl(sent.get(index).html(), "t/o", "campaign-safety-open");
+			String unsubscribe = callbackUrl(sent.get(index).html(), "u", "campaign-safety-unsubscribe");
+			assertThat(namespace.observeOpen(open.substring(open.lastIndexOf('/') + 1),
+					HttpHeaders.EMPTY, request).block()).isTrue();
+			assertThat(namespace.unsubscribe(unsubscribe.substring(unsubscribe.lastIndexOf('/') + 1), request)
+					.block()).isTrue();
+			assertThat(service.get(CAMPAIGN, runs.get(index)).block().events())
+					.isEqualTo(new CampaignSafetyService.SafetyEventCounts(1, 0, 1, 0, 0, 0));
+		}
+		assertThat(integer("SELECT count(*)::int FROM campaign_safety_events")).isEqualTo(6);
+		assertThat(productionSnapshot()).isEqualTo(productionBefore);
+	}
+
+	@Test
 	void destinationDriftAfterPreparationIsRecheckedAtTheFinalSendBoundary() {
 		insertRecipient("00000000-0000-0000-0000-000000000072", "Final destination drift");
 		Map<String, String> productionBefore = productionSnapshot();
@@ -1677,8 +1797,11 @@ class CampaignSafetyIntegrationTest {
 	}
 
 	private SafetyRuntime safetyRuntime() {
+		return safetyRuntime(new CampaignSafetyProperties(true, "fixed@example.test", 20));
+	}
+
+	private SafetyRuntime safetyRuntime(CampaignSafetyProperties safety) {
 		CampaignSafetySigner signer = new CampaignSafetySigner(SAFETY_KEY);
-		CampaignSafetyProperties safety = new CampaignSafetyProperties(true, "fixed@example.test", 20);
 		MailTrackingProperties tracking = new MailTrackingProperties(
 				true, "https://tracking.example.test", SAFETY_KEY, Duration.ofDays(30), Duration.ofMinutes(15));
 		CampaignSafetyRuntimePolicy policy = new CampaignSafetyRuntimePolicy(

@@ -72,7 +72,7 @@ frontend/                Vue 3 + TypeScript strict 管理端
 infra/nginx/             单一生产入口与安全响应头
 infra/postgres/          PostgreSQL 初始化挂载点
 scripts/                 Compose 与镜像契约验证
-docs/                    架构、ERD、API、部署、运维与设计证据
+docs/                    架构、ERD、API、部署、运维与组件映射
 docker-compose.yml       生产形态基线
 docker-compose.dev.yml   仅开发环境的 Mailpit/MinIO 控制台入口
 ```
@@ -94,7 +94,7 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+当前版本须在隔离环境执行质量门；私有运行记录不随公开源码发布。
 
 ## 文档
 
@@ -111,7 +111,6 @@ Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 - [运维](docs/OPERATIONS.md)
 - [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)
 - [第三方与授权说明](docs/THIRD_PARTY_NOTICES.md)
-- [实施任务](TASKS.md)
 
 ## 安全边界
 

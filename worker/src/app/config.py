@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     max_include_depth: int = Field(default=16, ge=1, le=100)
     max_parse_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     temp_root: Path | None = None
+    source_invocation_lease_seconds: int = Field(default=120, gt=0, le=120)
+    source_invocation_renew_seconds: int = Field(default=30, gt=0, le=40)
+
+    @model_validator(mode="after")
+    def source_lease_has_renewal_margin(self) -> Settings:
+        if self.source_invocation_lease_seconds < 3 * self.source_invocation_renew_seconds:
+            raise ValueError("Source lease must cover at least three renewal intervals")
+        return self
 
     @property
     def maximum_poll_interval_ms(self) -> int:
@@ -71,6 +79,7 @@ class Settings(BaseSettings):
 
 class PersonalizationSettings(BaseSettings):
     model_config = SettingsConfigDict(
+        hide_input_in_errors=True,
         env_prefix="PERSONALIZATION_",
         env_file=".env",
         env_file_encoding="utf-8",
@@ -84,6 +93,8 @@ class PersonalizationSettings(BaseSettings):
     api_key: SecretStr | None = None
     api_base_url: str = "https://api.openai.com/v1"
     api_auth_scheme: Literal["x-api-key", "bearer"] = "x-api-key"
+    runtime_config_url: str | None = None
+    runtime_config_token: SecretStr | None = None
     request_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = "PLAINTEXT"
@@ -109,7 +120,26 @@ class PersonalizationSettings(BaseSettings):
 
     @model_validator(mode="after")
     def enabled_requires_key(self) -> PersonalizationSettings:
-        if self.enabled and (self.api_key is None or not self.api_key.get_secret_value().strip()):
+        token = self.runtime_config_token
+        if bool(self.runtime_config_url) != bool(token and token.get_secret_value().strip()):
+            raise ValueError("Runtime configuration URL and token must be configured together")
+        if self.runtime_config_url:
+            runtime = urlsplit(self.runtime_config_url)
+            if (
+                runtime.scheme not in {"http", "https"}
+                or not runtime.hostname
+                or runtime.username
+                or runtime.password
+                or runtime.query
+                or runtime.fragment
+                or runtime.path not in {"", "/"}
+            ):
+                raise ValueError("Runtime configuration URL must be a backend origin")
+        if (
+            self.enabled
+            and not self.runtime_config_url
+            and (self.api_key is None or not self.api_key.get_secret_value().strip())
+        ):
             raise ValueError("Enabled personalization requires PERSONALIZATION_API_KEY")
         if self.provider not in {"openai", "anthropic"}:
             raise ValueError("Personalization provider must be openai or anthropic")

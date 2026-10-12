@@ -70,6 +70,15 @@ public class ArxivResultRepository {
 	}
 
 	public Mono<Void> applyProgress(UUID jobId, ArxivResultMessage.Payload payload, String checkpointJson) {
+		return applyProgress(jobId, payload, checkpointJson, false);
+	}
+
+	public Mono<Void> applyMetadataProgress(UUID jobId, ArxivResultMessage.Payload payload, String checkpointJson) {
+		return applyProgress(jobId, payload, checkpointJson, true);
+	}
+
+	private Mono<Void> applyProgress(UUID jobId, ArxivResultMessage.Payload payload, String checkpointJson,
+			boolean exactCounts) {
 		return databaseClient.sql("""
 				UPDATE jobs SET
 				  status = CASE
@@ -78,18 +87,18 @@ public class ArxivResultRepository {
 				    ELSE status END,
 				  started_at = coalesce(started_at, now()), heartbeat_at = now(), last_message_at = now(),
 				  current_stage = :stage,
-				  processed_count = GREATEST(processed_count, :processed),
-				  success_count = GREATEST(success_count, :success),
-				  skipped_count = GREATEST(skipped_count, :skipped),
-				  failed_count = GREATEST(failed_count, :failed),
-				  total_count = GREATEST(total_count, :total),
-				  progress_percent = GREATEST(progress_percent, :progress),
+				  processed_count = CASE WHEN :exactCounts THEN :processed ELSE GREATEST(processed_count, :processed) END,
+				  success_count = CASE WHEN :exactCounts THEN :success ELSE GREATEST(success_count, :success) END,
+				  skipped_count = CASE WHEN :exactCounts THEN :skipped ELSE GREATEST(skipped_count, :skipped) END,
+				  failed_count = CASE WHEN :exactCounts THEN :failed ELSE GREATEST(failed_count, :failed) END,
+				  total_count = CASE WHEN :exactCounts THEN :total ELSE GREATEST(total_count, :total) END,
+				  progress_percent = CASE WHEN :exactCounts THEN :progress ELSE GREATEST(progress_percent, :progress) END,
 				  checkpoint = CASE WHEN CAST(:checkpoint AS jsonb) = '{}'::jsonb
 				                    THEN checkpoint ELSE CAST(:checkpoint AS jsonb) END,
 				  error_summary = coalesce(nullif(:errorSummary, ''), error_summary),
 				  updated_at = now(), version = version + 1
 				WHERE id = :jobId AND status NOT IN ('SUCCEEDED','PARTIALLY_SUCCEEDED','FAILED','CANCELED')
-				""").bind("requestedStatus", safeStatus(payload.status()))
+				""").bind("requestedStatus", safeStatus(payload.status())).bind("exactCounts", exactCounts)
 				.bind("stage", safeStage(payload.stage()))
 				.bind("processed", nonNegative(payload.processedCount()))
 				.bind("success", nonNegative(payload.successCount()))
@@ -130,7 +139,7 @@ public class ArxivResultRepository {
 				.fetch().rowsUpdated().map(rows -> rows == 1);
 	}
 
-	public Mono<Boolean> applySourceTerminalExact(
+	public Mono<Boolean> applyTerminalExact(
 			UUID jobId,
 			ArxivResultMessage.Payload payload
 	) {
@@ -319,6 +328,16 @@ public class ArxivResultRepository {
 						value(row.get("pending", Long.class)))).one();
 	}
 
+	public Mono<MetadataTotals> metadataTotals(UUID jobId) {
+		return databaseClient.sql("""
+				SELECT (SELECT count(*) FROM paper_imports WHERE job_id = j.id) AS persisted,
+				       j.skipped_count, j.failed_count, j.total_count
+				FROM jobs j WHERE j.id = :jobId
+				""").bind("jobId", jobId).map((row, metadata) -> new MetadataTotals(
+						value(row.get("persisted", Long.class)), value(row.get("skipped_count", Long.class)),
+						value(row.get("failed_count", Long.class)), value(row.get("total_count", Long.class)))).one();
+	}
+
 	public Mono<Void> upsertSyncCursor(UUID jobId, String checkpointJson) {
 		return databaseClient.sql("""
 				INSERT INTO arxiv_sync_cursors (
@@ -420,6 +439,9 @@ public class ArxivResultRepository {
 	}
 
 	public record JobRecord(UUID id, String type, String status) {
+	}
+
+	public record MetadataTotals(long persisted, long skipped, long failed, long total) {
 	}
 
 	public record ItemTotals(long total, long succeeded, long skipped, long failed, long pending) {

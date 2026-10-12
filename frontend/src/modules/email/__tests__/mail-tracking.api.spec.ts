@@ -27,6 +27,7 @@ const variables: TemplateSampleValues = {
   paper_url: 'https://example.invalid/paper',
   organization: 'Example Lab',
   unsubscribe_url: 'https://example.invalid/unsubscribe',
+  partner_claim_url: 'https://example.invalid/partner-activation-preview',
 }
 
 describe('mail tracking opt-in request bodies', () => {

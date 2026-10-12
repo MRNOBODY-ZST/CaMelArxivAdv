@@ -23,15 +23,21 @@ public final class CampaignPreflightService {
 	private final CampaignDeliveryProperties deliveryProperties;
 	private final MailTrackingProperties trackingProperties;
 	private final ObjectMapper objectMapper;
+	private final boolean partnerEnabled;
 
 	public CampaignPreflightService(
 			CampaignWorkflowRepository repository, CampaignDeliveryProperties deliveryProperties,
 			MailTrackingProperties trackingProperties, ObjectMapper objectMapper
 	) {
+		this(repository, deliveryProperties, trackingProperties, objectMapper, false);
+	}
+	public CampaignPreflightService(CampaignWorkflowRepository repository, CampaignDeliveryProperties deliveryProperties,
+			MailTrackingProperties trackingProperties, ObjectMapper objectMapper, boolean partnerEnabled) {
 		this.repository = repository;
 		this.deliveryProperties = deliveryProperties;
 		this.trackingProperties = trackingProperties;
 		this.objectMapper = objectMapper;
+		this.partnerEnabled = partnerEnabled;
 	}
 
 	public Mono<PreflightView> preflight(UUID campaignId) {
@@ -49,7 +55,7 @@ public final class CampaignPreflightService {
 		return new CampaignWorkflowRepository.ReadinessGuard(
 				Instant.now().minus(deliveryProperties.productionCooldown()),
 				view.checks().get("SENDER_VALID").passed(),
-				view.checks().get("TRACKING_READY").passed());
+				view.checks().get("TRACKING_READY").passed(), partnerEnabled);
 	}
 
 	private PreflightView view(CampaignWorkflowRepository.PreflightRecord record) {
@@ -67,6 +73,11 @@ public final class CampaignPreflightService {
 		boolean recipientsEligible = record.eligible() > 0;
 
 		Map<String, PreflightCheck> checks = new LinkedHashMap<>();
+		checks.put("TRANSFERRED", check(record.transferred() == 0,
+				record.transferred() + " historical recipient(s) were transferred to another campaign"));
+		checks.put("PARTNER_INVITE_READY", check(!record.partnerHeld() && (!record.partnerRequired() || partnerEnabled),
+				record.partnerHeld() ? "Partner invitation hold requires operator reconciliation"
+						: record.partnerRequired() && !partnerEnabled ? "Partner invitations are disabled" : "Partner invitation policy is ready"));
 		checks.put("CONTENT_READY", check(contentReady, record.contentReady() + " of " + record.total()
 				+ " recipients have complete generated content"));
 		checks.put("UNSUBSCRIBE_PRESENT", check(unsubscribePresent, record.unsubscribePresent() + " of "
@@ -84,6 +95,7 @@ public final class CampaignPreflightService {
 
 		Map<String, Long> counts = new LinkedHashMap<>();
 		counts.put("TOTAL", record.total());
+		counts.put("TRANSFERRED", record.transferred());
 		counts.put("ELIGIBLE", record.eligible());
 		counts.put("CONTENT_NOT_READY", record.total() - record.contentReady());
 		counts.put("UNSUBSCRIBE_MISSING", record.total() - record.unsubscribePresent());

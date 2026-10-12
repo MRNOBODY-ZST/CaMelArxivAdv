@@ -4,6 +4,10 @@ import com.camel_hub.advertisement.campaign.CampaignConflictException;
 import com.camel_hub.advertisement.campaign.CampaignNotFoundException;
 import com.camel_hub.advertisement.campaign.CampaignValidationException;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
+import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository;
+import com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic;
+import com.camel_hub.advertisement.campaign.delivery.PreparationDiagnosticRepository;
+import com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -11,10 +15,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.spi.Row;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
+import org.springframework.transaction.reactive.TransactionSynchronizationManager;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,6 +39,8 @@ public final class CampaignSafetyRepository {
 	private final TransactionalOperator transactions;
 	private final ObjectMapper objectMapper;
 	private final CampaignSafetyContentPolicy contentPolicy = new CampaignSafetyContentPolicy();
+	private final CampaignMigrationDeliveryFence migrationFence;
+	private final PreparationDiagnosticRepository diagnostics;
 
 	public CampaignSafetyRepository(
 			DatabaseClient database, TransactionalOperator transactions, ObjectMapper objectMapper
@@ -40,16 +48,28 @@ public final class CampaignSafetyRepository {
 		this.database = database;
 		this.transactions = transactions;
 		this.objectMapper = objectMapper;
+		this.migrationFence = new CampaignMigrationDeliveryFence(database);
+		this.diagnostics = new PreparationDiagnosticRepository(database);
 	}
 
 	public Mono<MaterializedRun> materialize(MaterializeCommand command) {
 		validateCommand(command);
-		Mono<MaterializedRun> work = lockCampaign(command.campaignId())
+		Mono<MaterializedRun> work = database.sql("SELECT id FROM campaigns WHERE id=:id").bind("id",command.campaignId())
+				.map((row,metadata)->row.get("id",UUID.class)).one()
 				.switchIfEmpty(Mono.error(new CampaignNotFoundException("Campaign was not found")))
-				.flatMap(campaign -> validateCampaign(campaign, command)
-						.then(validateCurrentExclusivity(command.campaignId()))
-						.then(loadDrafts(command.campaignId(), command.recipientLimit()).collectList())
-						.flatMap(drafts -> insertAggregate(campaign, drafts, command)));
+				.flatMap(ignored -> loadDrafts(command.campaignId(), command.recipientLimit()).collectList())
+				.flatMap(drafts -> {
+					if (drafts.isEmpty()) return Mono.error(new CampaignValidationException("Campaign has no immutable generated drafts"));
+					return migrationFence.lockSources(drafts.stream().map(d -> new CampaignMigrationDeliveryFence.Source(command.campaignId(),d.id(),d.emailHmac())).toList())
+						.flatMap(receipt -> loadDrafts(command.campaignId(),command.recipientLimit()).collectList()
+							.filter(drafts::equals)
+							.flatMap(current -> lockCampaignSafety(command.campaignId()).then(migrationFence.verifyLocked(receipt,true)))
+							.filter(Boolean::booleanValue)
+							.flatMap(allowed -> lockCampaign(command.campaignId()))
+							.flatMap(campaign -> validateCampaign(campaign,command).then(validateCurrentExclusivity(command.campaignId()))
+								.then(insertAggregate(campaign,drafts,command))))
+						.switchIfEmpty(Mono.error(new CampaignConflictException("Campaign safety source changed; refresh and retry")));
+				});
 		return work.as(transactions::transactional);
 	}
 
@@ -138,6 +158,14 @@ public final class CampaignSafetyRepository {
 			SmtpTransportException failure, Instant now, int maximumAttempts,
 			java.time.Duration firstRetryDelay, java.time.Duration secondRetryDelay
 	) {
+		return completeFailure(messageId, attemptId, lease, failure, now, maximumAttempts, firstRetryDelay, secondRetryDelay, null);
+	}
+
+	public Mono<SafetyFailureSettlement> completeFailure(
+			UUID messageId, UUID attemptId, byte[] lease, SmtpTransportException failure,
+			Instant now, int maximumAttempts, java.time.Duration firstRetryDelay,
+			java.time.Duration secondRetryDelay, PreparationDiagnostic diagnostic
+	) {
 		byte[] digest = digestLease(lease);
 		Mono<SafetyFailureSettlement> work = lookupRun(messageId)
 				.flatMap(runId -> lockRun(runId)
@@ -145,6 +173,9 @@ public final class CampaignSafetyRepository {
 								.flatMap(message -> lockAttempt(attemptId, messageId)
 										.then(settleFailure(run, message, attemptId, failure, now,
 												maximumAttempts, firstRetryDelay, secondRetryDelay))
+										.flatMap(settlement -> settlement.applied() && diagnostic != null
+												? diagnostics.record(attemptId, "SAFETY", diagnostic).thenReturn(settlement)
+												: Mono.just(settlement))
 										.flatMap(settlement -> aggregate(run.id(), now).thenReturn(settlement)))))
 				.defaultIfEmpty(new SafetyFailureSettlement(false, null));
 		return work.as(transactions::transactional);
@@ -241,11 +272,14 @@ public final class CampaignSafetyRepository {
 			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository.SafetyClaim claim,
 			byte[] leaseHash, Instant now
 	) {
+		return lockSafetyFlow(claim).flatMap(flow -> readPreparation(claim,leaseHash,now));
+	}
+
+	private Mono<PreparationState> readPreparation(CampaignDeliveryRepository.SafetyClaim claim, byte[] leaseHash, Instant now) {
 		return database.sql("""
 				SELECT id, destination_hmac, tracking_opens_enabled, tracking_clicks_enabled
 				FROM campaign_safety_runs
 				WHERE id = :run AND status IN ('QUEUED','RUNNING')
-				FOR UPDATE
 				""").bind("run", claim.runId()).map((row, metadata) -> new PreparationRun(
 				row.get("id", UUID.class), copy(row.get("destination_hmac", byte[].class)),
 				Boolean.TRUE.equals(row.get("tracking_opens_enabled", Boolean.class)),
@@ -262,14 +296,16 @@ public final class CampaignSafetyRepository {
 						  ON current_attempt.id = :attempt AND current_attempt.safety_message_id = m.id
 						 AND current_attempt.attempt_number = m.attempt_count
 						 AND current_attempt.status = 'CONNECTING'
+						 AND current_attempt.smtp_started_at IS NULL
 						LEFT JOIN campaign_safety_attempts previous
 						  ON previous.safety_message_id = m.id
 						 AND previous.attempt_number = m.attempt_count - 1
 						WHERE m.id = :message AND m.run_id = :run AND m.status = 'CONNECTING'
+						  AND m.campaign_recipient_id = :recipient
 						  AND m.attempt_count = :attemptNumber AND m.delivery_lease_hash = :lease
 						  AND m.delivery_lease_expires_at > :now
-						FOR UPDATE OF m, current_attempt
 						""").bind("attempt", claim.attemptId()).bind("message", claim.messageId()).bind("run", claim.runId())
+						.bind("recipient", claim.campaignRecipientId())
 						.bind("attemptNumber", claim.attemptNumber()).bind("lease", leaseHash).bind("now", now)
 						.map((row, metadata) -> new PreparationState(
 								row.get("id", UUID.class), row.get("run_id", UUID.class),
@@ -282,6 +318,79 @@ public final class CampaignSafetyRepository {
 								row.get("previous_response_code", Integer.class),
 								row.get("previous_failure_category", String.class)))
 						.one());
+	}
+
+	private record SafetyFlowKey(CampaignSafetyRepository repository, UUID message, UUID attempt) { }
+	private record SafetyFlow(CampaignMigrationDeliveryFence.Source source, CampaignMigrationDeliveryFence.LockedSources receipt) { }
+
+	private Mono<CampaignMigrationDeliveryFence.Source> safetySource(CampaignDeliveryRepository.SafetyClaim claim) {
+		return database.sql("""
+			SELECT r.campaign_id,r.id,encode(r.email_hmac,'hex') AS hmac
+			FROM campaign_safety_messages m JOIN campaign_safety_runs sr ON sr.id=m.run_id
+			JOIN campaign_recipients r ON r.id=m.campaign_recipient_id AND r.campaign_id=sr.campaign_id
+			WHERE m.id=:message AND m.run_id=:run AND r.id=:recipient
+			 AND sr.smtp_account_id=:smtp AND m.smtp_account_id=sr.smtp_account_id
+			 AND sr.destination_hmac=:destination AND sr.destination_masked=:masked
+			 AND sr.from_name_snapshot=:fromName AND sr.from_email_snapshot=:fromEmail AND sr.reply_to_snapshot=:replyTo
+			 AND sr.tracking_opens_enabled=:opens AND sr.tracking_clicks_enabled=:clicks
+			 AND m.rfc_message_id=:rfc
+			""").bind("message",claim.messageId()).bind("run",claim.runId()).bind("recipient",claim.campaignRecipientId())
+			.bind("smtp",claim.smtpAccount().id()).bind("destination",claim.destinationHmac()).bind("masked",claim.destinationMasked())
+			.bind("fromName",claim.fromName()).bind("fromEmail",claim.fromEmail()).bind("replyTo",claim.replyTo())
+			.bind("opens",claim.trackingOpensEnabled()).bind("clicks",claim.trackingClicksEnabled()).bind("rfc",claim.rfcMessageId())
+			.map((r,m)->new CampaignMigrationDeliveryFence.Source(r.get("campaign_id",UUID.class),r.get("id",UUID.class),r.get("hmac",String.class))).one();
+	}
+
+	private Mono<SafetyFlow> lockSafetyFlow(CampaignDeliveryRepository.SafetyClaim claim) {
+		return TransactionSynchronizationManager.forCurrentTransaction().flatMap(manager -> {
+			var key=new SafetyFlowKey(this,claim.messageId(),claim.attemptId());
+			SafetyFlow existing=(SafetyFlow)manager.getResource(key);
+			Mono<SafetyFlow> acquired=existing!=null ? Mono.just(existing) : safetySource(claim).flatMap(source ->
+				migrationFence.lockSources(List.of(source)).flatMap(receipt ->
+					database.sql("SELECT id FROM campaign_safety_runs WHERE id=:id FOR UPDATE").bind("id",claim.runId()).fetch().all().then()
+					.then(database.sql("SELECT id FROM campaign_safety_messages WHERE id=:id FOR UPDATE").bind("id",claim.messageId()).fetch().all().then())
+					.then(database.sql("SELECT id FROM campaign_safety_attempts WHERE id=:id FOR UPDATE").bind("id",claim.attemptId()).fetch().all().then())
+					.thenReturn(new SafetyFlow(source,receipt))).doOnNext(flow -> manager.bindResource(key,flow)));
+			return acquired.flatMap(flow -> safetySource(claim).filter(flow.source()::equals)
+				.flatMap(source -> migrationFence.verifyLocked(flow.receipt(),true,List.of(claim.smtpAccount().id())))
+				.filter(Boolean::booleanValue).flatMap(allowed -> senderReady(claim)).filter(Boolean::booleanValue).map(allowed -> flow));
+		});
+	}
+
+	private Mono<Boolean> senderReady(CampaignDeliveryRepository.SafetyClaim claim) {
+		return database.sql("""
+			SELECT id FROM smtp_accounts WHERE id=:id AND enabled AND last_test_status='SUCCEEDED'
+			 AND last_tested_at IS NOT NULL AND last_tested_at>=updated_at
+			 AND lock_version=:version AND updated_at=:updated
+			""").bind("id",claim.smtpAccount().id()).bind("version",claim.smtpAccount().lockVersion())
+			.bind("updated",claim.smtpAccount().updatedAt()).map((r,m)->true).one().defaultIfEmpty(false);
+	}
+
+	/** Short transaction must finish before transport. Time is read only after all lock waits. */
+	public Mono<Boolean> beginSafetySmtp(CampaignDeliveryRepository.SafetyClaim claim, Clock clock) {
+		if (claim.renderedSubject()==null || claim.renderedHtml()==null || claim.renderedText()==null) return Mono.just(false);
+		byte[] leaseHash=digestLease(claim.leaseDigest());
+		return lockSafetyFlow(claim).flatMap(flow -> Mono.defer(() -> readPreparation(claim,leaseHash,clock.instant())))
+			.flatMap(state -> Mono.defer(() -> database.sql("""
+				UPDATE campaign_safety_attempts a SET smtp_started_at=:now
+				WHERE a.id=:attempt AND a.safety_message_id=:message AND a.attempt_number=:number
+				 AND a.status='CONNECTING' AND a.smtp_started_at IS NULL
+				 AND EXISTS (SELECT 1 FROM campaign_safety_messages m JOIN campaign_safety_runs sr ON sr.id=m.run_id
+				   WHERE m.id=a.safety_message_id AND m.run_id=:run AND m.campaign_recipient_id=:recipient
+				     AND m.attempt_count=a.attempt_number AND m.status='CONNECTING'
+				     AND m.rendered_subject=:subject AND m.rendered_html=:html AND m.rendered_text=:text
+				     AND m.delivery_lease_hash=:lease AND m.delivery_lease_expires_at>:now AND sr.status IN ('QUEUED','RUNNING'))
+				""").bind("now",clock.instant()).bind("attempt",claim.attemptId()).bind("message",claim.messageId())
+				.bind("number",claim.attemptNumber()).bind("run",claim.runId()).bind("recipient",claim.campaignRecipientId())
+				.bind("subject",claim.renderedSubject()).bind("html",claim.renderedHtml()).bind("text",claim.renderedText())
+				.bind("lease",leaseHash).fetch().rowsUpdated().map(rows -> rows.longValue()==1)))
+			.defaultIfEmpty(false).as(transactions::transactional);
+	}
+
+	private Mono<Void> lockCampaignSafety(UUID campaign) {
+		return database.sql("SELECT id FROM campaign_safety_runs WHERE campaign_id=:campaign ORDER BY id FOR UPDATE").bind("campaign",campaign).fetch().all().then()
+			.then(database.sql("SELECT m.id FROM campaign_safety_messages m JOIN campaign_safety_runs r ON r.id=m.run_id WHERE r.campaign_id=:campaign ORDER BY m.id FOR UPDATE OF m").bind("campaign",campaign).fetch().all().then())
+			.then(database.sql("SELECT a.id FROM campaign_safety_attempts a JOIN campaign_safety_messages m ON m.id=a.safety_message_id JOIN campaign_safety_runs r ON r.id=m.run_id WHERE r.campaign_id=:campaign ORDER BY a.id FOR UPDATE OF a").bind("campaign",campaign).fetch().all().then());
 	}
 
 	public Mono<Void> insertLink(
@@ -337,7 +446,9 @@ public final class CampaignSafetyRepository {
 			com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository.SafetyClaim claim,
 			byte[] leaseHash, String subject, String html, String text, Instant now
 	) {
-		return database.sql("""
+		return lockPreparation(claim,leaseHash,now)
+			.switchIfEmpty(Mono.error(new IllegalStateException("Campaign safety preparation lease is no longer active")))
+			.flatMap(state -> database.sql("""
 				UPDATE campaign_safety_messages m
 				SET rendered_subject = :subject, rendered_html = :html, rendered_text = :text
 				WHERE m.id = :message AND m.run_id = :run AND m.status = 'CONNECTING'
@@ -346,7 +457,7 @@ public final class CampaignSafetyRepository {
 				              WHERE sr.id = m.run_id AND sr.status IN ('QUEUED','RUNNING'))
 				""").bind("subject", subject).bind("html", html).bind("text", text)
 				.bind("message", claim.messageId()).bind("run", claim.runId()).bind("lease", leaseHash)
-				.bind("now", now).fetch().rowsUpdated()
+				.bind("now", now).fetch().rowsUpdated())
 				.flatMap(updated -> updated.longValue() == 1L ? Mono.empty()
 						: Mono.error(new IllegalStateException("Campaign safety preparation lease is no longer active")));
 	}
@@ -543,7 +654,6 @@ public final class CampaignSafetyRepository {
 				SELECT id, smtp_account_id
 				FROM campaigns
 				WHERE id = :campaign
-				FOR UPDATE
 				""").bind("campaign", campaignId)
 				.map((row, metadata) -> new CampaignLock(
 						row.get("id", UUID.class), row.get("smtp_account_id", UUID.class)))
@@ -593,7 +703,22 @@ public final class CampaignSafetyRepository {
 				row.get("id", UUID.class), row.get("campaign_recipient_id", UUID.class),
 				row.get("status", String.class), requiredInt(row, "attempt_count"),
 				row.get("smtp_accepted_at", Instant.class), row.get("outcome_unknown_at", Instant.class),
-				row.get("outcome_unknown_reason", String.class))).all().collectList()
+				row.get("outcome_unknown_reason", String.class))).all()
+				.concatMap(message -> database.sql("""
+						SELECT a.id, a.attempt_number, a.status, a.failure_category,
+						       d.stage AS preparation_stage, d.exception_type AS preparation_exception_type,
+						       d.error_code AS preparation_error_code, d.trace_ref AS preparation_trace_ref
+						FROM campaign_safety_attempts a
+						LEFT JOIN campaign_preparation_diagnostics d ON d.safety_attempt_id=a.id
+						WHERE a.safety_message_id=:message ORDER BY a.attempt_number,a.id
+						""").bind("message", message.id()).map((row, metadata) -> {
+							var diagnostic = PreparationDiagnosticRepository.read(row);
+							return new AttemptSnapshot(row.get("id", UUID.class), requiredInt(row,"attempt_number"),
+									row.get("status", String.class), diagnostic,
+									PreparationDiagnostic.explanation(row.get("status", String.class), row.get("failure_category", String.class), diagnostic));
+						}).all().collectList().map(attempts -> new MessageSnapshot(message.id(), message.campaignRecipientId(),
+								message.status(), message.attemptCount(), message.smtpAcceptedAt(), message.outcomeUnknownAt(),
+								message.outcomeUnknownReason(), attempts))).collectList()
 				.map(messages -> run.withMessages(messages));
 	}
 
@@ -660,7 +785,7 @@ public final class CampaignSafetyRepository {
 
 	private Flux<SourceDraft> loadDrafts(UUID campaignId, int limit) {
 		return database.sql("""
-				SELECT r.id, r.rendered_subject, r.rendered_html, r.rendered_text
+				SELECT r.id, encode(r.email_hmac,'hex') AS hmac, r.rendered_subject, r.rendered_html, r.rendered_text
 				FROM campaign_recipients r
 				WHERE r.campaign_id = :campaign
 				  AND r.status IN ('QUEUED','TEMPORARY_FAILURE')
@@ -672,11 +797,10 @@ public final class CampaignSafetyRepository {
 				  AND NOT EXISTS (SELECT 1 FROM tracking_tokens token
 				                  WHERE token.campaign_recipient_id = r.id)
 				ORDER BY r.id
-				FOR UPDATE OF r
 				LIMIT :limit
 				""").bind("campaign", campaignId).bind("limit", limit)
 				.map((row, metadata) -> new SourceDraft(
-						row.get("id", UUID.class), row.get("rendered_subject", String.class),
+						row.get("id", UUID.class), row.get("hmac",String.class), row.get("rendered_subject", String.class),
 						row.get("rendered_html", String.class), row.get("rendered_text", String.class)))
 				.all();
 	}
@@ -845,7 +969,7 @@ public final class CampaignSafetyRepository {
 	) { }
 	private record CampaignLock(UUID id, UUID smtpAccountId) { }
 
-	private record SourceDraft(UUID id, String subject, String html, String text) { }
+	private record SourceDraft(UUID id, String emailHmac, String subject, String html, String text) { }
 	private record ExclusiveState(boolean activeRun, boolean productionConnecting) { }
 	private record LockedRun(UUID id, String status, long lockVersion) { }
 
@@ -900,8 +1024,18 @@ public final class CampaignSafetyRepository {
 
 	public record MessageSnapshot(
 			UUID id, UUID campaignRecipientId, String status, int attemptCount,
-			Instant smtpAcceptedAt, Instant outcomeUnknownAt, String outcomeUnknownReason
-	) { }
+			Instant smtpAcceptedAt, Instant outcomeUnknownAt, String outcomeUnknownReason,
+			List<AttemptSnapshot> attempts
+	) {
+		public MessageSnapshot { attempts = List.copyOf(attempts); }
+		public MessageSnapshot(UUID id, UUID campaignRecipientId, String status, int attemptCount,
+				Instant smtpAcceptedAt, Instant outcomeUnknownAt, String outcomeUnknownReason) {
+			this(id, campaignRecipientId, status, attemptCount, smtpAcceptedAt, outcomeUnknownAt, outcomeUnknownReason, List.of());
+		}
+	}
+
+	public record AttemptSnapshot(UUID id, int attemptNumber, String status,
+			PreparationDiagnostic preparationDiagnostic, String preparationDiagnosticExplanation) { }
 
 	public record SafetyFailureSettlement(boolean applied, String messageStatus) { }
 
