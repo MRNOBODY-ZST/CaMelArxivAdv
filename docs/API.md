@@ -1,5 +1,11 @@
 # API 约定
 
+## 模板迁移与准备诊断
+
+`/api/v1/campaigns/{campaignId}/template-migrations` 的 `POST /preview` 和 `POST` 同时要求 `campaign:read`、`campaign:create`；`GET /by-key?key=…` 与 `GET /{migrationId}` 要求读取权限及原 Actor 范围。请求严格拒绝未知/重复字段、重复收件人及超限集合；预检提交精确 recipientIds、目标模板/不可变版本，提交另带双方 expected lock version、服务端 membership digest、原 idempotencyKey。单来源最多 120 位；不接受客户端数量代替名单。
+
+结果 `MIGRATED/CONFIG_UPDATED/NO_MAIL/BLOCKED` 不代表发送、批准或排期。未知结果只读回原键，不刷新令牌重放 POST。前端跨页选择和持久恢复详情见[迁移 runbook](operations/template-migration-runbook.md)。准备诊断只公开受限分类/固定码/trace reference；缺少历史诊断保持 `ROOT_CAUSE_UNKNOWN`，不提供原异常或隐私正文。
+
 ## 基础约定
 
 - 前缀：`/api/v1`

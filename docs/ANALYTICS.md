@@ -1,5 +1,9 @@
 # 数据统计口径与看板
 
+## 迁移与历史归属
+
+活动选择元数据分别表示 historicalSelected、actionableQueued、transferred、migrationBlocked；迁移仅转移行动所有权，不把旧排队、attempt、试发或回传改写成目标发送。来源/目标及 bulk child 的历史分母必须分别保留，不能把已转移数量重复加到投递成功。SMTP 接受、退信、未知结果与人工阅读证据不可混为一项。未来准备诊断可解释受限失败阶段；旧无诊断为 ROOT_CAUSE_UNKNOWN，不能据此猜测历史根因或重放历史。
+
 ## 事实源与日期队列
 
 Phase 5 的事实源是 PostgreSQL 业务表，不使用前端模拟值。所有采集、论文和联系人看板先形成同一个论文队列：

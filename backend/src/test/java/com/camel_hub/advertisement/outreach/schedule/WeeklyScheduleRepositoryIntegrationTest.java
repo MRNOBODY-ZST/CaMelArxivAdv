@@ -3,6 +3,7 @@ import io.r2dbc.spi.*;
 import io.r2dbc.pool.*;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.*;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -23,15 +24,19 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.assertj.core.api.Assertions.*;
 @Timeout(30)
 class WeeklyScheduleRepositoryIntegrationTest {
-    private static boolean migrated;
+    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17.5-alpine");
+    private static final String schema="weekly_fixture_"+UUID.randomUUID().toString().replace("-","");
+    @BeforeAll static void database(){
+        POSTGRES.start();
+        Flyway.configure().dataSource(POSTGRES.getJdbcUrl(),POSTGRES.getUsername(),POSTGRES.getPassword())
+                .schemas(schema).defaultSchema(schema).locations("classpath:db/migration").load().migrate();
+    }
+    @AfterAll static void stopDatabase(){if(POSTGRES.isRunning())POSTGRES.stop();}
     private DatabaseClient db;private ConnectionPool pool;private TransactionalOperator tx;private WeeklyScheduleRepository repo;
     private final UUID actor=UUID.randomUUID(),smtp=UUID.randomUUID(),template=UUID.randomUUID(),schedule=UUID.randomUUID();
     private final Instant now=Instant.parse("2026-10-12T01:00:00Z");
     @BeforeEach void setup(){
-        String jdbc=System.getenv("OUTREACH_TEST_JDBC_URL");Assumptions.assumeTrue(jdbc!=null,"Disposable weekly PostgreSQL harness required");
-        String user=System.getenv().getOrDefault("OUTREACH_TEST_DB_USERNAME","outreach_test"),pass=System.getenv().getOrDefault("OUTREACH_TEST_DB_PASSWORD","outreach_test_only");
-        String schema="outreach_weekly_review_20261011";
-        if(!migrated){Flyway.configure().dataSource(jdbc+(jdbc.contains("?")?"&":"?")+"connectTimeout=5&socketTimeout=20",user,pass).schemas(schema).defaultSchema(schema).locations("classpath:db/migration").load().migrate();migrated=true;}
+        String jdbc=POSTGRES.getJdbcUrl(),user=POSTGRES.getUsername(),pass=POSTGRES.getPassword();
         var factory=ConnectionFactories.get(ConnectionFactoryOptions.parse(jdbc.replace("jdbc:","r2dbc:")).mutate().option(ConnectionFactoryOptions.USER,user).option(ConnectionFactoryOptions.PASSWORD,pass).option(Option.valueOf("schema"),schema).build());
         pool=new ConnectionPool(ConnectionPoolConfiguration.builder(factory).initialSize(1).maxSize(5).build());db=DatabaseClient.create(pool);tx=TransactionalOperator.create(new R2dbcTransactionManager(pool));repo=new WeeklyScheduleRepository(db);
         db.sql("TRUNCATE outreach_schedules,users,smtp_accounts,email_templates CASCADE").fetch().rowsUpdated().block();

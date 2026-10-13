@@ -383,6 +383,17 @@ def inspect_publication(base: str, tree: Path, inventory: Path, source_head: str
                         and (source_entry["sha256"], source_entry["mode"])
                         != (candidate_entry.get("worktree_sha256", candidate_entry["sha256"]), candidate_entry["mode"]))):
                 add("<inventory>", "COVERAGE")
+        history_paths = manifest.get("history_tree_paths", {})
+        if not isinstance(history_paths, dict):
+            raise ScanError()
+        required_history = ANCHORS | {name for name, entry in manifest["source"]["paths"].items()
+                                      if entry["decision"] in ("include", "transform")}
+        for oid, paths in history_paths.items():
+            if (not isinstance(oid, str) or not OID.fullmatch(oid)
+                    or not isinstance(paths, list) or not all(_normal_path(p) for p in paths)
+                    or len(paths) != len(set(paths)) or not required_history <= set(paths) <= safe
+                    or any(not any(re.fullmatch(pattern, p) for p in paths) for pattern in CATEGORIES)):
+                raise ScanError()
         source_snapshots = []
         protected_paths = safe | set(manifest["source"]["paths"])
         for key in ("source", "original"):
@@ -414,13 +425,16 @@ def inspect_publication(base: str, tree: Path, inventory: Path, source_head: str
         private = set(_text(tree, "rev-list", source_head, "^" + base).splitlines())
         chain = _text(tree, "rev-list", "--parents", head, "^" + base).splitlines()
         cursor = head
+        seen_trees = set()
         for line in chain:
             ids = line.split()
             if len(ids) != 2 or ids[0] != cursor or ids[0] in private:
                 add("<repository>", "LINEAGE")
             cursor = ids[1] if len(ids) == 2 else ""
+            tree_oid = _text(tree, "rev-parse", ids[0] + "^{tree}")
+            seen_trees.add(tree_oid)
             historical_tree = _commit_tree(tree, ids[0])
-            if set(historical_tree) != safe:
+            if set(historical_tree) != set(history_paths.get(tree_oid, safe)):
                 add("<repository>", "HISTORY_COVERAGE")
             for name, (mode, data) in historical_tree.items():
                 entry = files.get(name)
@@ -435,6 +449,8 @@ def inspect_publication(base: str, tree: Path, inventory: Path, source_head: str
                     add(name, "HISTORY_PATH")
                 for found in _scan_blob(name, mode, data, entry):
                     add(name, found)
+        if not set(history_paths) <= seen_trees:
+            add("<inventory>", "HISTORY_COVERAGE")
         if cursor != base:
             add("<repository>", "LINEAGE")
         # Re-read identities and bytes, not just mtimes, after all history is inspected.

@@ -1,6 +1,8 @@
 # 数据模型与 ERD
 
-Flyway 从空库按十三个不可变迁移建立 54 张 public 表及 1 个物化视图。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+Flyway 从空库顺序执行 `backend/src/main/resources/db/migration` 中的不可变迁移；下表保留早期 V1–V13 摘要，当前协议还包含下述 V29–V34 扩展。所有时间使用 UTC/timestamptz；业务主键使用 UUID，批处理明细使用适合顺序扫描的 bigint；软删除表以 `deleted_at` 过滤。
+
+V29 起的 `campaign_template_migrations` 以 Actor+原键唯一绑定请求及 membership digest，`campaign_recipient_transfers` 以复合外键保留来源/目标 recipient 所有权且不级联删除历史；后续迁移补充来源及内容证明。V32 `source_command_authorities` / `source_command_issues` 保存 durable command identity、序列、已消费 issue 与确认前缀。V33 保存 prepared-content proofs。V34 `campaign_preparation_diagnostics` 恰关联一个正式或安全 attempt，各 FK 唯一且无 cascade，旧 attempt 可无诊断。新增记录不重写历史发送状态。
 
 ## 领域关系概览
 

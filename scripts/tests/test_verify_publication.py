@@ -459,6 +459,93 @@ class PublicationTest(unittest.TestCase):
         self.git("add", "frontend/package-lock.json")
         self.assertIn("HISTORY_COVERAGE", self.rules())
 
+    def reviewed_addition(self):
+        self.git("commit", "--allow-empty", "-qm", "complete reviewed first tree")
+        reviewed_tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        reviewed_paths = sorted(self.files)
+        self.write("docs/reviewed-addition.md", "new independently reviewed documentation\n")
+        self.refresh()
+        self.manifest["history_tree_paths"] = {reviewed_tree: reviewed_paths}
+        self.save()
+        self.git("add", "docs/reviewed-addition.md")
+        return reviewed_tree, reviewed_paths
+
+    def test_exactReviewedHistoricalTreeAllowsLaterAddition(self):
+        self.reviewed_addition()
+        self.assertEqual([], self.inspect())
+        self.commit("reviewed addition after complete curated tree")
+        self.assertEqual([], self.inspect())
+
+    def test_historyTreeMapCannotRelaxCurrentOrDefaultCoverage(self):
+        tree, paths = self.reviewed_addition()
+        self.manifest.pop("history_tree_paths")
+        self.save()
+        self.assertIn("HISTORY_COVERAGE", self.rules())
+        self.manifest["history_tree_paths"] = {tree: paths}
+        self.save()
+        self.git("reset", "-q", "HEAD", "--", "docs/reviewed-addition.md")
+        self.assertIn("INDEX_MISMATCH", self.rules())
+
+    def test_historyTreeMapRejectsMalformedUnknownDuplicateAndMissingPaths(self):
+        tree, paths = self.reviewed_addition()
+        invalid = [None, [], {"invalid": paths}, {"0" * 40: paths}, {tree: "README.md"},
+                   {tree: paths + [paths[0]]}, {tree: paths + ["unreviewed.txt"]},
+                   {tree: paths + ["../escape"]}, {tree: []},
+                   {tree: [p for p in paths if p != "README.md"]},
+                   {tree: [p for p in paths if p != "backend/src/main/java/Synthetic.java"]}]
+        for value in invalid:
+            with self.subTest(value_type=type(value).__name__):
+                self.manifest["history_tree_paths"] = value
+                self.save()
+                self.assertTrue(self.inspect())
+
+    def test_historyTreeMapStillRequiresExactActualPathset(self):
+        tree, paths = self.reviewed_addition()
+        self.manifest["history_tree_paths"][tree] = sorted(self.files)
+        self.save()
+        self.assertIn("HISTORY_COVERAGE", self.rules())
+
+    def test_historyTreeMapCannotApproveUnknownIntermediateTree(self):
+        tree, paths = self.reviewed_addition()
+        self.commit("intermediate addition")
+        self.write("docs/second-addition.md", "another reviewed addition\n")
+        self.refresh()
+        self.manifest["history_tree_paths"] = {tree: paths}
+        self.save()
+        self.git("add", "docs/second-addition.md")
+        self.assertIn("HISTORY_COVERAGE", self.rules())
+
+    def test_historyTreeMapDoesNotApproveOldBytesModeOrException(self):
+        tree, paths = self.reviewed_addition()
+        self.write("README.md", "unreviewed@example.invalid")
+        self.git("add", "README.md")
+        self.git("update-index", "--chmod=+x", "README.md")
+        self.commit("unreviewed historical byte and mode")
+        unknown_tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.write("README.md", "synthetic fixture\n")
+        self.git("add", "README.md")
+        self.git("update-index", "--chmod=-x", "README.md")
+        self.manifest["history_tree_paths"][unknown_tree] = sorted(self.files)
+        self.save()
+        self.assertTrue({"HISTORY_UNREVIEWED", "EMAIL"} <= self.rules())
+
+    def test_historyTreeMapCannotAuthorizePrivateAncestor(self):
+        self.reviewed_addition()
+        self.commit("reviewed addition")
+        self.git("merge", "--no-ff", "--no-commit", "private")
+        self.git("rm", "-q", "-f", "private-note.md")
+        self.commit("clean tree with private ancestor")
+        self.assertIn("LINEAGE", self.rules())
+
+    def test_historyTreeMapDuplicateJsonKeyRejected(self):
+        tree, paths = self.reviewed_addition()
+        marker = json.dumps(tree) + ": " + json.dumps(paths)
+        raw = self.inventory.read_text()
+        self.assertIn(marker, raw)
+        self.inventory.write_text(raw.replace(marker, marker + ", " + marker))
+        self.pin = digest(self.inventory.read_bytes())
+        self.assertTrue(self.inspect())
+
     def test_graphMutationDuringScanRejected(self):
         original = self.module._scan_blob
         changed = False

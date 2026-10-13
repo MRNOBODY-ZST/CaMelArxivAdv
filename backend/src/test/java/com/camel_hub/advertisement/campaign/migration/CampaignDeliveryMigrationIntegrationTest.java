@@ -56,6 +56,13 @@ class CampaignDeliveryMigrationIntegrationTest {
         return tracking(Clock.systemUTC(), Duration.ofDays(30));
     }
 
+    private void assertClaimValidationFailure(Throwable failure) {
+        assertThat(failure).isInstanceOf(PreparationDiagnostic.PreparationFailure.class)
+                .hasMessage("PREP_CLAIM_VALIDATION_FAILED").hasNoCause();
+        assertThat(PreparationDiagnostic.diagnostic(failure).stage()).isEqualTo(PreparationDiagnostic.PreparationStage.CLAIM_VALIDATION);
+        assertThat(PreparationDiagnostic.original(failure)).isInstanceOf(IllegalStateException.class);
+    }
+
     CampaignTrackingService tracking(Clock clock, Duration ttl) {
         String key = Base64.getEncoder().encodeToString(new byte[32]);
         return new CampaignTrackingService(new CampaignTrackingRepository(f.db),
@@ -74,7 +81,7 @@ class CampaignDeliveryMigrationIntegrationTest {
         f.sql("UPDATE campaign_recipients SET "+column+"='Altered ordinary text '||"+column+" WHERE id='"+claim.recipientId()+"'");
         assertThat(repository.productionEligible(claim,Clock.systemUTC()).block()).isFalse();
         assertThat(repository.beginSmtp(claim,Clock.systemUTC()).block()).isFalse();
-        assertThatThrownBy(()->tracking().prepare(claim).block()).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(()->tracking().prepare(claim).block()).satisfies(this::assertClaimValidationFailure);
         assertThat(f.value("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM tracking_tokens t")).isEqualTo(tokens);
         assertThat(f.count("SELECT count(*) FROM delivery_attempts WHERE smtp_started_at IS NOT NULL")).isZero();
         assertThatThrownBy(()->new R2dbcPartnerInviteRepository(f.db).reserve(claim,"tampered",Instant.now()).block())
@@ -221,13 +228,15 @@ class CampaignDeliveryMigrationIntegrationTest {
 
     String originalSourceHash;
     UUID fullDeniedCampaign() throws Exception {
+        assertThat(f.value("SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.oid='digest(text,text)'::regprocedure"))
+                .as("seed digest resolves only in the owned fixture namespace").isEqualTo(f.schema);
         UUID head=f.migrate("full-denied-head").targetCampaignId();
         originalSourceHash=f.value("SELECT encode(source_hash,'hex') FROM campaign_recipient_transfers WHERE source_recipient_id='"+f.recipient+"'");
         f.sql("UPDATE campaigns SET status='RUNNING' WHERE id='"+head+"'");
         f.sql("UPDATE campaign_recipients SET next_attempt_at='1900-01-01' WHERE campaign_id='"+head+"'");
         f.sql("""
             WITH ids AS (SELECT gen_random_uuid() AS source_id,gen_random_uuid() AS target_id,
-              public.digest('denied-'||n::text,'sha256') AS hmac FROM generate_series(1,119) n),
+              digest('denied-'||n::text,'sha256') AS hmac FROM generate_series(1,119) n),
             sources AS (INSERT INTO campaign_recipients SELECT (jsonb_populate_record(NULL::campaign_recipients,
               to_jsonb(r)||jsonb_build_object('id',i.source_id,'email_hmac',i.hmac))).*
               FROM ids i CROSS JOIN campaign_recipients r WHERE r.id='%s' RETURNING id,email_hmac),
@@ -325,7 +334,7 @@ class CampaignDeliveryMigrationIntegrationTest {
         f.sql(mutation);
         String receipts=f.value("SELECT coalesce(jsonb_agg(to_jsonb(p)),'[]')::text FROM campaign_prepared_content_proofs p");
         assertThat(delivery().productionEligible(claim,Clock.systemUTC()).block()).isFalse();
-        assertThatThrownBy(()->tracking().prepare(claim).block()).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(()->tracking().prepare(claim).block()).satisfies(this::assertClaimValidationFailure);
         assertThat(f.value("SELECT coalesce(jsonb_agg(to_jsonb(p)),'[]')::text FROM campaign_prepared_content_proofs p")).isEqualTo(receipts);
     }
 

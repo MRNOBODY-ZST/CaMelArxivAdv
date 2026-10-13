@@ -50,9 +50,15 @@ class CampaignTemplateMigrationRepositoryIntegrationTest {
         var admission = flyway(schema, "32").migrate();
         assertThat(admission.migrationsExecuted).isEqualTo(1);
         assertThat(admission.targetSchemaVersion).isEqualTo("32");
-        var prepared = flyway(schema, null).migrate();
+        var prepared = flyway(schema, "33").migrate();
         assertThat(prepared.migrationsExecuted).isEqualTo(1);
         assertThat(prepared.targetSchemaVersion).isEqualTo("33");
+        String priorChecksums = priorMigrationChecksums();
+        var diagnostics = flyway(schema, null).migrate();
+        assertThat(diagnostics.migrationsExecuted).isEqualTo(1);
+        assertThat(diagnostics.targetSchemaVersion).isEqualTo("34");
+        assertThat(priorMigrationChecksums()).isEqualTo(priorChecksums);
+        flyway(schema, null).validate();
         var factory = ConnectionFactories.get(ConnectionFactoryOptions.parse("r2dbc:" + url.substring(5)).mutate()
                 .option(ConnectionFactoryOptions.USER, user).option(ConnectionFactoryOptions.PASSWORD, password)
                 .option(Option.valueOf("schema"), schema).build());
@@ -63,6 +69,13 @@ class CampaignTemplateMigrationRepositoryIntegrationTest {
         var configuration = Flyway.configure().dataSource(url, user, password).schemas(name).defaultSchema(name).locations("classpath:db/migration");
         if (target != null) configuration.target(target);
         return configuration.load();
+    }
+    private static String priorMigrationChecksums() throws SQLException {
+        try (var statement = jdbc.createStatement(); var rows = statement.executeQuery(
+                "SELECT string_agg(version||':'||checksum::text,',' ORDER BY installed_rank) FROM flyway_schema_history WHERE success AND version::numeric<=33")) {
+            assertThat(rows.next()).isTrue();
+            return rows.getString(1);
+        }
     }
     @AfterAll static void close() throws Exception { if (jdbc != null) jdbc.close(); if (POSTGRES.isRunning()) POSTGRES.stop(); }
 
@@ -85,8 +98,8 @@ class CampaignTemplateMigrationRepositoryIntegrationTest {
     @Test void freshSchemaMigratesToLatestWithoutChangingV29Baseline() {
         String fresh = "migration_fresh_" + UUID.randomUUID().toString().replace("-", "");
         var result = flyway(fresh, null).migrate();
-        assertThat(result.migrationsExecuted).isEqualTo(32);
-        assertThat(result.targetSchemaVersion).isEqualTo("33");
+        assertThat(result.migrationsExecuted).isEqualTo(33);
+        assertThat(result.targetSchemaVersion).isEqualTo("34");
     }
 
     @Test void provenanceUpgradeLeavesLegacyTransfersUnverified()throws Exception {
@@ -94,7 +107,7 @@ class CampaignTemplateMigrationRepositoryIntegrationTest {
         flyway(baseline,"29").migrate();jdbc.setSchema(baseline);
         try {
             seed();UUID id=ledger("legacy");transfer(id,source,recipient,target,targetRecipient);
-            assertThat(flyway(baseline,null).migrate().migrationsExecuted).isEqualTo(3);
+            assertThat(flyway(baseline,null).migrate().migrationsExecuted).isEqualTo(4);
             try(var statement=jdbc.createStatement();var rows=statement.executeQuery("SELECT source_hash,content_hash,provenance FROM campaign_recipient_transfers WHERE migration_id='"+id+"'")){
                 assertThat(rows.next()).isTrue();assertThat(rows.getBytes(1)).isNull();assertThat(rows.getBytes(2)).isNull();assertThat(rows.getString(3)).isNull();
             }
@@ -107,7 +120,7 @@ class CampaignTemplateMigrationRepositoryIntegrationTest {
         try {
             seed();UUID id=ledger("legacy-prepared");transfer(id,source,recipient,target,targetRecipient);
             execute("UPDATE campaign_recipients SET rendered_subject='Legacy',rendered_html='Legacy prepared HTML',rendered_text='Legacy prepared text' WHERE id='"+targetRecipient+"'");
-            assertThat(flyway(baseline,null).migrate().migrationsExecuted).isEqualTo(2);
+            assertThat(flyway(baseline,null).migrate().migrationsExecuted).isEqualTo(3);
             try(var statement=jdbc.createStatement();var rows=statement.executeQuery("SELECT r.rendered_subject,r.rendered_html,r.rendered_text,(SELECT count(*) FROM campaign_prepared_content_proofs) FROM campaign_recipients r WHERE r.id='"+targetRecipient+"'")) {
                 assertThat(rows.next()).isTrue();assertThat(rows.getString(1)).isEqualTo("Legacy");
                 assertThat(rows.getString(2)).isEqualTo("Legacy prepared HTML");assertThat(rows.getString(3)).isEqualTo("Legacy prepared text");

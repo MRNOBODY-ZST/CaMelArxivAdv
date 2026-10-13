@@ -1,5 +1,7 @@
 # 安全与隐私
 
+迁移能力和 Source admission 都不可从读回状态重建：前者保留原 Actor/原键 journal 与 Web Lock，后者要求数据库 commit 确认及原始一次性 receipt。当前名单、账户、正文和 normal/safety 最后围栏不能由旧预检绕过。诊断只输出固定枚举/码及 trace reference，不输出异常文本、联系人、正文或能力链接。完整边界见[Source 发布协议](operations/source-publication-runbook.md)。公开树扫描结合人工逐路径审核，不构成绝对保密或依赖无漏洞证明。
+
 ## 数据分类
 
 | 分类 | 示例 | 存储/输出规则 |
