@@ -1047,14 +1047,7 @@ public final class CampaignDeliveryRepository {
 
 	private Mono<Boolean> activeProduction(ProductionClaim claim, java.time.Clock clock, boolean beginSmtp) {
 		return new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
-				.lockAndVerify(claim.campaignId(), claim.recipientId(), claim.emailHmac(), false)
-				.filter(Boolean::booleanValue).flatMap(allowed -> database.sql("SELECT id FROM campaigns WHERE id=:campaign AND status='RUNNING' FOR SHARE")
-				.bind("campaign", claim.campaignId()).map((row, metadata) -> row.get("id", UUID.class)).one()
-				)
-				.flatMap(ignored -> database.sql("SELECT id FROM campaign_recipients WHERE id=:recipient AND campaign_id=:campaign FOR UPDATE")
-					.bind("recipient", claim.recipientId()).bind("campaign", claim.campaignId()).map((row, metadata) -> row.get("id", UUID.class)).one())
-				.flatMap(ignored -> database.sql("SELECT id FROM delivery_attempts WHERE id=:attempt AND campaign_recipient_id=:recipient FOR UPDATE")
-					.bind("attempt", claim.attemptId()).bind("recipient", claim.recipientId()).map((row, metadata) -> row.get("id", UUID.class)).one())
+				.lockProductionAndVerify(claim).filter(Boolean::booleanValue)
 				.flatMap(ignored -> Mono.defer(() -> {
 					// All potentially waiting row locks are held before consulting time.
 					Instant now = clock.instant();

@@ -35,7 +35,7 @@ public final class R2dbcPartnerInviteRepository implements PartnerInviteReposito
     @Override public Mono<Boolean> reserve(com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository.ProductionClaim claim,
             String hash, Instant now) {
         return new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
-                .lockAndVerify(claim.campaignId(), claim.recipientId(), claim.emailHmac(), false)
+                .lockProductionAndVerify(claim)
                 .flatMap(allowed -> {
                     if (!allowed) return denied();
                     Instant lockedNow = clock.instant();

@@ -72,6 +72,47 @@ class SourceAdmissionPythonInteropIntegrationTest {
 
     @AfterAll static void close() { if (lettuce != null) lettuce.destroy(); }
 
+    private static void terminateChild(Process child) throws InterruptedException {
+        if (!child.isAlive()) return;
+        child.destroy();
+        if (!child.waitFor(2, TimeUnit.SECONDS)) {
+            child.destroyForcibly();
+            if (!child.waitFor(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Owned child did not terminate");
+            }
+        }
+        if (child.isAlive()) throw new IllegalStateException("Owned child did not terminate");
+    }
+
+    @Test void ownedChildIgnoringTerminationIsForciblyJoined() throws Exception {
+        Path output=Files.createTempFile("source-owned-termination-", ".log");
+        Process child=new ProcessBuilder(python.toString(),"-c",
+                "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('READY',flush=True); time.sleep(60)")
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        var forced=new java.util.concurrent.atomic.AtomicBoolean();
+        var joined=new java.util.concurrent.atomic.AtomicBoolean();
+        Process observed=mock(Process.class,org.mockito.AdditionalAnswers.delegatesTo(child));
+        doAnswer(call->{forced.set(true);child.destroyForcibly();return observed;}).when(observed).destroyForcibly();
+        doAnswer(call->{boolean done=child.waitFor(call.getArgument(0),call.getArgument(1));
+            if(forced.get() && done)joined.set(true);return done;}).when(observed).waitFor(anyLong(),any(TimeUnit.class));
+        try {
+            org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(()->assertThat(Files.readString(output)).contains("READY"));
+            terminateChild(observed);
+            assertThat(forced).isTrue();assertThat(joined).isTrue();assertThat(child.isAlive()).isFalse();
+        } finally {
+            if(child.isAlive())child.destroyForcibly();
+            assertThat(child.waitFor(5,TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test void childStillAliveAfterForcedJoinFailsExplicitly() throws Exception {
+        Process unresponsive=mock(Process.class);
+        when(unresponsive.isAlive()).thenReturn(true);
+        when(unresponsive.waitFor(anyLong(),any(TimeUnit.class))).thenReturn(false);
+        assertThatThrownBy(()->terminateChild(unresponsive)).isInstanceOf(IllegalStateException.class)
+                .hasMessage("Owned child did not terminate");
+    }
+
     @ParameterizedTest(name = "Python live {0}")
     @ValueSource(strings = {"happy", "terminal", "cancel_first", "paused", "unknown", "legacy",
             "scope_conflict", "missing_bound", "rollback", "lost_cas", "lost_commit", "cancel_between",
@@ -255,7 +296,7 @@ class SourceAdmissionPythonInteropIntegrationTest {
             secondUnlock.tryEmitEmpty();
             if (secondHolder.get() != null) secondHolder.get().get(3, TimeUnit.SECONDS);
             normalMailbox.stop(); reserveMailbox.stop();
-            if (child.isAlive()) { child.destroy(); if (!child.waitFor(2, TimeUnit.SECONDS)) child.destroyForcibly(); }
+            terminateChild(child);
             reader.join(2000);
             Files.writeString(evidence.resolve(scenario + ".log"), output.toString());
         }
@@ -396,7 +437,7 @@ class SourceAdmissionPythonInteropIntegrationTest {
                     assertThat(child.exitValue()).as("R4 child: " + log).isEqualTo(restart == 0 && !noCrash ? 73 : 0);
                     if (restart == 1 || noCrash) assertThat(Files.readString(log)).contains("R4_VERIFIED " + scenario, "1 passed");
                 } finally {
-                    if (child.isAlive()) { child.destroy(); if (!child.waitFor(2, TimeUnit.SECONDS)) child.destroyForcibly(); }
+                    terminateChild(child);
                 }
             }
             long runners = switch (scenario) {

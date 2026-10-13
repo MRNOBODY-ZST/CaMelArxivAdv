@@ -4,6 +4,11 @@ import com.camel_hub.advertisement.campaign.delivery.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import com.camel_hub.advertisement.email.smtp.*;
+import com.camel_hub.advertisement.contact.security.ContactCrypto;
+import com.camel_hub.advertisement.contact.config.ContactDataProtectionProperties;
+import reactor.core.publisher.Mono;
 import com.camel_hub.advertisement.campaign.*;
 import com.camel_hub.advertisement.campaign.tracking.*;
 import com.camel_hub.advertisement.campaign.partner.*;
@@ -16,12 +21,141 @@ class CampaignDeliveryMigrationIntegrationTest {
     static CampaignTemplateMigrationIntegrationTest.Fixture f;
     @BeforeAll static void database() throws Exception { f = new CampaignTemplateMigrationIntegrationTest.Fixture(); }
     @AfterAll static void close() throws Exception { f.close(); }
-    @BeforeEach void seed() throws Exception { f.seed(); f.sql("TRUNCATE partner_invites"); }
+    @BeforeEach void seed() throws Exception {
+        f.seed();
+        // Recording-transport positives settle a real cooldown in this owned schema.
+        f.sql("TRUNCATE partner_invites, recipient_delivery_cooldowns");
+    }
 
     CampaignDeliveryRepository delivery() {
         return new CampaignDeliveryRepository(f.db, f.tx, new CampaignDeliveryProperties(true, 10,
                 Duration.ofMinutes(2), Duration.ofDays(180), 3, Duration.ofMinutes(1), Duration.ofMinutes(5), Duration.ofSeconds(1)),
                 new CampaignSafetyProperties(false, "", 20));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,endpoint", "true,endpoint", "false,credentials", "true,credentials",
+            "false,retest", "true,retest", "false,id", "true,id", "false,unchanged", "true,unchanged"})
+    void executorBindsFrozenSmtpAfterRealAccountUpdateAndRetest(boolean migrated, String change) throws Exception {
+        UUID campaign;
+        if (migrated) campaign=f.migrate("smtp-binding").targetCampaignId();
+        else { campaign=UUID.randomUUID(); addOrdinaryCampaign(campaign); }
+        f.sql("UPDATE campaigns SET status='RUNNING' WHERE id='"+campaign+"'");
+        byte[] secondKey=new byte[32]; Arrays.fill(secondKey,(byte)1);
+        var crypto=new ContactCrypto(new ContactDataProtectionProperties(Base64.getEncoder().encodeToString(new byte[32]),
+                Base64.getEncoder().encodeToString(secondKey)));
+        var encrypted=crypto.encrypt("synthetic-smtp@example.invalid");
+        f.db.sql("UPDATE campaign_recipients SET email_ciphertext=:cipher,email_nonce=:nonce WHERE campaign_id=:campaign")
+                .bind("cipher",encrypted.ciphertext()).bind("nonce",encrypted.nonce()).bind("campaign",campaign).fetch().rowsUpdated().block();
+        var repository=org.mockito.Mockito.spy(delivery());
+        var smtp=new SmtpRepository(f.db);
+        var captured=new java.util.concurrent.atomic.AtomicReference<CampaignDeliveryRepository.ProductionClaim>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            @SuppressWarnings("unchecked") Mono<CampaignDeliveryRepository.DeliveryClaim> actual=(Mono<CampaignDeliveryRepository.DeliveryClaim>)invocation.callRealMethod();
+            return actual.flatMap(value -> {
+                var claim=(CampaignDeliveryRepository.ProductionClaim)value; captured.set(claim);
+                return mutateSmtp(smtp,claim,change).thenReturn(value);
+            });
+        }).when(repository).claimNext(org.mockito.ArgumentMatchers.any(Instant.class));
+        var partnerCalls=new java.util.concurrent.atomic.AtomicInteger();
+        var sends=new java.util.concurrent.atomic.AtomicInteger();
+        PartnerInviteClient remote=new PartnerInviteClient() {
+            public Mono<PendingInvite> create(String hash,String email) {
+                partnerCalls.incrementAndGet();
+                return Mono.just(new PendingInvite("https://api.camel-hub.cn/partner/claim?token=synthetic_fixture",Instant.now().plusSeconds(300)));
+            }
+            public Mono<IdentityStatus> identity(String hash) {partnerCalls.incrementAndGet();return Mono.just(IdentityStatus.PENDING);}
+        };
+        String key=Base64.getEncoder().encodeToString(new byte[32]);
+        var invites=new PartnerInviteService(new R2dbcPartnerInviteRepository(f.db),remote,new PartnerInviteCrypto(key),
+                new PartnerInviteProperties(true,"synthetic-only",key,Duration.ofSeconds(1)),Clock.systemUTC());
+        var executor=new CampaignDeliveryExecutor(repository,claim -> tracking().prepare(claim).map(prepared ->
+                new CampaignOutboundPreparer.PreparedOutbound(prepared.subject(),prepared.html()+"<a href=\"{{partner_claim_url}}\">Synthetic invite</a>",
+                        prepared.text()+"\n{{partner_claim_url}}",prepared.headers())),null,null,crypto,
+                (CampaignDeliveryExecutor.CampaignSmtpSender)(account,message) -> {
+                    sends.incrementAndGet();assertThat(account).isSameAs(captured.get().smtpAccount());
+                    return new SmtpTransport.SmtpOutcome(CampaignDeliveryModels.AttemptStatus.SMTP_ACCEPTED,
+                            CampaignDeliveryModels.TransportStage.POST_DATA,250,"synthetic accepted");
+                },Clock.systemUTC(),new PartnerInviteOutboundFinalizer(invites,crypto,Clock.systemUTC()));
+        var result=executor.pumpOnce().block(Duration.ofSeconds(15));
+        assertThat(captured.get()).isNotNull();
+        assertThat(captured.get().campaignId()).isEqualTo(campaign);
+        assertThat(smtp.find(f.smtp).block().lastTestStatus()).isEqualTo("SUCCEEDED");
+        if (change.equals("unchanged")) {
+            assertThat(result).isEqualTo(CampaignDeliveryExecutor.PumpResult.SMTP_ACCEPTED);
+            assertThat(partnerCalls.get()).isEqualTo(1);assertThat(sends.get()).isEqualTo(1);
+        } else {
+            assertThat(result).isEqualTo(CampaignDeliveryExecutor.PumpResult.NO_WORK);
+            assertThat(partnerCalls.get()).isZero();assertThat(sends.get()).isZero();
+            assertThat(f.count("SELECT count(*) FROM delivery_attempts WHERE smtp_started_at IS NOT NULL")).isZero();
+            assertThat(f.count("SELECT count(*) FROM partner_invites")).isZero();
+        }
+    }
+
+    Mono<Void> mutateSmtp(SmtpRepository smtp,CampaignDeliveryRepository.ProductionClaim claim,String change) {
+        var old=claim.smtpAccount();
+        if(change.equals("unchanged")) return Mono.empty();
+        if(change.equals("id")) {
+            UUID replacement=UUID.randomUUID();
+            return f.db.sql("INSERT INTO smtp_accounts SELECT (jsonb_populate_record(NULL::smtp_accounts,to_jsonb(s)||jsonb_build_object('id',:id,'name','Replacement'))).* FROM smtp_accounts s WHERE id=:old")
+                    .bind("id",replacement).bind("old",old.id()).fetch().rowsUpdated()
+                    .then(f.db.sql("UPDATE campaigns SET smtp_account_id=:smtp WHERE id=:campaign").bind("smtp",replacement)
+                            .bind("campaign",claim.campaignId()).fetch().rowsUpdated()).then();
+        }
+        if(change.equals("retest")) return smtp.recordTest(old.id(),true,null);
+        var write=new SmtpRepository.SmtpWrite(old.name(),change.equals("endpoint")?"changed.example.invalid":old.host(),
+                old.port(),old.tlsMode(),old.username(),
+                change.equals("credentials")?new byte[16]:old.passwordCiphertext(),change.equals("credentials")?new byte[12]:old.passwordNonce(),
+                old.fromEmail(),old.defaultFromName(),old.replyTo(),old.perMinuteLimit(),old.perHourLimit(),old.perDayLimit(),
+                old.perMonthLimit(),old.perDomainHourLimit(),old.enabled());
+        return smtp.update(old.id(),old.lockVersion(),write).switchIfEmpty(Mono.error(new AssertionError("Owned account update failed")))
+                .then(smtp.recordTest(old.id(),true,null));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,eligibility,rotate", "true,eligibility,rotate", "false,smtp,rotate", "true,smtp,rotate",
+            "false,partner,rotate", "true,partner,rotate", "false,eligibility,expire", "true,eligibility,expire",
+            "false,smtp,expire", "true,smtp,expire", "false,partner,expire", "true,partner,expire"})
+    void smtpAccountWaitRechecksSnapshotAndTimeAtEachRealBoundary(boolean migrated,String boundary,String change) throws Exception {
+        UUID campaign;
+        if(migrated) campaign=f.migrate("smtp-wait").targetCampaignId();
+        else {campaign=UUID.randomUUID();addOrdinaryCampaign(campaign);}
+        f.sql("UPDATE campaigns SET status='RUNNING' WHERE id='"+campaign+"'");
+        var repository=delivery();
+        var claim=(CampaignDeliveryRepository.ProductionClaim)repository.claimNext(Instant.now()).block();
+        assertThat(claim).isNotNull();tracking().prepare(claim).block();
+        var clock=new MutableClock(Instant.now());
+        assertThat(repository.productionEligible(claim,clock).block()).isTrue();
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        PartnerInviteClient remote=new PartnerInviteClient() {
+            public Mono<PendingInvite> create(String hash,String email){calls.incrementAndGet();return Mono.error(new AssertionError("external create"));}
+            public Mono<IdentityStatus> identity(String hash){calls.incrementAndGet();return Mono.error(new AssertionError("external identity"));}
+        };
+        String key=Base64.getEncoder().encodeToString(new byte[32]);
+        var service=new PartnerInviteService(new R2dbcPartnerInviteRepository(f.db,clock),remote,new PartnerInviteCrypto(key),
+                new PartnerInviteProperties(true,"synthetic-only",key,Duration.ofSeconds(1)),clock);
+        var entered=new java.util.concurrent.CompletableFuture<Void>();
+        var release=new java.util.concurrent.CompletableFuture<Void>();
+        var blocker=f.tx.transactional(f.db.sql("SELECT id FROM smtp_accounts WHERE id=:id FOR UPDATE").bind("id",f.smtp)
+                .fetch().all().then(change.equals("rotate")?mutateSmtp(new SmtpRepository(f.db),claim,"credentials"):Mono.empty())
+                .then(Mono.defer(()->{entered.complete(null);return Mono.fromFuture(release);}))).toFuture();
+        try {
+            entered.get(5,java.util.concurrent.TimeUnit.SECONDS);
+            var pending=(boundary.equals("partner")?service.prepareProduction(claim,"synthetic@example.invalid").map(ignored->true)
+                    :boundary.equals("smtp")?repository.beginSmtp(claim,clock):repository.productionEligible(claim,clock)).toFuture();
+            long deadline=System.nanoTime()+Duration.ofSeconds(4).toNanos();
+            while(!pending.isDone() && f.count("SELECT count(*) FROM pg_locks WHERE NOT granted AND pid<>pg_backend_pid()")==0
+                    && System.nanoTime()<deadline)Thread.sleep(10);
+            assertThat(pending).as("account row must be locked before this boundary").isNotDone();
+            assertThat(f.count("SELECT count(*) FROM pg_locks WHERE NOT granted AND pid<>pg_backend_pid()")).isPositive();
+            if(change.equals("expire"))clock.now=clock.now.plusSeconds(121);
+            release.complete(null);blocker.get(5,java.util.concurrent.TimeUnit.SECONDS);
+            if(boundary.equals("partner")) assertThatThrownBy(()->pending.get(5,java.util.concurrent.TimeUnit.SECONDS)).hasCauseInstanceOf(PartnerInviteException.class);
+            else assertThat(pending.get(5,java.util.concurrent.TimeUnit.SECONDS)).isFalse();
+            assertThat(calls.get()).isZero();
+            assertThat(f.count("SELECT count(*) FROM delivery_attempts WHERE smtp_started_at IS NOT NULL")).isZero();
+            assertThat(f.count("SELECT count(*) FROM partner_invites")).isZero();
+        } finally {release.complete(null);blocker.get(5,java.util.concurrent.TimeUnit.SECONDS);}
     }
 
     @Test void missingOrChangedMigrationProofCannotAuthorizeTargetClaim() throws Exception {

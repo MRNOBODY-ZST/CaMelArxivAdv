@@ -422,11 +422,26 @@ class SourceAdmissionIntegrationTest {
             do { request=bind(); } while(!slotKey(request.nonce()).endsWith(":"+slot));
             String key=slotKey(request.nonce()); keys.add(key); redis.opsForValue().set(key,encodeRequest(request),Duration.ofSeconds(10)).block();
         }
-        var mailbox=new SourceAdmissionMailbox(slow,redis);
+        var completedReads=new java.util.concurrent.atomic.AtomicInteger();
+        var observedRedis=org.mockito.Mockito.spy(redis);
+        org.mockito.Mockito.doAnswer(call->{
+            var actual=(reactor.core.publisher.Flux<?>)call.callRealMethod();
+            return actual.doOnComplete(completedReads::incrementAndGet);
+        }).when(observedRedis).execute(org.mockito.ArgumentMatchers.any(org.springframework.data.redis.core.ReactiveRedisCallback.class));
+        var mailbox=new SourceAdmissionMailbox(slow,observedRedis);
         try {
             mailbox.start();
             org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(4)).untilAsserted(()->assertThat(active.get()).isEqualTo(4));
             assertThat(peak.get()).isEqualTo(4);
+            assertThat(reactor.core.publisher.Flux.fromIterable(keys).flatMap(k->redis.opsForValue().get(k)).count().block()).isEqualTo(4);
+            int readsWhileBlocked=completedReads.get();
+            Object blockedCursor=org.springframework.test.util.ReflectionTestUtils.getField(mailbox,"cursor");
+            org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(2)).untilAsserted(()->{
+                assertThat(active.get()).isEqualTo(4);
+                assertThat(peak.get()).isEqualTo(4);
+                assertThat(completedReads.get()).isGreaterThanOrEqualTo(readsWhileBlocked+16);
+                assertThat(org.springframework.test.util.ReflectionTestUtils.getField(mailbox,"cursor")).isNotEqualTo(blockedCursor);
+            });
             assertThat(reactor.core.publisher.Flux.fromIterable(keys).flatMap(k->redis.opsForValue().get(k)).count().block()).isEqualTo(4);
             mailbox.stop();
             org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(2)).untilAsserted(()->assertThat(active.get()).isZero());

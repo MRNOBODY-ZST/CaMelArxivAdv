@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.arxiv.source_errors import SourceUpstreamReason
 from app.jobs.job_control import AsyncRedisStore, RedisJobStore
@@ -69,15 +70,56 @@ def isolated_redis_url() -> Iterator[str]:
 async def connect_owned(url: str) -> Redis:
     redis = Redis.from_url(url)
     end = time.monotonic() + 10
-    while time.monotonic() < end:
-        try:
-            if await redis.ping():
-                return cast(Redis, redis)
-        except ConnectionError:
-            pass
-        await asyncio.sleep(0.025)
-    await redis.aclose()
-    raise AssertionError("SYNTHETIC_REDIS_NOT_READY")
+    ready = False
+    try:
+        while time.monotonic() < end:
+            try:
+                if await redis.ping():
+                    ready = True
+                    return cast(Redis, redis)
+            except RedisConnectionError:
+                pass
+            await asyncio.sleep(0.025)
+        raise AssertionError("SYNTHETIC_REDIS_NOT_READY")
+    finally:
+        if not ready:
+            await redis.aclose()
+
+
+@pytest.mark.parametrize("outcome", ["ready", "timeout", "unexpected"])
+async def test_owned_redis_readiness_retries_library_error_and_closes_failure(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    from types import SimpleNamespace
+
+    class Client:
+        attempts = 0
+        closed = False
+
+        async def ping(self) -> bool:
+            self.attempts += 1
+            if outcome == "unexpected":
+                raise ValueError("synthetic readiness failure")
+            if self.attempts == 1:
+                raise RedisConnectionError("synthetic starting server")
+            return True
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = Client()
+    ticks = iter([0.0, 0.0, 11.0] if outcome == "timeout" else [0.0, 0.0, 0.0])
+    monkeypatch.setattr(
+        sys.modules[__name__], "time", SimpleNamespace(monotonic=lambda: next(ticks))
+    )
+    monkeypatch.setattr(Redis, "from_url", lambda *_args, **_kwargs: client)
+    if outcome == "ready":
+        assert await connect_owned("redis://synthetic.invalid") is cast(Redis, client)
+        assert client.attempts == 2 and not client.closed
+    else:
+        with pytest.raises(AssertionError if outcome == "timeout" else ValueError):
+            await connect_owned("redis://synthetic.invalid")
+        assert client.closed
 
 
 async def test_reconstructed_and_canceled_request_cannot_reopen(isolated_redis_url: str) -> None:
@@ -117,6 +159,83 @@ async def test_cached_reply_is_never_an_original_permission(isolated_redis_url: 
         await redis.set(client.reply_key(request.nonce), VECTORS["replies"][2]["raw"])
         assert (await client.request(request)).status == "HELD"
         assert await redis.get(client.slot_key(request.nonce)) is None
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.parametrize("expiry", ["wall", "monotonic", "both", "live", "backward"])
+async def test_abandoned_original_receipts_expire_without_reconstructing_or_pruning_active(
+    isolated_redis_url: str, monkeypatch: pytest.MonkeyPatch, expiry: str,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.jobs import source_admission as module
+    from app.jobs.source_retry import SourceAuthorityReceipt, SourceInvocation
+
+    wall = [now_millis()]
+    monotonic = [100.0]
+    monkeypatch.setattr(module, "now_millis", lambda: wall[0])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
+    redis = await connect_owned(isolated_redis_url)
+    try:
+        store = module.SourceStateStore(cast(AsyncRedisStore, redis))
+        ready = SourceState.from_json(VECTORS["states"][0]["raw"])
+
+        async def synthetic_backend(request: module.AdmissionRequest) -> module.AdmissionReply:
+            assert request.token is not None and request.deadline is not None
+            confirmed = replace(
+                ready, scope=request.scope, generation=2, phase=SourcePhase.RESERVED,
+                invocation=SourceInvocation(
+                    request.token, 0, 1, request.owner_id, request.deadline
+                ),
+                authority=SourceAuthorityReceipt(
+                    2, request.nonce, request.owner_id, request.token, 1, 1
+                ),
+            )
+            await redis.set(request.scope.state_key, confirmed.to_json())
+            return module.AdmissionReply(
+                "RESERVED", "OK", confirmed.digest, confirmed.authority, request.deadline
+            )
+
+        monkeypatch.setattr(store.admission, "request", synthetic_backend)
+
+        async def reserve_new() -> SourceState:
+            scope = replace(
+                ready.scope, idempotency_key="synthetic:abandoned:" + uuid4().hex, job_id=uuid4()
+            )
+            await redis.set(scope.state_key, replace(ready, scope=scope).to_json())
+            return await store.reserve(
+                scope, 0, 0, store.admission.owner_id, wall[0] + timedelta(seconds=120)
+            )
+
+        first = await reserve_new()
+        assert first.invocation is not None
+        original_bytes = await redis.get(first.scope.state_key)
+        if expiry == "backward":
+            wall[0] -= timedelta(seconds=1)
+            assert not await store.take(first.scope, first)
+            wall[0] += timedelta(seconds=2)
+            assert not await store.take(first.scope, first)
+            return
+        if expiry in {"wall", "both"}:
+            wall[0] += timedelta(seconds=11)
+        if expiry in {"monotonic", "both"}:
+            monotonic[0] += 11
+        second = await reserve_new()
+        assert len(store._grants) == (2 if expiry == "live" else 1)
+        assert await redis.get(first.scope.state_key) == original_bytes
+        assert not await store.take(second.scope, SourceState.from_json(second.to_json()))
+        assert await store.take(second.scope, second)
+        assert not await store.take(second.scope, second)
+        assert await store.take(first.scope, first) is (expiry == "live")
+        assert second.invocation is not None
+        active_token = second.invocation.token
+        wall[0] += timedelta(seconds=11)
+        monotonic[0] += 11
+        third = await reserve_new()
+        assert active_token in store._active
+        assert await store.take(third.scope, third)
     finally:
         await redis.aclose()
 

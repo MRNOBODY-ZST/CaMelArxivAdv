@@ -74,7 +74,7 @@ public final class CampaignMigrationDeliveryFence {
         return verifyLocked(receipt,beforePreparation,List.of());
     }
 
-    /** Frozen IDs must come from the caller's already locked safety run/message, never request input. */
+    /** Frozen IDs come from a durable production claim or locked safety run/message, never request input. */
     public Mono<Boolean> verifyLocked(LockedSources receipt, boolean beforePreparation, List<UUID> frozenSmtpIds) {
         if (frozenSmtpIds==null || frozenSmtpIds.size()>20 || frozenSmtpIds.stream().anyMatch(Objects::isNull)) return Mono.just(false);
         List<UUID> frozen=frozenSmtpIds.stream().distinct().sorted().toList();
@@ -113,6 +113,24 @@ public final class CampaignMigrationDeliveryFence {
     private Mono<List<Source>> associations(UUID[] ids) {
         return db.sql("SELECT id,campaign_id,encode(email_hmac,'hex') AS hmac FROM campaign_recipients WHERE id=ANY(:ids) ORDER BY id")
             .bind("ids",ids).map((r,m)->new Source(r.get("campaign_id",UUID.class),r.get("id",UUID.class),r.get("hmac",String.class))).all().collectList();
+    }
+
+    /** Bind the account that will perform I/O, after the common upper and lower lock tiers. */
+    public Mono<Boolean> lockProductionAndVerify(
+            com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository.ProductionClaim claim) {
+        return lockSources(List.of(new Source(claim.campaignId(),claim.recipientId(),
+                HexFormat.of().formatHex(claim.emailHmac())))).flatMap(receipt ->
+            db.sql("SELECT id FROM delivery_attempts WHERE id=:attempt AND campaign_recipient_id=:recipient FOR UPDATE")
+                .bind("attempt",claim.attemptId()).bind("recipient",claim.recipientId()).map((r,m)->true).one()
+                .flatMap(ignored -> verifyLocked(receipt,false,List.of(claim.smtpAccount().id())))
+                .filter(Boolean::booleanValue).flatMap(ignored -> db.sql("""
+                    SELECT s.id FROM campaigns c JOIN smtp_accounts s ON s.id=c.smtp_account_id
+                    WHERE c.id=:campaign AND s.id=:smtp AND s.lock_version=:version AND s.updated_at=:updated
+                      AND s.enabled AND s.last_test_status='SUCCEEDED'
+                      AND s.last_tested_at IS NOT NULL AND s.last_tested_at>=s.updated_at
+                    """).bind("campaign",claim.campaignId()).bind("smtp",claim.smtpAccount().id())
+                    .bind("version",claim.smtpAccount().lockVersion()).bind("updated",claim.smtpAccount().updatedAt())
+                    .map((r,m)->true).one())).defaultIfEmpty(false);
     }
 
     private Mono<List<UUID>> relatedCampaigns(UUID[] campaigns,String[] hmacs) {

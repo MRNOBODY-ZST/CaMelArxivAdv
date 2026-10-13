@@ -505,6 +505,7 @@ class SourceStateStore:
         if owner_id != self.admission.owner_id:
             raise self._deny()
         self._now()
+        self._prune_grants()
         state = await self._read(scope)
         self._now()
         if (
@@ -543,6 +544,13 @@ class SourceStateStore:
         )
         self._grants[invocation.token] = (confirmed, grant)
         return confirmed
+
+    def _prune_grants(self) -> None:
+        # Abandoned reserve continuations are not durable capabilities. Only drop
+        # expired originals; never touch active invocations or recreate a receipt.
+        for token, (state, grant) in list(self._grants.items()):
+            if not self._live(state, token, grant):
+                self._grants.pop(token, None)
 
     async def take(self, scope: SourceScope, original_reservation: SourceState) -> bool:
         """Only the original reserve continuation object can consume the runtime grant.

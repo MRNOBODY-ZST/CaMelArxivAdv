@@ -92,16 +92,18 @@ import static org.mockito.Mockito.when;
 @ExtendWith(OutputCaptureExtension.class)
 class CampaignSafetyIntegrationTest {
 
-	@Test void safetyPreparationRollbackKeepsDiagnosticAndNoArtifactsOrSmtp(CapturedOutput output) {
+	@Test void safetyPreparationRollbackKeepsDiagnosticAndNoArtifactsOrSmtp(CapturedOutput output) throws Exception {
 		insertRecipient("00000000-0000-0000-0000-000000000001","Synthetic diagnostic");
 		var runtime=safetyRuntime();var run=materialize(runtime,1,"synthetic-diagnostic");
-		database.sql("ALTER TABLE campaign_safety_messages ADD CONSTRAINT synthetic_safety_body_rejection CHECK (rendered_html LIKE '%{{unsubscribe_url}}%')").fetch().rowsUpdated().block();
+		database.sql("ALTER TABLE campaign_safety_messages ADD CONSTRAINT \"synthetic-private-token\" CHECK (rendered_html LIKE '%{{unsubscribe_url}}%')").fetch().rowsUpdated().block();
 		var signer=new CampaignSafetySigner(SAFETY_KEY);
 		var tracking=new CampaignSafetyTrackingService(runtime.repository(),runtime.policy(),
 			new MailTrackingProperties(true,"https://tracking.example.test",SAFETY_KEY,Duration.ofDays(30)),signer,new MailOpenClassifier(),Clock.fixed(NOW,ZoneOffset.UTC),transactions);
 		AtomicInteger sends=new AtomicInteger();
+		AtomicReference<Throwable> rawFailure=new AtomicReference<>();
 		try {
-			var executor=new CampaignDeliveryExecutor(runtime.delivery(),claim->reactor.core.publisher.Mono.error(new AssertionError("production")),runtime.repository(),tracking,mock(ContactCrypto.class),
+			var executor=new CampaignDeliveryExecutor(runtime.delivery(),claim->reactor.core.publisher.Mono.error(new AssertionError("production")),runtime.repository(),
+				claim->tracking.prepare(claim).doOnError(error->rawFailure.set(com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.original(error))),mock(ContactCrypto.class),
 				(account,message)->{sends.incrementAndGet();throw new AssertionError("SMTP");},Clock.fixed(NOW,ZoneOffset.UTC));
 			assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.PERMANENT_FAILURE);
 			assertThat(sends).hasValue(0);
@@ -113,8 +115,14 @@ class CampaignSafetyIntegrationTest {
 			assertThat(attempt.preparationDiagnostic().stage().name()).isEqualTo("BODY_PERSIST");
 			assertThat(attempt.preparationDiagnostic().exceptionType().name()).isEqualTo("PERSISTENCE");
 			assertThat(attempt.preparationDiagnosticExplanation()).isNull();
+			assertThat(rawFailure.get()).isNotNull();
+			var rawText=new java.io.StringWriter();rawFailure.get().printStackTrace(new PrintWriter(rawText));
+			assertThat(rawText.toString()).contains("synthetic-private-token");
+			assertThat(database.sql("SELECT to_jsonb(d)::text AS value FROM campaign_preparation_diagnostics d")
+				.map((r,m)->r.get("value",String.class)).all().collectList().block().toString()).doesNotContain("synthetic-private-token");
+			assertThat(new ObjectMapper().findAndRegisterModules().writeValueAsString(snapshot)).doesNotContain("synthetic-private-token");
 			assertThat(output.getAll()).doesNotContain("synthetic-private-token");
-		} finally {database.sql("ALTER TABLE campaign_safety_messages DROP CONSTRAINT synthetic_safety_body_rejection").fetch().rowsUpdated().block();}
+		} finally {database.sql("ALTER TABLE campaign_safety_messages DROP CONSTRAINT \"synthetic-private-token\"").fetch().rowsUpdated().block();}
 	}
 
 	@Test void safetyRejectedLeaseAndDiagnosticSaveFailureDoNotCommitAndHistoryKeepsAllAttempts() {

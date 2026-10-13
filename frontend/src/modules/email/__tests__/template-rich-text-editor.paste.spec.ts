@@ -35,6 +35,21 @@ function installJsdomRangeGeometry(): () => void {
   }
 }
 
+async function withEditorGeometry<T extends { unmount: () => void }>(create: () => T, work: (wrapper: T) => Promise<void>) {
+  const restoreGeometry = installJsdomRangeGeometry()
+  let wrapper: T | undefined
+  try {
+    wrapper = create()
+    await work(wrapper)
+  } finally {
+    try {
+      wrapper?.unmount()
+    } finally {
+      restoreGeometry()
+    }
+  }
+}
+
 // An inert schema isolates the maintainer's slice-context attribute-validation
 // branch. This is not an executable advisory exploit or the component's schema.
 function inspectContextPaste(html: string) {
@@ -95,15 +110,32 @@ describe('installed editor clipboard context validation', () => {
 })
 
 describe('TemplateRichTextEditor paste integration', () => {
+  it.each(['mount', 'unmount'])('restores owned Range geometry after %s failure', async (stage) => {
+    const names = ['getClientRects', 'getBoundingClientRect'] as const
+    const before = names.map(name => Object.getOwnPropertyDescriptor(Range.prototype, name))
+    try {
+      await expect(withEditorGeometry(() => {
+        if (stage === 'mount') throw new Error('synthetic mount failure')
+        const wrapper = mount(TemplateRichTextEditor, { props: { modelValue: '<p></p>' } })
+        return { unmount: () => { wrapper.unmount(); throw new Error('synthetic unmount failure') } }
+      }, async () => { await flushPromises() })).rejects.toThrow(`synthetic ${stage} failure`)
+      expect(names.map(name => Object.getOwnPropertyDescriptor(Range.prototype, name))).toEqual(before)
+    } finally {
+      names.forEach((name, index) => {
+        const descriptor = before[index]
+        if (descriptor) Object.defineProperty(Range.prototype, name, descriptor)
+        else Reflect.deleteProperty(Range.prototype, name)
+      })
+    }
+  })
+
   it.each([
     { name: 'rich HTML', html: '<p><strong>rich-paste-control</strong></p>', text: 'rich-paste-control', expected: '<p><strong>rich-paste-control</strong></p>' },
     { name: 'plain text', html: '', text: 'plain-paste-control', expected: '<p>plain-paste-control</p>' },
   ])('renders and emits pasted $name through the real editor', async ({ html, text, expected }) => {
     // Losing the paste handler or the component's onUpdate emit must fail even
     // when unsafe input happens to remain inert in the test environment.
-    const restoreGeometry = installJsdomRangeGeometry()
-    const wrapper = mount(TemplateRichTextEditor, { attachTo: document.body, props: { modelValue: '<p></p>' } })
-    try {
+    await withEditorGeometry(() => mount(TemplateRichTextEditor, { attachTo: document.body, props: { modelValue: '<p></p>' } }), async wrapper => {
       await flushPromises()
       const editable = wrapper.get<HTMLElement>('[aria-label="邮件 HTML 正文编辑器"]')
       editable.element.focus()
@@ -113,9 +145,6 @@ describe('TemplateRichTextEditor paste integration', () => {
 
       expect(editable.text()).toBe(text)
       expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([expected])
-    } finally {
-      wrapper.unmount()
-      restoreGeometry()
-    }
+    })
   })
 })
