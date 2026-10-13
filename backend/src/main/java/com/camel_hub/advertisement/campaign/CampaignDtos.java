@@ -44,6 +44,20 @@ public final class CampaignDtos {
 
 	public record WorkflowRequest(@NotNull @PositiveOrZero Long expectedLockVersion) { }
 
+	public record RecipientContentUpdateRequest(
+			@NotNull @PositiveOrZero Long expectedLockVersion,
+			@NotBlank @Size(max = 998) String subject,
+			@NotBlank @Size(max = 200_000) String html,
+			@NotBlank @Size(max = 100_000) String text,
+			@NotBlank @Size(max = 2_000) String rationale,
+			@NotBlank @Size(max = 1_000) String reason
+	) {
+		CampaignRecipientContentService.EditCommand command() {
+			return new CampaignRecipientContentService.EditCommand(
+					expectedLockVersion, subject, html, text, rationale, reason);
+		}
+	}
+
 	public record RejectRequest(
 			@NotNull @PositiveOrZero Long expectedLockVersion,
 			@NotBlank @Size(max = 1000) String reason

@@ -14,27 +14,38 @@ public final class CampaignWorkflowRepository {
 			           jsonb_build_array(
 			             r.id, r.contact_id, r.paper_id, r.author_id, encode(r.email_hmac, 'hex'),
 			             r.confidence, r.personalization_status,
-			             r.rendered_subject, r.rendered_html, r.rendered_text
+			             r.rendered_subject, r.rendered_html, r.rendered_text,
+			             campaign.recipient_policy, campaign.paper_contact_ids, campaign.paper_contact_recipient_count,
+			             (SELECT jsonb_build_array(t.migration_id,t.target_campaign_id) FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 			           )::text AS snapshot_part,
+			           EXISTS(SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id) AS transferred,
 			           r.personalization_status = 'GENERATED'
 			             AND length(trim(coalesce(r.rendered_subject, ''))) > 0
 			             AND length(trim(coalesce(r.rendered_html, ''))) > 0
 			             AND length(trim(coalesce(r.rendered_text, ''))) > 0 AS content_ready,
 			           position('{{unsubscribe_url}}' in coalesce(r.rendered_html, '')) > 0
 			             AND position('{{unsubscribe_url}}' in coalesce(r.rendered_text, '')) > 0 AS unsubscribe_present,
-			           r.confidence <> 'HIGH' AS confidence_not_high,
+			           campaign.recipient_policy <> 'PAPER_CONTACT' AND r.confidence NOT IN ('HIGH', 'MEDIUM') AS confidence_not_high,
 			           c.id IS NULL OR c.suppression_status <> 'ACTIVE' OR c.deleted_at IS NOT NULL AS contact_inactive,
 			           c.id IS NOT NULL AND c.deleted_at IS NOT NULL AS contact_deleted,
 			           c.id IS NULL OR NOT c.syntax_valid AS syntax_invalid,
 			           c.id IS NULL OR c.example_address AS example_address,
-			           r.author_id IS NULL OR relation.id IS NULL AS author_relation_missing,
-			           relation.id IS NOT NULL AND evidence.id IS NOT NULL
-			             AND evidence.confidence <> 'HIGH' AS evidence_not_high,
-			           relation.id IS NOT NULL AND evidence.id IS NOT NULL
-			             AND NOT evidence.human_verified AS evidence_unverified,
-			           relation.id IS NOT NULL AND evidence.id IS NOT NULL
-			             AND evidence.verification_status <> 'CONFIRMED' AS evidence_unconfirmed,
-			           relation.id IS NOT NULL AND (evidence.id IS NULL OR NOT EXISTS (
+			           active_paper.id IS NULL OR (campaign.recipient_policy <> 'PAPER_CONTACT' AND
+			             (r.author_id IS NULL OR relation.id IS NULL
+			             OR evidence.paper_author_id IS DISTINCT FROM relation.id))
+			             OR (campaign.recipient_policy = 'PAPER_CONTACT' AND r.author_name_snapshot IS NOT NULL AND (
+			               relation.id IS NULL OR evidence.paper_author_id IS DISTINCT FROM relation.id
+			               OR NOT coalesce(evidence.confidence = 'HIGH' OR (evidence.human_verified
+			                 AND evidence.verification_status = 'CONFIRMED'), false))) AS author_relation_missing,
+			           campaign.recipient_policy <> 'PAPER_CONTACT' AND relation.id IS NOT NULL AND evidence.id IS NOT NULL
+			             AND evidence.confidence NOT IN ('HIGH', 'MEDIUM') AS evidence_not_high,
+			           campaign.recipient_policy <> 'PAPER_CONTACT' AND relation.id IS NOT NULL AND evidence.id IS NOT NULL
+			             AND evidence.confidence = 'MEDIUM' AND NOT evidence.human_verified AS evidence_unverified,
+			           evidence.id IS NOT NULL
+			             AND (evidence.verification_status = 'REJECTED'
+			               OR (campaign.recipient_policy <> 'PAPER_CONTACT' AND evidence.confidence = 'MEDIUM'
+			                 AND evidence.verification_status <> 'CONFIRMED')) AS evidence_unconfirmed,
+			           (campaign.recipient_policy = 'PAPER_CONTACT' OR relation.id IS NOT NULL) AND (evidence.id IS NULL OR NOT EXISTS (
 			               SELECT 1 FROM extraction_evidence ee
 			               WHERE ee.paper_author_contact_id = evidence.id
 			           )) AS evidence_missing,
@@ -56,23 +67,26 @@ public final class CampaignWorkflowRepository {
 			                 AND cooldown.last_smtp_accepted_at >= :cooldownCutoff
 			           ) AS cooldown_active
 			    FROM campaign_recipients r
+			    JOIN campaigns campaign ON campaign.id = r.campaign_id
 			    LEFT JOIN contacts c ON c.id = r.contact_id
+			    LEFT JOIN papers active_paper ON active_paper.id = r.paper_id
+			      AND active_paper.deleted_at IS NULL
 			    LEFT JOIN paper_authors relation
 			      ON relation.paper_id = r.paper_id AND relation.author_id = r.author_id
 			    LEFT JOIN LATERAL (
-			        SELECT pac.id, pac.confidence, pac.human_verified, pac.verification_status
+			        SELECT pac.id, pac.paper_author_id, pac.confidence, pac.human_verified, pac.verification_status
 			        FROM paper_author_contacts pac
-			        JOIN extraction_runs er ON er.id = pac.extraction_run_id
+			        JOIN extraction_runs er ON er.id = pac.extraction_run_id AND er.paper_id = pac.paper_id
 			          AND er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
 			        WHERE pac.contact_id = r.contact_id
 			          AND pac.paper_id = r.paper_id
-			          AND pac.paper_author_id = relation.id
 			        ORDER BY er.completed_at DESC NULLS LAST, pac.created_at DESC, pac.id
 			        LIMIT 1
 			    ) evidence ON true
 			    WHERE r.campaign_id = %s
 			), tallies AS (
 			    SELECT count(*) AS total,
+			           count(*) FILTER (WHERE transferred) AS transferred,
 			           count(*) FILTER (WHERE content_ready) AS content_ready,
 			           count(*) FILTER (WHERE unsubscribe_present) AS unsubscribe_present,
 			           count(*) FILTER (WHERE confidence_not_high) AS confidence_not_high,
@@ -89,7 +103,7 @@ public final class CampaignWorkflowRepository {
 			           count(*) FILTER (WHERE unsubscribed) AS unsubscribed,
 			           count(*) FILTER (WHERE campaign_excluded) AS campaign_excluded,
 			           count(*) FILTER (WHERE cooldown_active) AS cooldown_active,
-			           count(*) FILTER (WHERE content_ready AND unsubscribe_present
+			           count(*) FILTER (WHERE NOT transferred AND content_ready AND unsubscribe_present
 			             AND NOT confidence_not_high AND NOT contact_inactive AND NOT contact_deleted
 			             AND NOT syntax_invalid AND NOT example_address AND NOT author_relation_missing
 			             AND NOT evidence_not_high AND NOT evidence_unverified AND NOT evidence_unconfirmed
@@ -111,6 +125,8 @@ public final class CampaignWorkflowRepository {
 		return databaseClient.sql(RECIPIENT_READINESS_CTES.formatted(":campaignId") + """
 				SELECT c.id, c.purpose, c.from_name, c.from_email, c.reply_to,
 				       c.lock_version,
+				       EXISTS (SELECT 1 FROM campaign_recipients p WHERE p.campaign_id=c.id AND (position('partner_claim_url' in coalesce(p.rendered_html,''))>0 OR position('partner_claim_url' in coalesce(p.rendered_text,''))>0)) AS partner_required,
+				       EXISTS (SELECT 1 FROM campaign_recipients p WHERE p.campaign_id=c.id AND p.partner_invite_hold_reason IS NOT NULL) AS partner_held,
 				       c.tracking_opens_enabled, c.tracking_clicks_enabled,
 				       smtp.enabled AS smtp_enabled, smtp.last_test_status AS smtp_test_status,
 				       smtp.last_tested_at IS NOT NULL AND smtp.last_tested_at >= smtp.updated_at AS smtp_test_current,
@@ -149,7 +165,7 @@ public final class CampaignWorkflowRepository {
 						longNumber(row, "evidence_unverified"), longNumber(row, "evidence_unconfirmed"),
 						longNumber(row, "evidence_missing"), longNumber(row, "suppressed"),
 						longNumber(row, "unsubscribed"), longNumber(row, "campaign_excluded"),
-						longNumber(row, "cooldown_active"), longNumber(row, "eligible"))).one();
+						longNumber(row, "cooldown_active"), longNumber(row, "eligible"), bool(row,"partner_required"), bool(row,"partner_held"), longNumber(row,"transferred"))).one();
 	}
 
 	public Mono<StateRecord> state(UUID id) {
@@ -267,7 +283,14 @@ public final class CampaignWorkflowRepository {
 	}
 
 	public Mono<StateRecord> resume(UUID id, long expected, UUID actorId) {
-		return simpleTransition(id, expected, actorId, "RUNNING", "PAUSED");
+		return databaseClient.sql("""
+			 UPDATE campaigns c SET status='RUNNING', status_changed_at=now(), status_changed_by=:actorId,
+			 updated_by=:actorId, updated_at=now(), lock_version=lock_version+1
+			 WHERE c.id=:id AND c.status='PAUSED' AND c.lock_version=:expected
+			 AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_campaign_id=c.id)
+			 AND NOT EXISTS (SELECT 1 FROM campaign_recipients r WHERE r.campaign_id=c.id AND r.partner_invite_hold_reason IS NOT NULL)
+			 RETURNING c.id,c.status,c.lock_version
+			 """).bind("actorId", actorId).bind("id", id).bind("expected", expected).map(this::mapState).one();
 	}
 
 	public Mono<StateRecord> cancel(UUID id, long expected, UUID actorId) {
@@ -321,6 +344,7 @@ public final class CampaignWorkflowRepository {
 				    CROSS JOIN tallies
 				    WHERE c.id = :id
 				      AND tallies.total > 0
+				      AND tallies.transferred = 0
 				      AND tallies.content_ready = tallies.total
 				      AND tallies.unsubscribe_present = tallies.total
 				      AND tallies.eligible > 0
@@ -336,6 +360,8 @@ public final class CampaignWorkflowRepository {
 				      AND mailbox.last_tested_at IS NOT NULL
 				      AND mailbox.last_tested_at >= mailbox.updated_at
 				      AND :trackingReady
+				      AND NOT EXISTS (SELECT 1 FROM campaign_recipients held WHERE held.campaign_id=c.id AND held.partner_invite_hold_reason IS NOT NULL)
+				      AND (:partnerEnabled OR NOT EXISTS (SELECT 1 FROM campaign_recipients p WHERE p.campaign_id=c.id AND (position('partner_claim_url' in coalesce(p.rendered_html,''))>0 OR position('partner_claim_url' in coalesce(p.rendered_text,''))>0)))
 				)
 				""" + updateSql;
 	}
@@ -345,7 +371,7 @@ public final class CampaignWorkflowRepository {
 	) {
 		return statement.bind("cooldownCutoff", readiness.cooldownCutoff())
 				.bind("senderValid", readiness.senderValid())
-				.bind("trackingReady", readiness.trackingReady());
+				.bind("trackingReady", readiness.trackingReady()).bind("partnerEnabled", readiness.partnerEnabled());
 	}
 
 	private StateRecord mapState(io.r2dbc.spi.Row row, io.r2dbc.spi.RowMetadata metadata) {
@@ -370,7 +396,9 @@ public final class CampaignWorkflowRepository {
 
 	public record StateRecord(UUID id, String status, long lockVersion) { }
 
-	public record ReadinessGuard(Instant cooldownCutoff, boolean senderValid, boolean trackingReady) { }
+	public record ReadinessGuard(Instant cooldownCutoff, boolean senderValid, boolean trackingReady, boolean partnerEnabled) {
+		public ReadinessGuard(Instant cutoff, boolean sender, boolean tracking) { this(cutoff, sender, tracking, false); }
+	}
 
 	public record PreflightRecord(
 			UUID campaignId, String purpose, String fromName, String fromEmail, String replyTo,
@@ -384,6 +412,7 @@ public final class CampaignWorkflowRepository {
 			long confidenceNotHigh, long contactInactive, long contactDeleted, long syntaxInvalid,
 			long exampleAddress, long authorRelationMissing, long evidenceNotHigh,
 			long evidenceUnverified, long evidenceUnconfirmed, long evidenceMissing,
-			long suppressed, long unsubscribed, long campaignExcluded, long cooldownActive, long eligible
+			long suppressed, long unsubscribed, long campaignExcluded, long cooldownActive, long eligible,
+			boolean partnerRequired, boolean partnerHeld, long transferred
 	) { }
 }

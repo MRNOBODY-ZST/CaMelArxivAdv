@@ -25,7 +25,7 @@ docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
 sudo nginx -T
 ```
 
-确认 `arxiv.nodexi.top` 是唯一待修改 vhost；不得修改其他域名、默认 server 或无关 location。
+确认 `outreach.example.invalid` 是唯一待修改 vhost；不得修改其他域名、默认 server 或无关 location。
 
 ## 3. 备份与恢复演练
 
@@ -72,7 +72,7 @@ docker compose exec -T kafka /opt/kafka/bin/kafka-configs.sh \
   --entity-name camel.mail.delivery.jobs.v1 --add-config retention.ms=604800000
 ```
 
-公开 Nginx 只在 `arxiv.nodexi.top` vhost 中增加精确的 `^~ /u/` 代理，且必须位于 SPA fallback 之前。该 location 与 `/t/` 一样关闭 access/error token 日志，限流，设置 `no-store`、`no-referrer`，并只转发可信的 `$remote_addr`。修改后先执行 `sudo nginx -t`，成功才 reload。
+公开 Nginx 只在 `outreach.example.invalid` vhost 中增加精确的 `^~ /u/` 代理，且必须位于 SPA fallback 之前。该 location 与 `/t/` 一样关闭 access/error token 日志，限流，设置 `no-store`、`no-referrer`，并只转发可信的 `$remote_addr`。修改后先执行 `sudo nginx -t`，成功才 reload。
 
 ## 5. 预检和账户健康
 

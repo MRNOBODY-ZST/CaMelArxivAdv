@@ -19,7 +19,7 @@ class ContractModel(BaseModel):
 
 class PersonalizationTarget(ContractModel):
     recipient_id: UUID
-    author_name: str = Field(min_length=1, max_length=300)
+    author_name: str | None = Field(min_length=1, max_length=300)
     paper_title: str = Field(min_length=1, max_length=2_000)
     paper_abstract: str = Field(min_length=1, max_length=20_000)
     arxiv_id: str = Field(
@@ -68,6 +68,8 @@ class GeneratedEmail(ContractModel):
     def contains_unsubscribe_variable(self) -> GeneratedEmail:
         if "{{unsubscribe_url}}" not in self.html or "{{unsubscribe_url}}" not in self.text:
             raise ValueError("Generated email must preserve unsubscribe_url in HTML and text")
+        if "{{partner_claim_url}}" in self.subject or "{{partner_claim_url}}" in self.rationale:
+            raise ValueError("Generated email must not include partner_claim_url in metadata")
         return self
 
 

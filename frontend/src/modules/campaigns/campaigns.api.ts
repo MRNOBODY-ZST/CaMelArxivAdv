@@ -6,6 +6,9 @@ import type {
   CampaignPreflight,
   CampaignPage,
   CampaignView,
+  CampaignSettingsUpdate,
+  CampaignRecipientContentUpdate,
+  CampaignRecipientContentEditResult,
   DeliveryPage,
   GenerationStart,
   LinkAnalyticsPage,
@@ -38,6 +41,16 @@ export const campaignsApi = {
   },
   async getCampaign(id: string): Promise<CampaignView> {
     return (await apiClient.get<CampaignView>(`/campaigns/${id}`)).data
+  },
+  async updateCampaign(id: string, payload: CampaignSettingsUpdate): Promise<CampaignView> {
+    return (await apiClient.put<CampaignView>(`/campaigns/${id}`, payload)).data
+  },
+  async updateRecipientContent(
+    id: string, recipientId: string, payload: CampaignRecipientContentUpdate,
+  ): Promise<CampaignRecipientContentEditResult> {
+    return (await apiClient.put<CampaignRecipientContentEditResult>(
+      `/campaigns/${id}/recipients/${recipientId}/content`, payload,
+    )).data
   },
   async listRecipients(id: string, page = 1, pageSize = 20): Promise<RecipientPage> {
     return (await apiClient.get<RecipientPage>(`/campaigns/${id}/recipients`, { params: { page, pageSize } })).data

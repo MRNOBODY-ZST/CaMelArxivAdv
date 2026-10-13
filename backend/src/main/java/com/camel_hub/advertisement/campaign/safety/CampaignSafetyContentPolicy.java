@@ -36,6 +36,7 @@ final class CampaignSafetyContentPolicy {
 					+ "@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+(?![A-Z0-9-])");
 
 	void validateSource(String subject, String html, String text) {
+		com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.validate(subject, html, text);
 		if (subject == null || subject.isBlank() || html == null || html.isBlank()
 				|| text == null || text.isBlank()) throw invalid();
 		validateHtmlPlaceholders(html);
@@ -47,7 +48,8 @@ final class CampaignSafetyContentPolicy {
 	boolean containsForbidden(String value, boolean html) {
 		try {
 			return inspectionViews(value, html).stream().anyMatch(inspected ->
-					SIGNED_CAPABILITY.matcher(inspected).find() || EMAIL.matcher(inspected).find());
+					SIGNED_CAPABILITY.matcher(inspected).find() || EMAIL.matcher(inspected).find()
+							|| com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.containsCapability(inspected));
 		}
 		catch (IllegalArgumentException unsafe) {
 			return true;

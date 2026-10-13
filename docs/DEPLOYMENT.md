@@ -1,5 +1,11 @@
 # 部署指南
 
+## 迁移与 Source 协议兼容门槛
+
+下面部署示例不是活动或 Source 执行授权。新模板迁移保持默认关闭，启用前须核验所有 API/mail worker 的 normal/safety 最后围栏和 prepared-content/transfer 兼容性；Source mailbox 也保持默认关闭，启用需确认 durable authority/issue 与 worker 协议匹配。空业务启动应使用全新独立 PG/Redis/Kafka 和合成配置，保留真实调度/ready callbacks，检查 root/readiness 与至少一周轮询间隔的空业务/负向调用，不借用生产数据库。
+
+选择 `APP_VERSION` 回滚还必须满足[迁移 runbook](operations/template-migration-runbook.md)和[Source 发布 runbook](operations/source-publication-runbook.md)的围栏/排空/结果兼容门槛。不得仅因数据库迁移 additive 而启动不理解 transfer 或 admission 的旧执行版本；不删除新增表或自动恢复发送/周计划。验证镜像使用独立版本标签，不能覆盖他人的全局 `:dev`。
+
 ## 配置准备
 
 ```bash

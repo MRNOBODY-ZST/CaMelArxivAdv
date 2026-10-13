@@ -9,6 +9,7 @@ from typing import Protocol
 from aiokafka import TopicPartition
 
 from app.jobs.arxiv_consumer import CommandOutcome
+from app.jobs.source_retry import SourceRetryDecision
 from app.messaging.contracts import MessageEnvelope, ResultPayload
 
 
@@ -123,7 +124,7 @@ def contract_headers(message_type: str, version: int) -> list[tuple[str, bytes]]
 
 async def settle_delivery(
     incoming: KafkaRecord,
-    outcome: CommandOutcome,
+    outcome: CommandOutcome | SourceRetryDecision,
     producer: KafkaProducer,
     consumer: KafkaConsumer,
     *,
@@ -150,7 +151,9 @@ async def settle_delivery(
             await on_permanent_failure()
         await _commit(consumer, incoming)
         return
-    if outcome is CommandOutcome.RETRY and retry_count >= 5:
+    if (isinstance(outcome, SourceRetryDecision) and outcome.exhausted) or (
+        outcome is CommandOutcome.RETRY and retry_count >= 5
+    ):
         await producer.send_and_wait(
             dead_letter_topic,
             value=incoming.value,

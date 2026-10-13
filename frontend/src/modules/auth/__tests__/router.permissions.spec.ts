@@ -45,6 +45,7 @@ describe('router permissions', () => {
   })
 
   it.each([
+    ['/email/automation', 'campaign:read'],
     ['/email/segments', 'campaign:read'],
     ['/email/campaigns', 'campaign:read'],
     ['/email/campaigns/:id', 'campaign:read'],

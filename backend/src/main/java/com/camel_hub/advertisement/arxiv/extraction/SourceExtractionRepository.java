@@ -1,5 +1,8 @@
 package com.camel_hub.advertisement.arxiv.extraction;
 
+import com.camel_hub.advertisement.arxiv.extraction.admission.SourceAdmissionRepository;
+import com.camel_hub.advertisement.arxiv.extraction.admission.SourceCommandIdentity;
+
 import org.springframework.r2dbc.core.DatabaseClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -11,9 +14,15 @@ import java.util.UUID;
 public final class SourceExtractionRepository {
 
 	private final DatabaseClient databaseClient;
+	private final SourceAdmissionRepository admission;
 
 	public SourceExtractionRepository(DatabaseClient databaseClient) {
+		this(databaseClient, new SourceAdmissionRepository(databaseClient));
+	}
+
+	public SourceExtractionRepository(DatabaseClient databaseClient, SourceAdmissionRepository admission) {
 		this.databaseClient = databaseClient;
+		this.admission = admission;
 	}
 
 	public Flux<PaperTarget> lockPapers(List<UUID> paperIds) {
@@ -50,6 +59,9 @@ public final class SourceExtractionRepository {
 	public Mono<SourceExtractionService.JobSubmission> create(Command command) {
 		return insertJob(command)
 				.flatMap(created -> insertItems(command).then(appendEvent(command)).then(insertOutbox(command))
+						.then(Mono.defer(() -> admission.initializeCommand(command.jobId(),command.messageId(),
+								command.type(),command.idempotencyKey(),SourceCommandIdentity.fingerprint(command.parametersJson()),
+								SourceCommandIdentity.validatedPayload(command.parametersJson()).get("targets").size())))
 						.thenReturn(created))
 				.switchIfEmpty(find(command.idempotencyKey())
 						.repeatWhenEmpty(repeat -> repeat.delayElements(Duration.ofMillis(20)).take(5)));

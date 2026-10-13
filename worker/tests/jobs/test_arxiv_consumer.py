@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from app.arxiv.models import ArxivAuthor, ArxivMetadata, OaiRecordPage
 from app.arxiv.oai_client import OaiProtocolError
+from app.arxiv.source_errors import SourceUpstreamReason, SourceUpstreamTransientError
 from app.arxiv.taxonomy import TaxonomyCategory
 from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import SourceProgress
@@ -114,9 +116,7 @@ class FakeStore:
     async def source_progress_for(self, idempotency_key: str) -> SourceProgress | None:
         return self.source_progress
 
-    async def save_source_progress(
-        self, idempotency_key: str, progress: SourceProgress
-    ) -> bool:
+    async def save_source_progress(self, idempotency_key: str, progress: SourceProgress) -> bool:
         self.source_progress = progress
         return True
 
@@ -131,6 +131,45 @@ class SequenceControlStore(FakeStore):
 
     async def control_for(self, job_id: UUID) -> str:
         return self.controls.pop(0) if self.controls else "RUN"
+
+
+class FailingLegacyClient(FakeLegacyClient):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def fetch_ids(self, arxiv_ids: tuple[str, ...]) -> tuple[ArxivMetadata, ...]:
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [httpx.HTTPError("synthetic"), TimeoutError(), ConnectionError()])
+async def test_metadata_upstream_errors_keep_generic_retry_policy(error: Exception) -> None:
+    publisher = FakePublisher()
+    processor = ArxivCommandProcessor(
+        FailingLegacyClient(error),
+        FakeOaiClient(),
+        publisher,
+        FakeStore(),
+        batch_size=50,
+    )
+    assert await processor.process(command_body()) is CommandOutcome.RETRY
+    assert publisher.messages[-1].payload.error_code == "ARXIV_RETRYABLE"
+
+
+@pytest.mark.asyncio
+async def test_source_typed_error_outside_source_runner_is_not_a_source_decision() -> None:
+    publisher = FakePublisher()
+    processor = ArxivCommandProcessor(
+        FailingLegacyClient(SourceUpstreamTransientError(SourceUpstreamReason.NETWORK)),
+        FakeOaiClient(),
+        publisher,
+        FakeStore(),
+        batch_size=50,
+    )
+    with pytest.raises(SourceUpstreamTransientError):
+        await processor.process(command_body())
+    assert len(publisher.messages) == 1
 
 
 @pytest.mark.asyncio
@@ -249,9 +288,7 @@ async def test_mid_loop_cancel_is_acked_without_fetching_or_retrying() -> None:
     legacy = FakeLegacyClient()
     publisher = FakePublisher()
     store = SequenceControlStore(["RUN", "CANCEL"])
-    processor = ArxivCommandProcessor(
-        legacy, FakeOaiClient(), publisher, store, batch_size=50
-    )
+    processor = ArxivCommandProcessor(legacy, FakeOaiClient(), publisher, store, batch_size=50)
 
     assert await processor.process(command_body()) is CommandOutcome.ACK
     assert legacy.calls == []

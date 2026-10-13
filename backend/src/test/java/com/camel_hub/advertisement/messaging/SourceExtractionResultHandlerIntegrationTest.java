@@ -136,6 +136,52 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void stableResultKeySurvivesNewEnvelopeAndAdministrativeHoldPreservesActualPrefix() {
+		UUID stable = UUID.randomUUID();
+		String first = resultMessage(stable, "[email redacted]");
+		handler.handle(first).block();
+		String replay = first.replace("\"messageId\":\"" + stable, "\"messageId\":\"" + UUID.randomUUID());
+		assertThat(handler.handle(replay).block().duplicate()).isTrue();
+		databaseClient.sql("UPDATE jobs SET checkpoint = '{\"nextIndex\":1}'::jsonb WHERE id=:id")
+				.bind("id", jobId).fetch().rowsUpdated().block();
+		String hold = progressMessage(UUID.randomUUID()).replace("\"RUNNING\"", "\"PAUSED\"")
+				.replace("EXTRACTING_CONTACTS", "SOURCE_RECONCILIATION_REQUIRED")
+				.replace("\"processedCount\":2", "\"processedCount\":0")
+				.replace("\"successCount\":2", "\"successCount\":0")
+				.replace("\"progressPercent\":100", "\"progressPercent\":0");
+		handler.handle(hold).block();
+		assertThat(handler.handle(hold).block().duplicate()).isTrue();
+		assertThat(count("extraction_runs")).isEqualTo(1);
+		assertThat(number("SELECT success_count FROM jobs WHERE id='" + jobId + "'")).isEqualTo(1);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id='" + jobId + "'")).isEqualTo(1);
+		assertThat(text("SELECT checkpoint->>'nextIndex' FROM jobs WHERE id='" + jobId + "'")).isEqualTo("1");
+		assertThat(text("SELECT status FROM jobs WHERE id='" + jobId + "'")).isEqualTo("PAUSED");
+		assertThat(text("SELECT current_stage FROM jobs WHERE id='" + jobId + "'"))
+				.isEqualTo("SOURCE_RECONCILIATION_REQUIRED");
+		assertThat(count("job_items")).isEqualTo(1);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"FAILED", "CANCELED", "SUCCEEDED", "PARTIALLY_SUCCEEDED"})
+	void lateAndDuplicateSourceEventsCannotResurrectTerminalJobOrParent(String status) {
+		UUID parent = UUID.randomUUID();
+		databaseClient.sql("INSERT INTO jobs(id,type,status,idempotency_key,ended_at) VALUES(:id,'ARXIV_FETCH_AND_PARSE_SOURCE',:status,:key,now())")
+				.bind("id", parent).bind("status", status).bind("key", "synthetic-parent:" + parent)
+				.fetch().rowsUpdated().block();
+		databaseClient.sql("UPDATE jobs SET parent_job_id=:parent,status=:status,ended_at=now() WHERE id=:id")
+				.bind("parent", parent).bind("status", status).bind("id", jobId).fetch().rowsUpdated().block();
+		String result = resultMessage(UUID.randomUUID(), "[email redacted]");
+		handler.handle(result).block();
+		handler.handle(result).block();
+		handler.handle(progressMessage(UUID.randomUUID())).block();
+		handler.handle(completionMessage(UUID.randomUUID())).block();
+		assertThat(text("SELECT status FROM jobs WHERE id='" + jobId + "'")).isEqualTo(status);
+		assertThat(text("SELECT status FROM jobs WHERE id='" + parent + "'")).isEqualTo(status);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id='" + parent + "'")).isZero();
+		assertThat(flag("SELECT ended_at IS NOT NULL FROM jobs WHERE id='" + jobId + "'")).isTrue();
+	}
+
+	@Test
 	void defersSourceCompletionUntilTheLateItemResultArrives() {
 		String premature = completionMessage(UUID.randomUUID());
 
@@ -481,12 +527,79 @@ class SourceExtractionResultHandlerIntegrationTest {
 	}
 
 	@Test
-	void reconcilesSourceAuthorByNameBeforeFallingBackToMetadataOrder() {
+	void refusesToLinkAnUnrecognizedSourceAuthorByMetadataOrder() {
+		String message = resultMessage(UUID.randomUUID(), "[email redacted]")
+				.replace("\"name\":\"Alice Metadata\"", "\"name\":\"Different Source Person\"");
+
+		handler.handle(message).block();
+
+		assertThat(count("authors")).isEqualTo(1);
+		assertThat(count("paper_authors")).isEqualTo(1);
+		assertThat(text("SELECT raw_name FROM paper_authors WHERE paper_id = '" + PAPER + "'"))
+				.isEqualTo("Alice Metadata");
+		assertThat(flag("SELECT corresponding_author FROM paper_authors WHERE paper_id = '"
+				+ PAPER + "'")).isFalse();
+		assertThat(text("SELECT affiliation_data::text FROM paper_authors WHERE paper_id = '"
+				+ PAPER + "'")).isEqualTo("[]");
+		assertThat(flag("SELECT paper_author_id IS NULL FROM paper_author_contacts LIMIT 1"))
+				.isTrue();
+		assertThat(text("SELECT confidence FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("LOW");
+		assertThat(flag("SELECT human_verified FROM paper_author_contacts LIMIT 1")).isFalse();
+		assertThat(text("SELECT verification_status FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("UNVERIFIED");
+		assertThat(text("SELECT masked_context FROM extraction_evidence LIMIT 1"))
+				.isEqualTo("Corresponding author: [email redacted]");
+		assertThat(flag("""
+				SELECT EXISTS (
+				  SELECT 1 FROM paper_author_contacts pac
+				  JOIN extraction_runs er ON er.id = pac.extraction_run_id
+				  WHERE pac.paper_id = '%s' AND er.paper_id = '%s'
+				    AND er.status = 'SUCCEEDED' AND er.parser_version = '0.1.0')
+				""".formatted(PAPER, PAPER))).isTrue();
+	}
+
+	@Test
+	void refusesToLinkAnAmbiguousNormalizedAuthorName() {
+		UUID duplicateAuthor = UUID.randomUUID();
+		databaseClient.sql("""
+				INSERT INTO authors (id, normalized_name, display_name)
+				VALUES (:author, 'alice metadata', 'Alice Metadata')
+				""").bind("author", duplicateAuthor).fetch().rowsUpdated().block();
+		databaseClient.sql("""
+				INSERT INTO paper_authors (
+				  paper_id, author_id, author_order, raw_name, affiliation_data)
+				VALUES (:paper, :author, 2, 'Alice Metadata', '[]'::jsonb)
+				""").bind("paper", PAPER).bind("author", duplicateAuthor).fetch().rowsUpdated().block();
+
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
+
+		assertThat(count("authors")).isEqualTo(2);
+		assertThat(count("paper_authors")).isEqualTo(2);
+		assertThat(number("SELECT count(*) FROM paper_authors WHERE corresponding_author"))
+				.isZero();
+		assertThat(number("""
+				SELECT count(*) FROM paper_authors
+				WHERE affiliation_data <> '[]'::jsonb OR affiliation_text IS NOT NULL
+				""")).isZero();
+		assertThat(flag("SELECT paper_author_id IS NULL FROM paper_author_contacts LIMIT 1"))
+				.isTrue();
+		assertThat(text("SELECT confidence FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("LOW");
+		assertThat(flag("SELECT human_verified FROM paper_author_contacts LIMIT 1")).isFalse();
+		assertThat(text("SELECT verification_status FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("UNVERIFIED");
+		assertThat(text("SELECT masked_context FROM extraction_evidence LIMIT 1"))
+				.isEqualTo("Corresponding author: [email redacted]");
+	}
+
+	@Test
+	void reconcilesAReorderedSourceAuthorByExactNormalizedName() {
 		String sourceAuthors = """
 				"authors":[
 				 {"order":1,"name":"Different Source Person","affiliations":[],
 				  "corresponding":false},
-				 {"order":2,"name":"Alice Metadata","affiliations":["Example Lab"],
+				 {"order":2,"name":"  ALICE   METADATA  ","affiliations":["Example Lab"],
 				  "corresponding":true}],
 				"contacts":""";
 		String message = resultMessage(UUID.randomUUID(), "[email redacted]")
@@ -501,8 +614,34 @@ class SourceExtractionResultHandlerIntegrationTest {
 				JOIN paper_authors pa ON pa.id = pac.paper_author_id
 				LIMIT 1
 				""")).isEqualTo(AUTHOR.toString());
+		assertThat(text("SELECT confidence FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("HIGH");
+		assertThat(flag("SELECT corresponding_author FROM paper_authors WHERE paper_id = '"
+				+ PAPER + "'")).isTrue();
 		assertThat(text("SELECT status FROM job_items WHERE job_id = '" + jobId + "'"))
 				.isEqualTo("SUCCEEDED");
+	}
+
+	@Test
+	void bootstrapsSourceAuthorsWhenThePaperHasNoMetadataAuthors() {
+		databaseClient.sql("DELETE FROM paper_authors WHERE paper_id = :paper")
+				.bind("paper", PAPER).fetch().rowsUpdated().block();
+		databaseClient.sql("DELETE FROM authors").fetch().rowsUpdated().block();
+
+		handler.handle(resultMessage(UUID.randomUUID(), "[email redacted]")).block();
+
+		assertThat(count("authors")).isEqualTo(1);
+		assertThat(count("paper_authors")).isEqualTo(1);
+		assertThat(text("""
+				SELECT a.normalized_name FROM paper_author_contacts pac
+				JOIN paper_authors pa ON pa.id = pac.paper_author_id
+				JOIN authors a ON a.id = pa.author_id
+				LIMIT 1
+				""")).isEqualTo("alice metadata");
+		assertThat(text("SELECT confidence FROM paper_author_contacts LIMIT 1"))
+				.isEqualTo("HIGH");
+		assertThat(text("SELECT affiliation_data::text FROM paper_authors LIMIT 1"))
+				.isEqualTo("[\"Example Lab\"]");
 	}
 
 	@Test
@@ -707,7 +846,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 	void rejectsEmailLikeTextOutsideEncryptedContactFields() {
 		String safe = resultMessage(UUID.randomUUID(), "[email redacted]");
 		var unsafeMessages = java.util.List.of(
-				safe.replace("Alice Example", "alice＠example.edu"),
+				safe.replace("Alice Metadata", "alice＠example.edu"),
 				safe.replace("Example Lab", "Example Lab; 用户@example.org"),
 				safe.replace("paper/main.tex", "paper/bob@example.org.tex"),
 				resultMessage(UUID.randomUUID(), "Contact josé@example.org"),
@@ -749,7 +888,7 @@ class SourceExtractionResultHandlerIntegrationTest {
 				 "status":"SUCCEEDED","cleanupConfirmed":true,"sourceFormat":"TAR_GZIP",
 				 "archiveSizeBytes":1200,"extractedSizeBytes":4000,"filesInspected":2,
 				 "durationMs":85,"documentClass":"article",
-				 "authors":[{"order":1,"name":"Alice Example","affiliations":["Example Lab"],
+				 "authors":[{"order":1,"name":"Alice Metadata","affiliations":["Example Lab"],
 				             "corresponding":true}],
 				 "contacts":[{"normalizedEmail":"alice@university.edu",
 				 "displayEmail":"alice@university.edu","domain":"university.edu",

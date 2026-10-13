@@ -47,9 +47,173 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 
 	private CampaignDeliveryRepository repository;
 
+	@Test
+	void transferredSourcesRemainHistoricalButNeverActionable() {
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "transferred@research.test");
+		insertLegacyTransfer(campaign, recipient);
+		assertThat(repository.claimNext(NOW).block()).isNull();
+		sql("UPDATE campaign_recipients SET personalization_status='FAILED' WHERE id='" + recipient + "'");
+		assertThat(repository.reconcileUndeliverable(NOW).block()).isZero();
+		sql("UPDATE campaigns SET status='CANCELED' WHERE id='" + campaign + "'");
+		assertThat(repository.reconcileCanceledRecipients(NOW).block()).isZero();
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id='" + recipient + "'")).isEqualTo("QUEUED");
+		assertThat(count("delivery_attempts")).isZero();
+	}
+
+	@Test
+	void stalePreparedClaimCannotBeginSmtp() {
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "stale-transfer@research.test");
+		var claim = repository.claimNextProduction(NOW).block();
+		// Legacy/adversarial persisted transfer must fence even though modern migration rejects attempts.
+		insertLegacyTransfer(campaign, recipient);
+		assertThat(repository.productionEligible(claim, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)).block()).isFalse();
+		assertThat(repository.beginSmtp(claim, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)).block()).isFalse();
+		assertThat(count("delivery_attempts WHERE smtp_started_at IS NOT NULL")).isZero();
+		var staleQueue = org.mockito.Mockito.spy(repository);
+		org.mockito.Mockito.doReturn(reactor.core.publisher.Mono.just((CampaignDeliveryRepository.DeliveryClaim) claim)).when(staleQueue).claimNext(NOW);
+		var preparations = new java.util.concurrent.atomic.AtomicInteger();
+		var sends = new java.util.concurrent.atomic.AtomicInteger();
+		var executor = new CampaignDeliveryExecutor(staleQueue, ignored -> {
+			preparations.incrementAndGet();
+			return reactor.core.publisher.Mono.just(new CampaignOutboundPreparer.PreparedOutbound("subject", "html", "text", java.util.Map.of()));
+		}, contactCrypto, (CampaignDeliveryExecutor.CampaignSmtpSender) (account, outbound) -> { sends.incrementAndGet(); return null; }, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC));
+		assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.NO_WORK);
+		assertThat(preparations.get()).isZero();
+		assertThat(sends.get()).isZero();
+		assertThat(new com.camel_hub.advertisement.campaign.tracking.CampaignTrackingRepository(databaseClient)
+				.lockPreparation(claim, com.camel_hub.advertisement.campaign.tracking.CampaignTrackingSigner.sha256Bytes(claim.leaseDigest()), NOW)
+				.as(transactions::transactional).block()).isNull();
+		assertThatThrownBy(() -> new com.camel_hub.advertisement.campaign.partner.R2dbcPartnerInviteRepository(databaseClient)
+				.reserve(claim, "stale-partner", NOW).block()).isInstanceOf(com.camel_hub.advertisement.campaign.partner.PartnerInviteException.class);
+		assertThat(count("tracking_tokens")).isZero();
+		assertThat(count("partner_invites")).isZero();
+	}
+
+	private void insertLegacyTransfer(UUID source, UUID recipient) {
+		UUID target = insertCampaign("DRAFT");
+		UUID targetRecipient = insertEligibleRecipient(target, "target-" + UUID.randomUUID() + "@research.test");
+		UUID migration = UUID.randomUUID();
+		sql("INSERT INTO campaign_template_migrations(id,actor_id,idempotency_key,request_digest,membership_digest,source_campaign_id,target_campaign_id,target_template_id,target_template_version_id,source_lock_version,target_template_lock_version,selected_count,migrated_count,status) VALUES ('"
+				+ migration + "','" + ACTOR + "','" + migration + "',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),'" + source + "','" + target + "','" + TEMPLATE + "','" + TEMPLATE_VERSION + "',0,0,1,1,'MIGRATED')");
+		sql("INSERT INTO campaign_recipient_transfers(migration_id,source_campaign_id,source_recipient_id,target_campaign_id,target_recipient_id) VALUES ('" + migration + "','" + source + "','" + recipient + "','" + target + "','" + targetRecipient + "')");
+	}
+
+	@Test
+	void transferredSourceCannotRequeueOrResumeAndPreflightBindsTransfer() {
+		UUID campaign = insertCampaign("PAUSED");
+		UUID recipient = insertEligibleRecipient(campaign, "source-selection@research.test");
+		var campaigns = new com.camel_hub.advertisement.campaign.CampaignRepository(databaseClient);
+		var workflow = new com.camel_hub.advertisement.campaign.CampaignWorkflowRepository(databaseClient);
+		var before = workflow.preflight(campaign, NOW.minusSeconds(3600)).block();
+		var frozen = campaigns.frozenProductionRecipients(campaign, NOW.minusSeconds(3600), new String[0]).single().block();
+		insertLegacyTransfer(campaign, recipient);
+		sql("UPDATE campaign_recipients SET personalization_status='FAILED' WHERE id='" + recipient + "'");
+		assertThatThrownBy(() -> campaigns.requeueFrozenRecipient(campaign, frozen).block()).isInstanceOf(com.camel_hub.advertisement.campaign.CampaignValidationException.class);
+		assertThat(campaigns.frozenProductionRecipients(campaign, NOW.minusSeconds(3600), new String[0]).single().block().currentlyEligible()).isFalse();
+		assertThat(workflow.resume(campaign, 0, ACTOR).block()).isNull();
+		assertThat(workflow.preflight(campaign, NOW.minusSeconds(3600)).block().eligible()).isZero();
+		assertThat(workflow.preflight(campaign, NOW.minusSeconds(3600)).block().recipientFingerprint()).isNotEqualTo(before.recipientFingerprint());
+		var segments = new com.camel_hub.advertisement.campaign.SegmentRepository(databaseClient, new ObjectMapper());
+		assertThat(segments.campaignCandidates(new com.camel_hub.advertisement.campaign.SegmentModels.SegmentCriteria(null,null,null,null,null), 120)
+				.filter(candidate -> java.util.Arrays.equals(candidate.emailHmac(), frozen.emailHmac())).collectList().block()).isEmpty();
+	}
+
 	@BeforeEach
 	void createRepository() {
 		repository = repository();
+	}
+
+	@Test
+	void leaseExpiringBetweenEligibilityAndFenceNeverCommitsStartedState() {
+		UUID campaign=insertCampaign("RUNNING");
+		UUID recipient=insertEligibleRecipient(campaign,"fence-expiry@research.test");
+		optIn(recipient);
+		var claim=repository.claimNextProduction(NOW).block();
+		var clock=org.mockito.Mockito.mock(java.time.Clock.class);
+		org.mockito.Mockito.when(clock.instant()).thenReturn(NOW,NOW.plus(DELIVERY_PROPERTIES.leaseDuration()).plusSeconds(1));
+		assertThat(repository.beginSmtp(claim,clock).block()).isFalse();
+		assertThat(count("delivery_attempts WHERE id='"+claim.attemptId()+"' AND smtp_started_at IS NULL AND partner_preparation_pending")).isEqualTo(1);
+	}
+
+	@Test
+	void expiredBeforeSmtpCompensationIsExactAndCannotOverwriteSettledOrCanceledState() throws Exception {
+		UUID campaign=insertCampaign("RUNNING");
+		UUID recipient=insertEligibleRecipient(campaign,"compensate@research.test");
+		optIn(recipient);
+		var claim=repository.claimNextProduction(NOW).block();
+		assertThat(repository.holdExpiredBeforeSmtp(claim,NOW).block()).isFalse();
+		assertThat(repository.beginSmtp(claim,java.time.Clock.fixed(NOW,java.time.ZoneOffset.UTC)).block()).isTrue();
+		assertThat(repository.holdPartnerInvite(claim,"EXPIRED",NOW).block()).isFalse();
+		databaseClient.sql("UPDATE campaign_recipients SET delivery_lease_hash=:hash WHERE id=:id")
+				.bind("hash",new byte[32]).bind("id",recipient).fetch().rowsUpdated().block();
+		assertThat(repository.holdExpiredBeforeSmtp(claim,NOW).block()).isFalse();
+		databaseClient.sql("UPDATE campaign_recipients SET delivery_lease_hash=:hash WHERE id=:id")
+				.bind("hash",java.security.MessageDigest.getInstance("SHA-256").digest(claim.leaseDigest())).bind("id",recipient).fetch().rowsUpdated().block();
+		databaseClient.sql("UPDATE campaigns SET status='CANCELED', canceled_at=:now WHERE id=:id").bind("now",NOW).bind("id",campaign).fetch().rowsUpdated().block();
+		assertThat(repository.holdExpiredBeforeSmtp(claim,NOW).block()).isTrue();
+		assertThat(repository.holdExpiredBeforeSmtp(claim,NOW).block()).isFalse();
+		assertThat(text("SELECT status FROM campaigns WHERE id='"+campaign+"'")).isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id='"+recipient+"'")).isEqualTo("CANCELED");
+		assertThat(text("SELECT failure_category FROM delivery_attempts WHERE id='"+claim.attemptId()+"'")).isEqualTo("PARTNER_INVITE_EXPIRED");
+		assertThat(count("audit_logs WHERE action='CAMPAIGN_PARTNER_INVITE_HELD' AND resource_id='"+recipient+"'")).isEqualTo(1);
+	}
+
+	@Test
+	void invitationHoldRetainsAttemptAndBlocksResumeAndReclaim() {
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "hold@research.test");
+		optIn(recipient);
+		var claim = repository.claimNextProduction(NOW).block();
+		assertThat(repository.holdPartnerInvite(claim, "HELD", NOW).block()).isTrue();
+		assertThat(text("SELECT status FROM campaigns WHERE id = '" + campaign + "'")).isEqualTo("PAUSED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id = '" + recipient + "'")).isEqualTo("QUEUED");
+		assertThat(text("SELECT failure_category FROM delivery_attempts WHERE id = '" + claim.attemptId() + "'")).isEqualTo("PARTNER_INVITE_HELD");
+		assertThat(text("SELECT status FROM delivery_attempts WHERE id = '" + claim.attemptId() + "'")).isEqualTo("CANCELED");
+		var workflow = new com.camel_hub.advertisement.campaign.CampaignWorkflowRepository(databaseClient);
+		long version = integer("SELECT lock_version FROM campaigns WHERE id = '" + campaign + "'");
+		assertThat(workflow.resume(campaign, version, ACTOR).block()).isNull();
+		databaseClient.sql("UPDATE campaigns SET status='RUNNING' WHERE id=:id").bind("id", campaign).fetch().rowsUpdated().block();
+		assertThat(repository.claimNext(NOW.plusSeconds(600)).block()).isNull();
+		assertThat(integer("SELECT attempt_count FROM campaign_recipients WHERE id='" + recipient + "'")).isEqualTo(1);
+	}
+
+	@Test
+	void preparationCrashIsUnsentHoldButSmtpStartedCrashRemainsUnknown() {
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "crash@research.test");
+		optIn(recipient);
+		var claim = repository.claimNextProduction(NOW).block();
+		assertThat(repository.reconcileExpiredLeases(NOW.plusSeconds(600)).block()).isEqualTo(1);
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id='" + recipient + "'")).isEqualTo("QUEUED");
+		assertThat(text("SELECT failure_category FROM delivery_attempts WHERE id='" + claim.attemptId() + "'")).isEqualTo("PARTNER_INVITE_PREPARATION_INTERRUPTED");
+		UUID secondCampaign = insertCampaign("RUNNING");
+		UUID second = insertEligibleRecipient(secondCampaign, "smtp-crash@research.test");
+		optIn(second);
+		var started = repository.claimNextProduction(NOW).block();
+		assertThat(repository.beginSmtp(started, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)).block()).isTrue();
+		assertThat(repository.reconcileExpiredLeases(NOW.plusSeconds(600)).block()).isEqualTo(1);
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id='" + second + "'")).isEqualTo("OUTCOME_UNKNOWN");
+	}
+
+	@Test
+	void cancellationWinsEligibilityAndInvitationHoldCannotPauseCanceledCampaign() {
+		UUID campaign = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(campaign, "cancel-invite@research.test");
+		optIn(recipient);
+		var claim = repository.claimNextProduction(NOW).block();
+		databaseClient.sql("UPDATE campaigns SET status='CANCELED', canceled_at=:now WHERE id=:id").bind("now", NOW).bind("id", campaign).fetch().rowsUpdated().block();
+		assertThat(repository.productionEligible(claim, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)).block()).isFalse();
+		assertThat(repository.beginSmtp(claim, java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)).block()).isFalse();
+		assertThat(repository.holdPartnerInvite(claim, "HELD", NOW).block()).isTrue();
+		assertThat(text("SELECT status FROM campaigns WHERE id='" + campaign + "'")).isEqualTo("CANCELED");
+		assertThat(text("SELECT status FROM campaign_recipients WHERE id='" + recipient + "'")).isEqualTo("CANCELED");
+	}
+
+	private void optIn(UUID recipient) {
+		databaseClient.sql("UPDATE campaign_recipients SET rendered_html=rendered_html || '<a href=\"{{partner_claim_url}}\">Activate</a>', rendered_text=rendered_text || ' Activate {{partner_claim_url}}' WHERE id=:id")
+				.bind("id", recipient).fetch().rowsUpdated().block();
 	}
 
 	@Test
@@ -364,7 +528,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 
 		UUID evidenceCampaign = insertCampaign("RUNNING");
 		UUID invalidEvidence = insertEligibleRecipient(evidenceCampaign, "evidence@research.test");
-		sql("UPDATE paper_author_contacts SET human_verified = false WHERE contact_id = "
+		sql("UPDATE paper_author_contacts SET verification_status = 'REJECTED' WHERE contact_id = "
 				+ "(SELECT contact_id FROM campaign_recipients WHERE id = '" + invalidEvidence + "')");
 
 		UUID cooldownCampaign = insertCampaign("RUNNING");
@@ -385,10 +549,11 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	}
 
 	@Test
-	void claimRejectsRecipientWhoseApprovedConfidenceIsNoLongerHigh() {
+	void claimRejectsRecipientWhoseCurrentSourceEvidenceIsLow() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "medium@research.test");
-		sql("UPDATE campaign_recipients SET confidence = 'MEDIUM' WHERE id = '" + recipientId + "'");
+		sql("UPDATE paper_author_contacts SET confidence = 'LOW' WHERE contact_id = "
+				+ "(SELECT contact_id FROM campaign_recipients WHERE id = '" + recipientId + "')");
 
 		assertThat(repository.claimNext(NOW).block()).isNull();
 
@@ -406,6 +571,18 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		assertThat(repository.claimNext(NOW).block()).isNull();
 
 		assertThat(recipientState(recipientId)).isEqualTo(new RecipientState("SUPPRESSED", "CONTACT_INVALID"));
+		assertThat(count("delivery_attempts")).isZero();
+	}
+
+	@Test
+	void eligibilityReconciliationRejectsPaperSoftDeletedAfterApproval() {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "deleted-paper@research.test");
+		sql("UPDATE papers SET deleted_at = TIMESTAMPTZ '" + NOW + "' WHERE id = '" + PAPER + "'");
+
+		assertThat(repository.reconcileUndeliverable(NOW).block()).isEqualTo(1);
+
+		assertThat(recipientState(recipientId)).isEqualTo(new RecipientState("SUPPRESSED", "EVIDENCE_INVALID"));
 		assertThat(count("delivery_attempts")).isZero();
 	}
 
@@ -458,7 +635,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 		UUID campaign = insertCampaign("RUNNING");
 		UUID firstRecipient = insertEligibleRecipient(campaign, "bounded-one@research.test");
 		UUID secondRecipient = insertEligibleRecipient(campaign, "bounded-two@research.test");
-		sql("UPDATE paper_author_contacts SET human_verified = false");
+		sql("UPDATE paper_author_contacts SET confidence = 'LOW'");
 		CampaignDeliveryProperties oneCampaignPerRun = new CampaignDeliveryProperties(
 				true, 1, Duration.ofMinutes(2), Duration.ofDays(180), 3,
 				Duration.ofMinutes(1), Duration.ofMinutes(5), Duration.ofSeconds(1));
@@ -521,7 +698,7 @@ class CampaignDeliveryRepositoryIntegrationTest extends CampaignDeliveryDatabase
 	void eligibilityReconciliationNeverMutatesProductionRowsDuringActiveSafetyRun() {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "safety-isolated@research.test");
-		sql("UPDATE paper_author_contacts SET human_verified = false WHERE contact_id = "
+		sql("UPDATE paper_author_contacts SET verification_status = 'REJECTED' WHERE contact_id = "
 				+ "(SELECT contact_id FROM campaign_recipients WHERE id = '" + recipientId + "')");
 		insertSafetyRun(recipientId, "RUNNING");
 

@@ -161,7 +161,9 @@ public final class TemplateService {
 		if (!normalized.prepared().validation().valid()) {
 			throw new TemplateValidationException(String.join("; ", normalized.prepared().validation().errors()));
 		}
-		return new PreviewView(engine.render(normalized.prepared(), variables), normalized.prepared().validation(),
+		Map<String, String> previewVariables = new java.util.LinkedHashMap<>(variables == null ? Map.of() : variables);
+		previewVariables.put("partner_claim_url", com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.PREVIEW_URL);
+		return new PreviewView(engine.render(normalized.prepared(), previewVariables), normalized.prepared().validation(),
 				normalized.prepared().contentSizeBytes());
 	}
 

@@ -5,10 +5,13 @@ import { computed, onMounted, ref } from 'vue'
 import DsAlert from '@/components/design-skill/DsAlert.vue'
 import DsBadge from '@/components/design-skill/DsBadge.vue'
 import DsCard from '@/components/design-skill/DsCard.vue'
+import PersonalizationSettingsPanel from '@/modules/admin/PersonalizationSettingsPanel.vue'
+import { useAuthStore } from '@/modules/auth/auth.store'
 import { campaignErrorMessage, campaignsApi } from '@/modules/campaigns/campaigns.api'
 import type { RuntimeStatus } from '@/modules/campaigns/campaigns.types'
 
 const loading = ref(true)
+const auth = useAuthStore()
 const error = ref('')
 const runtime = ref<RuntimeStatus | null>(null)
 const runtimeItems = computed(() => runtime.value ? [
@@ -53,6 +56,10 @@ onMounted(load)
         查看个性化生成、Ray、Kafka 与邮件协议安全开关；接口不返回任何密钥或凭据。
       </p>
     </header>
+    <PersonalizationSettingsPanel
+      v-if="auth.hasPermission('system:manage')"
+      @refreshed="load"
+    />
     <DsAlert
       v-if="error"
       tone="danger"
@@ -123,7 +130,7 @@ onMounted(load)
             <h2 class="text-sm font-semibold text-slate-900">
               安全配置说明
             </h2><p class="mt-1 text-sm/6 text-slate-500">
-              状态页仅报告开关、服务名和模型名。密钥只通过运行环境注入，不会写入前端包或日志。当前 SMTP 外发为“{{ runtime.liveSmtpAllowed ? '允许' : '禁止' }}”，IMAP/POP3 公网连接为“{{ runtime.publicMailboxAllowed ? '允许（强制 TLS）' : '禁止' }}”。
+              状态页仅报告开关、服务名和模型名。密钥可来自运行环境或加密数据库存储，不会返回界面，也不会写入前端存储或日志。当前 SMTP 外发为“{{ runtime.liveSmtpAllowed ? '允许' : '禁止' }}”，IMAP/POP3 公网连接为“{{ runtime.publicMailboxAllowed ? '允许（强制 TLS）' : '禁止' }}”。
             </p>
           </div>
         </div>

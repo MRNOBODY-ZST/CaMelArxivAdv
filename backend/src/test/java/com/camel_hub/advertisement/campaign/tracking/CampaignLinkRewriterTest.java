@@ -13,6 +13,18 @@ class CampaignLinkRewriterTest {
 	private final CampaignLinkRewriter rewriter = new CampaignLinkRewriter("https://tracking.example.test");
 
 	@Test
+	void activationCapabilitiesNeverBecomeTrackedRedirects() {
+		String url = "https://api.camel-hub.cn/partner/claim?token=private";
+		String html = "<a href=\"{{partner_claim_url}}\">Activate</a><a href=\"" + url + "\">Old</a>";
+		assertThat(rewriter.eligibleLinks(html, null)).isEmpty();
+		assertThat(rewriter.rewrite(html, Map.of("{{partner_claim_url}}", "opaque", url, "opaque")))
+				.contains("{{partner_claim_url}}", url).doesNotContain("/t/c/");
+		var redacted = new CampaignPublicContentRedactor().redact("Invite", html, url, false);
+		assertThat(redacted.html()).isNull();
+		assertThat(redacted.text()).isNull();
+	}
+
+	@Test
 	void discoversOnlyAbsoluteSafeHttpTargetsAndNeverTracksCallbackUrls() {
 		String unsubscribe = "https://tracking.example.test/u/campaign-unsubscribe:v1.opaque";
 		String html = """

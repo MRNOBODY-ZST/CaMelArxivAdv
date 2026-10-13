@@ -36,7 +36,7 @@ onBeforeUnmount(() => editor.value?.destroy())
 function setLink(): void {
   if (!editor.value) return
   const previous = editor.value.getAttributes('link').href as string | undefined
-  const href = globalThis.window.prompt('输入完整的 HTTPS 链接或选择变量 {{paper_url}} / {{unsubscribe_url}}', previous ?? 'https://')
+  const href = globalThis.window.prompt('输入完整的 HTTPS 链接或选择变量 {{paper_url}} / {{unsubscribe_url}} / {{partner_claim_url}}', previous ?? 'https://')
   if (href === null) return
   if (!href) editor.value.chain().focus().extendMarkRange('link').unsetLink().run()
   else editor.value.chain().focus().extendMarkRange('link').setLink({ href }).run()

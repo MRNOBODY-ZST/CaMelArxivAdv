@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.campaign.safety;
 
 import com.camel_hub.advertisement.campaign.CampaignValidationException;
+import com.camel_hub.advertisement.campaign.delivery.CampaignSafetyProperties;
 import com.camel_hub.advertisement.common.api.RequestContextSupport;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -82,22 +83,32 @@ public class CampaignSafetyController {
 		private final Long expectedLockVersion;
 		private final Integer recipientLimit;
 		private final String confirmation;
+		private final String destinationKey;
 
 		public SafetyStartRequest(
 				Long expectedLockVersion, Integer recipientLimit, String confirmation
 		) {
+			this(expectedLockVersion, recipientLimit, confirmation, null);
+		}
+
+		public SafetyStartRequest(
+				Long expectedLockVersion, Integer recipientLimit, String confirmation, String destinationKey
+		) {
 			this.expectedLockVersion = expectedLockVersion;
 			this.recipientLimit = recipientLimit;
 			this.confirmation = confirmation;
+			this.destinationKey = destinationKey;
 		}
 
 		CampaignSafetyService.StartCommand command() {
 			if (expectedLockVersion == null || expectedLockVersion < 0 || recipientLimit == null
 					|| recipientLimit < 1 || recipientLimit > 20
-					|| !CampaignSafetyService.CONFIRMATION.equals(confirmation)) {
+					|| !CampaignSafetyService.CONFIRMATION.equals(confirmation)
+					|| (destinationKey != null && !CampaignSafetyProperties.validDestinationKey(destinationKey))) {
 				throw new CampaignValidationException("Campaign safety request is invalid");
 			}
-			return new CampaignSafetyService.StartCommand(expectedLockVersion, recipientLimit, confirmation);
+			return new CampaignSafetyService.StartCommand(
+					expectedLockVersion, recipientLimit, confirmation, destinationKey);
 		}
 
 		public static final class Deserializer extends ValueDeserializer<SafetyStartRequest> {
@@ -108,6 +119,7 @@ public class CampaignSafetyController {
 				Long version = null;
 				Integer limit = null;
 				String confirmation = null;
+				String destinationKey = null;
 				while (parser.nextToken() != JsonToken.END_OBJECT) {
 					if (parser.currentToken() != JsonToken.PROPERTY_NAME) invalid(parser, "campaign safety request");
 					String name = parser.currentName();
@@ -117,13 +129,14 @@ public class CampaignSafetyController {
 						case "expectedLockVersion" -> version = strictLong(parser, value, "campaign safety request");
 						case "recipientLimit" -> limit = strictInt(parser, value, "campaign safety request");
 						case "confirmation" -> confirmation = strictString(parser, value, "campaign safety request");
+						case "destinationKey" -> destinationKey = strictString(parser, value, "campaign safety request");
 						default -> invalid(parser, "campaign safety request");
 					}
 				}
-				if (!fields.equals(Set.of("expectedLockVersion", "recipientLimit", "confirmation"))) {
+				if (!fields.containsAll(Set.of("expectedLockVersion", "recipientLimit", "confirmation"))) {
 					invalid(parser, "campaign safety request");
 				}
-				return new SafetyStartRequest(version, limit, confirmation);
+				return new SafetyStartRequest(version, limit, confirmation, destinationKey);
 			}
 		}
 	}

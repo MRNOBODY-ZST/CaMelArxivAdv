@@ -100,6 +100,39 @@ export interface AuditQuery {
   result?: string
 }
 
+export type PersonalizationProvider = 'anthropic' | 'openai'
+export type PersonalizationAuthScheme = 'x-api-key' | 'bearer'
+
+export interface PersonalizationSettings {
+  version: number
+  enabled: boolean
+  provider: PersonalizationProvider
+  model: string
+  apiOrigin: string
+  authScheme: PersonalizationAuthScheme
+  keyConfigured: boolean
+  source: 'ENVIRONMENT' | 'DATABASE'
+  updatedAt: string | null
+}
+
+export interface PersonalizationSettingsRequest {
+  version: number
+  enabled: boolean
+  provider: PersonalizationProvider
+  model: string
+  apiOrigin: string
+  authScheme: PersonalizationAuthScheme
+  apiKey?: string
+}
+
+export interface PersonalizationConnectionResult {
+  success: boolean
+  message: string
+  provider: string
+  model: string
+  latencyMs: number
+}
+
 export const adminApi = {
   async listUsers(query: UserQuery = {}): Promise<PageResponse<UserView>> {
     const { data } = await apiClient.get<PageResponse<UserView>>('/users', { params: query })
@@ -145,6 +178,22 @@ export const adminApi = {
     const { data } = await apiClient.get<PageResponse<AuditLogView>>('/audit-logs', { params: query })
     return data
   },
+  async getPersonalizationSettings(): Promise<PersonalizationSettings> {
+    const { data } = await apiClient.get<PersonalizationSettings>('/system/personalization')
+    return data
+  },
+  async updatePersonalizationSettings(request: PersonalizationSettingsRequest): Promise<PersonalizationSettings> {
+    const { data } = await apiClient.put<PersonalizationSettings>('/system/personalization', request)
+    return data
+  },
+  async testPersonalizationSettings(request: PersonalizationSettingsRequest): Promise<PersonalizationConnectionResult> {
+    const { data } = await apiClient.post<PersonalizationConnectionResult>('/system/personalization/test', request)
+    return data
+  },
+}
+
+export function isAdministrationConflict(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 409
 }
 
 export function administrationErrorMessage(error: unknown, forbiddenMessage: string): string {

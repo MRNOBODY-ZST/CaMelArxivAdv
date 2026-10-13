@@ -1,5 +1,9 @@
 # TeX Source 提取
 
+## Durable admission 与结果确认
+
+创建/重试事务初始化 Source authority；mailbox 默认关闭。实际执行要求数据库确认的 issue 转换与原始一次性本地 receipt，不能根据 Redis 读回/TTL 丢失/旧 terminal 补发。stage、发布确认、前缀推进、terminal 及 Kafka retry/DLT/offset 必须按协议保留未决证据；异常不能伪造成成功或无邮箱。详见[Source 发布与重试 runbook](operations/source-publication-runbook.md)。
+
 ## 处理边界
 
 Source 提取只接受数据库中已导入论文的 UUID。API 根据论文记录取得并重新校验 arXiv ID，Worker 自行构造 `https://export.arxiv.org/e-print/{arxivId}`；请求和消息都不能提供任意 URL。该流程只读取 Source 归档，不运行 TeX、BibTeX、Lua、shell escape、脚本、Makefile 或归档中的任何二进制文件。

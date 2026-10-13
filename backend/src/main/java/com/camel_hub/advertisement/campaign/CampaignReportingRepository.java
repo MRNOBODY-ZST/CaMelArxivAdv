@@ -6,13 +6,26 @@ import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.List;
+import com.camel_hub.advertisement.campaign.migration.CampaignTemplateMigrationDtos.SelectionCounts;
+import com.camel_hub.advertisement.campaign.CampaignSelectionInventory.MigrationReference;
+import com.camel_hub.advertisement.campaign.CampaignSelectionInventory.RecipientTransfer;
+import com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic;
+import com.camel_hub.advertisement.campaign.delivery.PreparationDiagnosticRepository;
+
 
 public final class CampaignReportingRepository {
 
 	private final DatabaseClient databaseClient;
+    private final CampaignSelectionInventory inventory;
 
 	public CampaignReportingRepository(DatabaseClient databaseClient) {
-		this.databaseClient = databaseClient;
+		this(databaseClient, CampaignSelectionInventory.unavailable());
+	}
+
+    public CampaignReportingRepository(DatabaseClient databaseClient, CampaignSelectionInventory inventory) {
+        this.databaseClient = databaseClient;
+        this.inventory = inventory;
 	}
 
 	public Flux<DeliveryView> deliveries(int offset, int limit) {
@@ -26,10 +39,13 @@ public final class CampaignReportingRepository {
 				       recipient.id AS recipient_id, recipient.author_name_snapshot,
 				       recipient.paper_title_snapshot, attempt.attempt_number, attempt.status,
 				       attempt.smtp_response_code, attempt.smtp_response_summary,
-				       attempt.failure_category, attempt.retryable, attempt.started_at, attempt.completed_at
+				       attempt.failure_category, attempt.retryable, attempt.started_at, attempt.completed_at,
+				       diagnostic.stage AS preparation_stage, diagnostic.exception_type AS preparation_exception_type,
+				       diagnostic.error_code AS preparation_error_code, diagnostic.trace_ref AS preparation_trace_ref
 				FROM delivery_attempts attempt
 				JOIN campaign_recipients recipient ON recipient.id = attempt.campaign_recipient_id
 				JOIN campaigns campaign ON campaign.id = recipient.campaign_id
+				LEFT JOIN campaign_preparation_diagnostics diagnostic ON diagnostic.production_attempt_id=attempt.id
 				""" + filter + """
 				ORDER BY attempt.started_at DESC, attempt.id
 				OFFSET :offset LIMIT :limit
@@ -43,7 +59,9 @@ public final class CampaignReportingRepository {
 				row.get("smtp_response_code", Integer.class), row.get("smtp_response_summary", String.class),
 				row.get("failure_category", String.class),
 				Boolean.TRUE.equals(row.get("retryable", Boolean.class)),
-				row.get("started_at", Instant.class), row.get("completed_at", Instant.class))).all();
+				row.get("started_at", Instant.class), row.get("completed_at", Instant.class),
+				PreparationDiagnosticRepository.read(row),
+				PreparationDiagnostic.explanation(row.get("status", String.class), row.get("failure_category", String.class), PreparationDiagnosticRepository.read(row)))).all();
 	}
 
 	public Mono<Long> deliveryCount(UUID campaignId) {
@@ -105,13 +123,14 @@ public final class CampaignReportingRepository {
 				       (SELECT count(*) FROM campaign_safety_events se
 				        JOIN campaign_safety_runs sr ON sr.id = se.run_id
 				        WHERE sr.campaign_id = campaign.id AND se.event_type = 'BOUNCE') AS safety_bounces
-				FROM campaigns campaign
-				""" + filter + """
+				""" + CampaignSelectionInventory.COLUMNS + """
+                FROM campaigns campaign
+				""" + inventory.join("campaign.id") + filter + """
 				ORDER BY campaign.created_at DESC, campaign.id
 				OFFSET :offset LIMIT :limit
 				""").bind("offset", offset).bind("limit", limit);
 		if (campaignId != null) query = query.bind("campaignId", campaignId);
-		return query.map((row, metadata) -> {
+		return inventory.bind(query).map((row, metadata) -> {
 			int recipients = number(row, "recipients");
 			int accepted = number(row, "smtp_accepted");
 			return new CampaignAnalyticsView(
@@ -126,7 +145,7 @@ public final class CampaignReportingRepository {
 				new SafetySummary(number(row, "safety_runs"), number(row, "safety_messages"),
 						number(row, "safety_smtp_accepted"), number(row, "safety_outcome_unknown"),
 						number(row, "safety_replies"), number(row, "safety_bounces")),
-				row.get("created_at", Instant.class));
+				row.get("created_at", Instant.class), CampaignSelectionInventory.counts(row), CampaignSelectionInventory.references(row));
 		}).all();
 	}
 
@@ -201,15 +220,24 @@ public final class CampaignReportingRepository {
 			UUID id, UUID campaignId, String campaignName, UUID recipientId, String authorName,
 			String paperTitle, int attemptNumber, String status, Integer smtpResponseCode,
 			String smtpResponseSummary, String failureCategory, boolean retryable,
-			Instant startedAt, Instant completedAt
+			Instant startedAt, Instant completedAt,
+			PreparationDiagnostic preparationDiagnostic, String preparationDiagnosticExplanation
 	) { }
 
 	public record CampaignAnalyticsView(
 			UUID id, String name, String status, String generationStatus, int recipients,
 			int smtpAccepted, int permanentFailures, int outcomeUnknown, int bounced, int unsubscribed,
 			int replied, int rawOpens, int humanOpens, int automatedOpens, int rawClicks, int humanClicks,
-			int automatedClicks, CampaignRates rates, SafetySummary safety, Instant createdAt
-	) { }
+			int automatedClicks, CampaignRates rates, SafetySummary safety, Instant createdAt,
+            SelectionCounts selectionCounts, List<MigrationReference> migrationReferences
+	) {
+        public CampaignAnalyticsView(UUID id, String name, String status, String generationStatus, int recipients,
+			int smtpAccepted, int permanentFailures, int outcomeUnknown, int bounced, int unsubscribed,
+			int replied, int rawOpens, int humanOpens, int automatedOpens, int rawClicks, int humanClicks,
+			int automatedClicks, CampaignRates rates, SafetySummary safety, Instant createdAt) {
+            this(id, name, status, generationStatus, recipients, smtpAccepted, permanentFailures, outcomeUnknown, bounced, unsubscribed, replied, rawOpens, humanOpens, automatedOpens, rawClicks, humanClicks, automatedClicks, rates, safety, createdAt, null, null);
+        }
+    }
 
 	public record CampaignRates(double smtpAcceptance, double bounce, double unsubscribe, double reply) { }
 

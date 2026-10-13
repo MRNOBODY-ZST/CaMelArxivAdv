@@ -1,5 +1,7 @@
 package com.camel_hub.advertisement.campaign.tracking;
 
+import com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy;
+
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -36,6 +38,7 @@ public final class CampaignLinkRewriter {
 	public String rewrite(String html, Map<String, String> tokensByTarget) {
 		Document document = parse(html);
 		for (Element anchor : document.select("a[href]")) {
+			if (partnerTarget(anchor.attr("href"))) continue;
 			String token = tokensByTarget.get(anchor.attr("href").strip());
 			if (token != null) {
 				validateOpaqueToken(token);
@@ -57,6 +60,7 @@ public final class CampaignLinkRewriter {
 
 	private String eligible(String value, String unsubscribeUrl) {
 		String target = value == null ? "" : value.strip();
+		if (partnerTarget(target)) return null;
 		if (target.isEmpty() || target.length() > MAXIMUM_TARGET_LENGTH || target.equals(unsubscribeUrl)
 				|| !(target.startsWith("http://") || target.startsWith("https://"))) return null;
 		try {
@@ -65,6 +69,11 @@ public final class CampaignLinkRewriter {
 		catch (IllegalArgumentException exception) {
 			return null;
 		}
+	}
+
+	private boolean partnerTarget(String value) {
+		return value.contains("partner_claim_url") || value.equals(PartnerContentPolicy.PREVIEW_URL)
+				|| PartnerContentPolicy.containsCapability(value);
 	}
 
 	private void validateOpaqueToken(String value) {

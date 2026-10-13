@@ -3,7 +3,7 @@ import {
   ArrowPathIcon, CheckCircleIcon, ClockIcon, ExclamationTriangleIcon, PaperAirplaneIcon,
   PauseIcon, PlayIcon, ShieldCheckIcon, SparklesIcon,
 } from '@heroicons/vue/24/outline'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import DsAlert from '@/components/design-skill/DsAlert.vue'
@@ -13,6 +13,10 @@ import DsCard from '@/components/design-skill/DsCard.vue'
 import DsEmptyState from '@/components/design-skill/DsEmptyState.vue'
 import DsInput from '@/components/design-skill/DsInput.vue'
 import DsPagination from '@/components/design-skill/DsPagination.vue'
+import CampaignSettingsPanel from '@/modules/campaigns/CampaignSettingsPanel.vue'
+import CampaignRecipientEditor from '@/modules/campaigns/CampaignRecipientEditor.vue'
+import CampaignTemplateMigrationPanel from '@/modules/campaigns/CampaignTemplateMigrationPanel.vue'
+import type { MigrationResult } from '@/modules/campaigns/template-migrations.types'
 import { useAuthStore } from '@/modules/auth/auth.store'
 import { campaignErrorMessage, campaignsApi } from '@/modules/campaigns/campaigns.api'
 import type {
@@ -35,11 +39,19 @@ const loading = ref(true)
 const mutating = ref(false)
 const generating = ref(false)
 const startingSafety = ref(false)
+const editingSettings = ref(false)
+const editingRecipient = ref(false)
+const editingMigration = ref(false)
+const editing = computed(() => editingSettings.value || editingRecipient.value || editingMigration.value)
+const staleAfterEdit = ref(false)
+const workflowBlocked = computed(() => editing.value || loading.value || staleAfterEdit.value)
 const error = ref('')
 const notice = ref('')
 const safetyRecipientLimit = ref('1')
 const safetyConfirmation = ref('')
 let pollTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let loadRequest = 0
+let alive = true
 
 const id = computed(() => String(route.params.id ?? ''))
 const latestSafetyRun = computed(() => safetyRuns.value[0] ?? null)
@@ -137,16 +149,20 @@ const generationUnavailableReason = computed(() => {
 })
 
 async function load(target = page.value, quiet = false): Promise<void> {
+  const sourceId = id.value
+  const request = ++loadRequest
   if (!quiet) loading.value = true
   if (!quiet) error.value = ''
   try {
     const [campaignResult, recipientResult, preflightResult, safetyResult, deliveryResult] = await Promise.all([
-      campaignsApi.getCampaign(id.value),
-      campaignsApi.listRecipients(id.value, target),
-      campaignsApi.preflightCampaign(id.value),
-      campaignsApi.listSafetyRuns(id.value),
-      campaignsApi.listDeliveries(1, 10, id.value),
+      campaignsApi.getCampaign(sourceId),
+      campaignsApi.listRecipients(sourceId, target),
+      campaignsApi.preflightCampaign(sourceId),
+      campaignsApi.listSafetyRuns(sourceId),
+      campaignsApi.listDeliveries(1, 10, sourceId),
     ])
+    if (!alive || request !== loadRequest || id.value !== sourceId) return
+    if (campaignResult.id !== sourceId) throw new Error('Campaign identity mismatch')
     campaign.value = campaignResult
     recipients.value = recipientResult.items
     page.value = recipientResult.page
@@ -154,11 +170,14 @@ async function load(target = page.value, quiet = false): Promise<void> {
     preflight.value = preflightResult
     safetyRuns.value = safetyResult
     deliveries.value = deliveryResult.items
+    staleAfterEdit.value = false
   } catch (cause) {
-    if (!quiet) error.value = campaignErrorMessage(cause, '活动详情加载失败。')
+    if (alive && request === loadRequest && !quiet) error.value = campaignErrorMessage(cause, '活动详情加载失败。')
   } finally {
-    if (!quiet) loading.value = false
-    schedulePoll()
+    if (alive && request === loadRequest) {
+      if (!quiet) loading.value = false
+      schedulePoll()
+    }
   }
 }
 
@@ -171,7 +190,7 @@ async function loadRuntime(): Promise<void> {
 }
 
 async function startGeneration(): Promise<void> {
-  if (!canGenerate.value) return
+  if (!canGenerate.value || workflowBlocked.value || generating.value) return
   generating.value = true
   clearFeedback()
   try {
@@ -186,7 +205,7 @@ async function startGeneration(): Promise<void> {
 }
 
 async function executePrimary(): Promise<void> {
-  if (!primaryAction.value?.enabled) return
+  if (!primaryAction.value?.enabled || workflowBlocked.value || mutating.value) return
   mutating.value = true
   clearFeedback()
   try {
@@ -201,7 +220,7 @@ async function executePrimary(): Promise<void> {
 }
 
 async function startSafetyRun(): Promise<void> {
-  if (!canStartSafety.value || !campaign.value) return
+  if (!canStartSafety.value || !campaign.value || workflowBlocked.value || startingSafety.value) return
   startingSafety.value = true
   clearFeedback()
   try {
@@ -223,6 +242,16 @@ async function startSafetyRun(): Promise<void> {
 function clearFeedback(): void {
   error.value = ''
   notice.value = ''
+}
+
+async function refreshAfterEdit(): Promise<void> {
+  staleAfterEdit.value = true
+  await load(page.value)
+  if (!error.value) notice.value = '修改已保存，发送预检与最新版本已刷新；尚未发送邮件。'
+}
+
+async function refreshAfterMigration(result: MigrationResult): Promise<void> {
+  if (result.sourceCampaignId === id.value && ['MIGRATED', 'CONFIG_UPDATED'].includes(result.status)) await load(page.value)
 }
 
 function schedulePoll(): void {
@@ -258,7 +287,16 @@ function tone(status: string): 'neutral' | 'positive' | 'warning' | 'danger' | '
 onMounted(async () => {
   await Promise.all([loadRuntime(), load()])
 })
+watch(id, () => {
+  loadRequest++
+  if (pollTimer !== null) globalThis.clearTimeout(pollTimer)
+  campaign.value = null; recipients.value = []; preflight.value = null; safetyRuns.value = []; deliveries.value = []
+  page.value = 1; totalPages.value = 0; clearFeedback()
+  editingSettings.value = false; editingRecipient.value = false
+  void load(1)
+})
 onBeforeUnmount(() => {
+  alive = false; loadRequest++
   if (pollTimer !== null) globalThis.clearTimeout(pollTimer)
 })
 </script>
@@ -297,7 +335,7 @@ onBeforeUnmount(() => {
         v-if="primaryAction"
         data-testid="primary-campaign-action"
         class="mt-4 shrink-0 sm:mt-0"
-        :disabled="!primaryAction.enabled"
+        :disabled="!primaryAction.enabled || workflowBlocked"
         :busy="mutating"
         @click="executePrimary"
       >
@@ -334,12 +372,27 @@ onBeforeUnmount(() => {
       页面仅在任务未结束时每 3 秒刷新；离开页面会停止轮询。
     </DsAlert>
 
+    <CampaignTemplateMigrationPanel
+      :source-campaign-id="id"
+      :campaign="campaign"
+      :recipients="recipients"
+      :disabled="loading || mutating || generating || startingSafety || editingSettings || editingRecipient || staleAfterEdit"
+      @editing="editingMigration = $event"
+      @completed="refreshAfterMigration"
+    />
+
     <div
       v-if="loading"
       class="h-64 animate-pulse rounded-lg bg-slate-100"
       aria-label="活动详情加载中"
     />
     <template v-else-if="campaign">
+      <CampaignSettingsPanel
+        :campaign="campaign"
+        :disabled="mutating || generating || startingSafety || personalizationActive || safetyActive"
+        @editing="editingSettings = $event"
+        @saved="refreshAfterEdit"
+      />
       <DsCard>
         <h2 class="text-sm font-semibold text-slate-900">
           从内容到回传
@@ -501,7 +554,7 @@ onBeforeUnmount(() => {
             <DsButton
               data-testid="start-safety-run"
               class="w-full"
-              :disabled="!canStartSafety"
+              :disabled="!canStartSafety || workflowBlocked"
               :busy="startingSafety"
               @click="startSafetyRun"
             >
@@ -575,7 +628,7 @@ onBeforeUnmount(() => {
             </RouterLink><DsButton
               data-testid="start-personalization"
               variant="secondary"
-              :disabled="!canGenerate"
+              :disabled="!canGenerate || workflowBlocked"
               :busy="generating"
               @click="startGeneration"
             >
@@ -692,6 +745,13 @@ onBeforeUnmount(() => {
               {{ recipient.personalizationStatus }}
             </DsBadge>
           </div>
+          <CampaignRecipientEditor
+            :campaign="campaign"
+            :recipient="recipient"
+            :disabled="mutating || generating || startingSafety || personalizationActive || safetyActive"
+            @editing="editingRecipient = $event"
+            @saved="refreshAfterEdit"
+          />
           <div
             v-if="recipient.subject"
             class="mt-5 grid gap-4 xl:grid-cols-2"

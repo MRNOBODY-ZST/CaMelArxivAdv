@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.job.config;
 
 import com.camel_hub.advertisement.audit.AuditService;
+import com.camel_hub.advertisement.arxiv.extraction.admission.SourceAdmissionRepository;
 import com.camel_hub.advertisement.identity.security.SensitiveValueHasher;
 import com.camel_hub.advertisement.job.domain.JobStateMachine;
 import com.camel_hub.advertisement.job.persistence.JobRepository;
@@ -32,8 +33,8 @@ public class JobConfiguration {
 	@Bean
 	@ConditionalOnProperty(
 			prefix = "app.persistence", name = "enabled", havingValue = "true", matchIfMissing = true)
-	JobRepository jobRepository(DatabaseClient databaseClient, ObjectMapper objectMapper) {
-		return new JobRepository(databaseClient, objectMapper);
+	JobRepository jobRepository(DatabaseClient databaseClient, ObjectMapper objectMapper, SourceAdmissionRepository admission) {
+		return new JobRepository(databaseClient, objectMapper, admission);
 	}
 
 	@Bean

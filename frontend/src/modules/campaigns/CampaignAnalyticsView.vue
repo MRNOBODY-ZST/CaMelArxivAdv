@@ -8,6 +8,8 @@ import DsCard from '@/components/design-skill/DsCard.vue'
 import DsEmptyState from '@/components/design-skill/DsEmptyState.vue'
 import DsPagination from '@/components/design-skill/DsPagination.vue'
 import AnalyticsChart from '@/modules/analytics/AnalyticsChart.vue'
+import CampaignSelectionSummary from '@/modules/campaigns/CampaignSelectionSummary.vue'
+import { pageSelectionCounts } from '@/modules/campaigns/campaign.selection-counts'
 import { campaignErrorMessage, campaignsApi } from '@/modules/campaigns/campaigns.api'
 import type { CampaignAnalyticsView as CampaignMetric } from '@/modules/campaigns/campaigns.types'
 
@@ -16,6 +18,7 @@ const error = ref('')
 const metrics = ref<CampaignMetric[]>([])
 const page = ref(1)
 const totalPages = ref(0)
+const selectionTotals = computed(() => pageSelectionCounts(metrics.value))
 
 const totals = computed(() => metrics.value.reduce((sum, item) => ({
   recipients: sum.recipients + item.recipients,
@@ -105,6 +108,9 @@ onMounted(load)
       </h1><p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
         只汇总正式活动；安全实流单独列示。SMTP 已接受不等于最终送达，回传不等于确认人工阅读。
       </p>
+      <p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
+        本页合计仅包含当前页，历史投递分母不扣除已转出。剩余未发送是只读归属库存，不代表审批、预检通过或发送许可；不在库存边界不等于发送失败。
+      </p>
     </header>
     <DsAlert
       v-if="error"
@@ -118,6 +124,12 @@ onMounted(load)
       aria-label="活动指标加载中"
     />
     <template v-else-if="metrics.length">
+      <div data-testid="page-selection-inventory">
+        <h2 class="mb-3 font-semibold text-slate-900">
+          本页合计 · 未发送归属库存
+        </h2>
+        <CampaignSelectionSummary :counts="selectionTotals" />
+      </div>
       <div class="grid grid-cols-2 gap-4 xl:grid-cols-6">
         <DsCard padding="sm">
           <p class="text-xs text-slate-500">
@@ -184,6 +196,8 @@ onMounted(load)
                 <th class="px-5 py-3">
                   活动
                 </th><th class="px-5 py-3">
+                  未发送归属库存
+                </th><th class="px-5 py-3">
                   正式投递率
                 </th><th class="px-5 py-3">
                   回复 / 退信 / 退订
@@ -207,6 +221,13 @@ onMounted(load)
                   </p><p class="mt-1 text-xs text-slate-500">
                     {{ item.status }} · {{ item.generationStatus }}
                   </p>
+                </td>
+                <td class="min-w-64 px-5 py-4">
+                  <CampaignSelectionSummary
+                    :counts="item.selectionCounts"
+                    :references="item.migrationReferences"
+                    :campaign-id="item.id"
+                  />
                 </td>
                 <td class="whitespace-nowrap px-5 py-4 text-slate-700">
                   {{ item.smtpAccepted }}/{{ item.recipients }} · {{ percent(item.rates.smtpAcceptance) }}

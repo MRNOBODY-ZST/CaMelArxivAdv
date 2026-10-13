@@ -41,6 +41,35 @@ class PersonalizationResultHandlerTest {
 	}
 
 	@Test
+	void rejectsRawCapabilityInGeneratedRationaleBeforePersistence() throws Exception {
+		var message = message("GENERATED", "Invite", "<a href=\"{{unsubscribe_url}}\">Stop</a>", "Stop {{unsubscribe_url}}",
+				"https://api.camel-hub.cn/partner/claim?token=private", null, null);
+		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey())).thenReturn(Mono.just(true));
+		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(new CampaignRepository.ResultContext("Team", "reply@example.org", "openai", "gpt-test")));
+		when(repository.storeGenerated(eq(CAMPAIGN),eq(RECIPIENT),eq(JOB),any())).thenReturn(Mono.just(true));
+		when(repository.refreshGenerationState(CAMPAIGN,JOB)).thenReturn(Mono.empty());
+		assertThatThrownBy(() -> handler.handle(objectMapper.writeValueAsString(message)).block()).isInstanceOf(IllegalArgumentException.class);
+		verify(repository,never()).storeGenerated(any(),any(),any(),any());
+	}
+
+	@Test
+	void storesServerOwnedPartnerPlaceholderWithoutResolvingIt() throws Exception {
+		var message = message("GENERATED", "Invitation",
+				"<a href=\"{{partner_claim_url}}\">Activate</a><a href=\"{{unsubscribe_url}}\">Stop</a>",
+				"Activate {{partner_claim_url}} Stop {{unsubscribe_url}}", "Paper rationale", null, null);
+		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey())).thenReturn(Mono.just(true));
+		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
+				new CampaignRepository.ResultContext("Team", "reply@example.org", "openai", "gpt-test")));
+		when(repository.storeGenerated(eq(CAMPAIGN), eq(RECIPIENT), eq(JOB), any())).thenReturn(Mono.just(true));
+		when(repository.refreshGenerationState(CAMPAIGN, JOB)).thenReturn(Mono.empty());
+		assertThat(handler.handle(objectMapper.writeValueAsString(message)).block().duplicate()).isFalse();
+		var captured = ArgumentCaptor.forClass(CampaignRepository.GeneratedDraft.class);
+		verify(repository).storeGenerated(eq(CAMPAIGN), eq(RECIPIENT), eq(JOB), captured.capture());
+		assertThat(captured.getValue().html()).contains("{{partner_claim_url}}");
+		assertThat(captured.getValue().text()).contains("{{partner_claim_url}}");
+	}
+
+	@Test
 	void sanitizesAndStoresAValidGeneratedDraftThenRefreshesCampaignState() throws Exception {
 		var message = message("GENERATED",
 				"A safe subject",
@@ -49,7 +78,7 @@ class PersonalizationResultHandlerTest {
 		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey()))
 				.thenReturn(Mono.just(true));
 		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
-				new CampaignRepository.ResultContext("Research Team", "reply@example.org")));
+				new CampaignRepository.ResultContext("Research Team", "reply@example.org", "openai", "gpt-test")));
 		when(repository.storeGenerated(eq(CAMPAIGN), eq(RECIPIENT), eq(JOB), any()))
 				.thenReturn(Mono.just(true));
 		when(repository.refreshGenerationState(CAMPAIGN, JOB)).thenReturn(Mono.empty());
@@ -68,13 +97,33 @@ class PersonalizationResultHandlerTest {
 	}
 
 	@Test
+	void marksMismatchedModelResultsFailedInsteadOfStoringAMislabelledDraft() throws Exception {
+		var message = message("GENERATED", "A safe subject",
+				"<p>Hi</p><a href=\"{{unsubscribe_url}}\">Unsubscribe</a>",
+				"Hi {{unsubscribe_url}}", "Paper-based rationale", null, null);
+		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey()))
+				.thenReturn(Mono.just(true));
+		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
+				new CampaignRepository.ResultContext("Research Team", "reply@example.org", "anthropic", "pinned-model")));
+		when(repository.storeFailed(eq(CAMPAIGN), eq(RECIPIENT), eq(JOB), eq("CONFIGURATION_MISMATCH"), any()))
+				.thenReturn(Mono.just(true));
+		when(repository.refreshGenerationState(CAMPAIGN, JOB)).thenReturn(Mono.empty());
+
+		assertThat(handler.handle(objectMapper.writeValueAsString(message)).block().duplicate()).isFalse();
+		verify(repository, never()).storeGenerated(any(), any(), any(), any());
+		verify(repository).storeFailed(CAMPAIGN, RECIPIENT, JOB, "CONFIGURATION_MISMATCH",
+				"Generated draft model does not match the queued configuration");
+		verify(repository).refreshGenerationState(CAMPAIGN, JOB);
+	}
+
+	@Test
 	void rejectsMissingUnsubscribeAndHeaderInjectionBeforePersistence() throws Exception {
 		var message = message("GENERATED", "Hello\r\nBcc: hidden@example.org",
 				"<p>Hello Ada</p>", "Hello Ada", "Rationale", null, null);
 		when(repository.markPersonalizationResultProcessed(message.messageId(), message.idempotencyKey()))
 				.thenReturn(Mono.just(true));
 		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
-				new CampaignRepository.ResultContext("Research Team", "reply@example.org")));
+				new CampaignRepository.ResultContext("Research Team", "reply@example.org", "openai", "gpt-test")));
 
 		assertThatThrownBy(() -> handler.handle(objectMapper.writeValueAsString(message)).block())
 				.isInstanceOf(IllegalArgumentException.class);
@@ -87,7 +136,7 @@ class PersonalizationResultHandlerTest {
 		when(repository.markPersonalizationResultProcessed(failed.messageId(), failed.idempotencyKey()))
 				.thenReturn(Mono.just(true));
 		when(repository.resultContext(CAMPAIGN, RECIPIENT, JOB)).thenReturn(Mono.just(
-				new CampaignRepository.ResultContext("Research Team", "reply@example.org")));
+				new CampaignRepository.ResultContext("Research Team", "reply@example.org", "openai", "gpt-test")));
 		when(repository.storeFailed(CAMPAIGN, RECIPIENT, JOB, "RATE_LIMITED", "Provider rate limited"))
 				.thenReturn(Mono.just(true));
 		when(repository.refreshGenerationState(CAMPAIGN, JOB)).thenReturn(Mono.empty());

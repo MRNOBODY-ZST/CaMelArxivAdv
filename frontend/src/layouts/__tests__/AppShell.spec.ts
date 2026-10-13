@@ -42,6 +42,14 @@ describe('AppShell', () => {
     expect(wrapper.text()).not.toContain('邮件活动')
   })
 
+  it('offers the one-click outreach page only to campaign readers', async () => {
+    const reader = mountShell(['campaign:read'])
+    const link = reader.findAll('a').find((candidate) => candidate.text().includes('一键触达'))
+    expect(link?.attributes('href')).toBe('/email/automation')
+    const unrelated = mountShell(['smtp:read'])
+    expect(unrelated.text()).not.toContain('一键触达')
+  })
+
   it('exposes the dedicated author relationship analytics route', async () => {
     const wrapper = mountShell(['analytics:read'])
     await disclosure(wrapper, '分析洞察').trigger('click')

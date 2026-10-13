@@ -13,6 +13,7 @@ export AUTH_FINGERPRINT_HMAC_KEY_BASE64=${AUTH_FINGERPRINT_HMAC_KEY_BASE64:-YWJj
 export APP_ENCRYPTION_KEY_BASE64=${APP_ENCRYPTION_KEY_BASE64:-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU=}
 export APP_EMAIL_HMAC_KEY_BASE64=${APP_EMAIL_HMAC_KEY_BASE64:-emFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg=}
 export TEMPLATE_ASSET_SIGNING_KEY_BASE64=${TEMPLATE_ASSET_SIGNING_KEY_BASE64:-c2lnbmVkYXNzZXRzMDEyMzQ1Njc4OWFiY2RlZjAxMjM=}
+export PERSONALIZATION_RUNTIME_CONFIG_TOKEN=${PERSONALIZATION_RUNTIME_CONFIG_TOKEN:-compose-test-only-runtime-token-not-for-production}
 
 if [[ ! -f "$compose_file" ]]; then
   echo "Missing root docker-compose.yml" >&2
@@ -29,6 +30,21 @@ development_compose_json=$(
     config --format json
 )
 actual_services=$(jq -r '.services | keys[]' <<<"$compose_json")
+for runtime_service in personalization-worker ray-worker; do
+  if [[ $(jq -r --arg service "$runtime_service" '.services[$service].environment.PERSONALIZATION_RUNTIME_CONFIG_URL' <<<"$compose_json") != "http://backend-api:8080" ]] \
+    || [[ $(jq -r --arg service "$runtime_service" '.services[$service].environment.PERSONALIZATION_RUNTIME_CONFIG_TOKEN' <<<"$compose_json") != "$PERSONALIZATION_RUNTIME_CONFIG_TOKEN" ]]; then
+    echo "$runtime_service must receive the authenticated backend configuration endpoint" >&2
+    exit 1
+  fi
+done
+if [[ $(jq -r '.services["backend-api"].environment.PERSONALIZATION_RUNTIME_CONFIG_TOKEN' <<<"$compose_json") != "$PERSONALIZATION_RUNTIME_CONFIG_TOKEN" ]]; then
+  echo "backend-api and Ray must share the configuration service token" >&2
+  exit 1
+fi
+if jq -e '.services["mail-worker"].environment | has("PERSONALIZATION_API_KEY") or has("PERSONALIZATION_RUNTIME_CONFIG_TOKEN")' <<<"$compose_json" >/dev/null; then
+  echo "mail-worker must not receive generation provider or service credentials" >&2
+  exit 1
+fi
 required_services=(postgres redis kafka kafka-init minio backend-api mail-worker arxiv-worker ray-head ray-worker personalization-worker frontend mailpit mail-test)
 
 for service in "${required_services[@]}"; do
@@ -349,6 +365,7 @@ for expected in \
 done
 
 for secret_key in \
+  PERSONALIZATION_RUNTIME_CONFIG_TOKEN \
   PERSONALIZATION_API_KEY \
   APP_ENCRYPTION_KEY_BASE64 \
   APP_EMAIL_HMAC_KEY_BASE64 \

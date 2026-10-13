@@ -21,6 +21,7 @@ TEMPLATE_MARKER = "Camel Hub research invitation v1"
 CONNECTION_SLOT = "Camel Hub research connection"
 IDEA_SLOT = "Camel Hub collaboration idea"
 WEBSITE_URL = "https://api.camel-hub.com/"
+PARTNER_CLAIM_PLACEHOLDER = "{{partner_claim_url}}"
 CAMPAIGN_PURPOSE = """We are the Camel Hub team, an API Gateway company (https://api.camel-hub.com/).
 Invite researchers working on AI agents to explore a research collaboration with us.
 Use the supplied paper title and abstract to identify a specific research question or method,
@@ -68,6 +69,12 @@ class ResearchInvitationCopy(ContractModel):
             for marker in ("<", ">", "{{", "}}", "http:", "https:", "mailto:")
         ):
             raise ValueError("Invitation copy must contain plain prose only")
+        if re.search(
+            r"(?:[$€£]\s*\d|\b(?:USD|CNY|RMB)\s*\d|\b\d[\d,.]*\s*(?:USD|CNY|RMB|dollars?)\b|\b\d[\d,.]*\s+(?:[\w-]+\s+){0,4}credits?\b)",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            raise ValueError("Invitation copy must not promise a credit amount")
         return value
 
 
@@ -84,8 +91,14 @@ def parse_generation(
     value: object, command: PersonalizationCommand, target: PersonalizationTarget
 ) -> GeneratedEmail:
     if uses_research_invitation(command):
-        return render_invitation(ResearchInvitationCopy.model_validate(value), target, command)
-    return GeneratedEmail.model_validate(value)
+        generated = render_invitation(ResearchInvitationCopy.model_validate(value), target, command)
+    else:
+        generated = GeneratedEmail.model_validate(value)
+    if PARTNER_CLAIM_PLACEHOLDER in (
+        command.payload.template_html + command.payload.template_text
+    ) and (PARTNER_CLAIM_PLACEHOLDER not in generated.html or PARTNER_CLAIM_PLACEHOLDER not in generated.text):
+        raise ValueError("Generated email must preserve partner_claim_url in HTML and text")
+    return generated
 
 
 def render_invitation(
@@ -114,20 +127,23 @@ def render_invitation(
     renderer.close()
     html = renderer.html()
     variables = {
-        "author_name": target.author_name,
-        "first_name": target.author_name.split()[0],
+        "author_name": target.author_name or "research team",
+        "first_name": target.author_name.split()[0] if target.author_name else "research team",
         "paper_title": target.paper_title,
         "arxiv_id": target.arxiv_id,
         "primary_category": target.primary_category or "",
         "organization": target.organization or "",
         "paper_url": target.paper_url,
         "unsubscribe_url": "{{unsubscribe_url}}",
+        "partner_claim_url": PARTNER_CLAIM_PLACEHOLDER,
     }
     html = re.sub(
         r"\{\{\s*([a-z_]+)\s*}}",
         lambda match: escape(variables[match[1]], quote=True),
         html,
     )
+    if target.author_name is None:
+        html = html.replace("your publicly listed research", "the cited publicly listed research")
     text_renderer = _EmailText()
     text_renderer.feed(html)
     text_renderer.close()
@@ -293,11 +309,13 @@ def _html(author: str, title: str, paper_url: str, connection: str, idea: str) -
       <tr><td style="padding:20px 28px 28px;font-size:16px;line-height:26px;">
         <p style="margin:0 0 20px;">Would this be worth a conversation? A short reply with your current research priorities or an experiment you’d like to explore would be a helpful start.</p>
         <p style="margin:0 0 22px;">Best,<br><strong>Camel Hub Research Team</strong></p>
+        <p style="margin:0 0 16px;font-size:14px;line-height:23px;">New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account.</p>
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
           <tr><td style="padding:12px 20px;background-color:#183d33;border-radius:6px;">
-            <a href="{WEBSITE_URL}" title="{TEMPLATE_MARKER}" style="font-size:14px;line-height:22px;font-weight:700;color:#ffffff;text-decoration:none;">Explore Camel Hub →</a>
+            <a href="{{{{partner_claim_url}}}}" title="{TEMPLATE_MARKER}" style="font-size:14px;line-height:22px;font-weight:700;color:#ffffff;text-decoration:none;">Activate on Camel Hub →</a>
           </td></tr>
         </table>
+        <p style="margin:14px 0 0;font-size:12px;line-height:19px;">Official website: <a href="{WEBSITE_URL}" style="color:#235646;text-decoration:underline;">Camel Hub</a></p>
       </td></tr>
       <tr><td style="padding:20px 28px;border-top:1px solid #e7e8e3;background-color:#fafaf7;">
         <p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#68756f;">This invitation relates to your publicly listed research. Replies are directed to our research team’s monitored mailbox.</p>
@@ -329,7 +347,11 @@ Would this be worth a conversation? A short reply with your current research pri
 
 Best,
 Camel Hub Research Team
-{WEBSITE_URL}
+
+New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account.
+
+Activate on Camel Hub: {{{{partner_claim_url}}}}
+Official website: {WEBSITE_URL}
 
 This invitation relates to your publicly listed research. Replies are directed to our research team’s monitored mailbox.
 

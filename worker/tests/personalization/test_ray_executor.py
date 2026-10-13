@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -84,7 +86,8 @@ async def test_disabled_provider_returns_failures_without_starting_ray() -> None
 
 @pytest.mark.parametrize("auth_scheme", ["x-api-key", "bearer"])
 def test_remote_task_selects_anthropic_protocol_from_runtime_configuration(
-    monkeypatch: pytest.MonkeyPatch, auth_scheme: str,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_scheme: str,
 ) -> None:
     for key, value in {
         "PERSONALIZATION_ENABLED": "true",
@@ -129,7 +132,7 @@ def test_remote_task_selects_anthropic_protocol_from_runtime_configuration(
         "AsyncClient",
         lambda **kwargs: original_client(
             transport=httpx.MockTransport(reply),
-            **kwargs,
+            **{key: value for key, value in kwargs.items() if key != "transport"},
         ),
     )
     active = command(1)
@@ -137,4 +140,135 @@ def test_remote_task_selects_anthropic_protocol_from_runtime_configuration(
         active.model_dump_json(by_alias=True),
         active.payload.targets[0].model_dump_json(by_alias=True),
     )
-    assert output["subject"] == "A researched draft"
+    email = output["email"]
+    assert isinstance(email, dict)
+    assert email["subject"] == "A researched draft"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_executor_uses_actual_snapshot_metadata_when_env_disabled() -> None:
+    remote = FakeRemote()
+    executor = RayPersonalizationExecutor(
+        PersonalizationSettings(
+            runtime_config_url="http://backend-api:8080", runtime_config_token="service-secret"
+        ),
+        remote_function=remote,
+        result_getter=lambda reference: {
+            "provider": "anthropic",
+            "model": "snapshot-model",
+            "email": {
+                "subject": "Draft",
+                "html": "{{unsubscribe_url}}",
+                "text": "{{unsubscribe_url}}",
+                "rationale": "Context",
+            },
+        },
+        initializer=lambda address: None,
+        shutdown=lambda: None,
+    )
+    result = (await executor.execute(command(1)))[0]
+    assert result.payload.status == "GENERATED"
+    assert result.payload.provider == "anthropic"
+    assert result.payload.model == "snapshot-model"
+    assert "service-secret" not in str(remote.calls) + result.model_dump_json()
+
+
+def test_remote_fetches_each_job_snapshot_inside_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PERSONALIZATION_ENABLED", "false")
+    monkeypatch.setenv("PERSONALIZATION_RUNTIME_CONFIG_URL", "http://backend-api:8080")
+    monkeypatch.setenv("PERSONALIZATION_RUNTIME_CONFIG_TOKEN", "service-secret")
+    original_client = httpx.AsyncClient
+    jobs: list[str] = []
+    models: list[str] = []
+    active = command(1)
+    later = command(1)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        import json
+
+        if request.url.host == "backend-api":
+            jobs.append(request.url.path)
+            return httpx.Response(
+                200,
+                json={
+                    "provider": "openai",
+                    "model": "model-a" if str(active.job_id) in request.url.path else "model-b",
+                    "apiBaseUrl": "https://example.com/prefix",
+                    "apiAuthScheme": "x-api-key",
+                    "apiKey": "provider-secret",
+                },
+            )
+        assert request.url.path == "/prefix/responses"
+        assert request.headers["x-api-key"] == "provider-secret"
+        models.append(json.loads(request.content)["model"])
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "subject": "Draft",
+                        "html": "{{unsubscribe_url}}",
+                        "text": "{{unsubscribe_url}}",
+                        "rationale": "Context",
+                    }
+                )
+            },
+        )
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        kwargs.pop("transport", None)
+        return original_client(transport=httpx.MockTransport(reply), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    for item, expected in [(active, "model-a"), (later, "model-b"), (active, "model-a")]:
+        output = ray_executor._generate_personalization(
+            item.model_dump_json(by_alias=True),
+            item.payload.targets[0].model_dump_json(by_alias=True),
+        )
+        assert output["model"] == expected
+        assert "secret" not in str(output)
+    assert jobs == [
+        f"/internal/personalization/jobs/{item.job_id}/configuration"
+        for item in (active, later, active)
+    ]
+    assert models == ["model-a", "model-b", "model-a"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_failure_metadata_never_claims_environment_model() -> None:
+    def fail(reference: object) -> object:
+        raise RuntimeError("service-secret must not leave exception boundary")
+
+    executor = RayPersonalizationExecutor(
+        PersonalizationSettings(
+            runtime_config_url="http://backend-api:8080", runtime_config_token="service-secret"
+        ),
+        remote_function=FakeRemote(),
+        result_getter=fail,
+        initializer=lambda address: None,
+        shutdown=lambda: None,
+    )
+    result = (await executor.execute(command(1)))[0]
+    assert result.payload.provider == result.payload.model == "unknown"
+    assert "service-secret" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_uses_provider_snapshot_metadata() -> None:
+    executor = RayPersonalizationExecutor(
+        PersonalizationSettings(
+            runtime_config_url="http://backend-api:8080", runtime_config_token="service-secret"
+        ),
+        remote_function=FakeRemote(),
+        result_getter=lambda reference: {
+            "provider": "anthropic",
+            "model": "model-frozen",
+            "errorCode": "PROVIDER_REJECTED",
+        },
+        initializer=lambda address: None,
+        shutdown=lambda: None,
+    )
+    result = (await executor.execute(command(1)))[0]
+    assert result.payload.provider == "anthropic"
+    assert result.payload.model == "model-frozen"
+    assert result.payload.error_code == "PROVIDER_REJECTED"

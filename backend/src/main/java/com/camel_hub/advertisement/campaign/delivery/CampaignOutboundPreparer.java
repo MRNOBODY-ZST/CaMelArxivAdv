@@ -17,7 +17,11 @@ public interface CampaignOutboundPreparer {
 
 	Mono<PreparedOutbound> prepare(CampaignDeliveryRepository.ProductionClaim claim);
 
-	record PreparedOutbound(String subject, String html, String text, Map<String, String> headers) {
+	record PreparedOutbound(String subject, String html, String text, Map<String, String> headers,
+			java.time.Instant partnerInviteExpiresAt) {
+		public PreparedOutbound(String subject, String html, String text, Map<String, String> headers) {
+			this(subject, html, text, headers, null);
+		}
 		private static final Set<String> ALLOWED_HEADERS = Set.of(
 				"List-Unsubscribe", "List-Unsubscribe-Post");
 
@@ -51,6 +55,9 @@ public interface CampaignOutboundPreparer {
 			}
 			headers = Map.copyOf(safe);
 		}
+
+		@Override
+		public String toString() { return "PreparedOutbound[redacted]"; }
 
 		@Override
 		public Map<String, String> headers() {

@@ -36,7 +36,32 @@ export function createSampleValues(): TemplateSampleValues {
     author_name: 'Ada Lovelace', first_name: 'Ada', paper_title: 'Analytical Engines for Modern Science',
     arxiv_id: '2608.01234', primary_category: 'cs.AI', paper_url: 'https://arxiv.org/abs/2608.01234',
     organization: 'CaMel Research', unsubscribe_url: 'https://example.org/unsubscribe/preview-token',
+    partner_claim_url: 'https://example.invalid/partner-activation-preview',
   }
+}
+
+export function redactPartnerClaimUrl(value: string): string {
+  return value.replaceAll(
+    /https:\/\/api\.camel-hub\.cn\/partner\/claim\?[^\s<>"']+/gi,
+    'https://example.invalid/partner-activation-preview',
+  ).replaceAll('{{partner_claim_url}}', 'https://example.invalid/partner-activation-preview')
+}
+
+export function inertTemplatePreviewHtml(html: string): string {
+  const template = globalThis.document.createElement('template')
+  template.innerHTML = html
+  template.content.querySelectorAll('a, area').forEach((element) => {
+    element.removeAttribute('href')
+    element.removeAttribute('ping')
+  })
+  template.content.querySelectorAll('*').forEach((element) => {
+    for (const attribute of [...element.attributes]) {
+      if (/^on/i.test(attribute.name) || /https:\/\/api\.camel-hub\.cn\/partner\/claim\?/i.test(attribute.value)) {
+        element.removeAttribute(attribute.name)
+      }
+    }
+  })
+  return redactPartnerClaimUrl(template.innerHTML)
 }
 
 export function insertPlaceholder(value: string, variable: TemplateVariable, start?: number, end?: number): string {

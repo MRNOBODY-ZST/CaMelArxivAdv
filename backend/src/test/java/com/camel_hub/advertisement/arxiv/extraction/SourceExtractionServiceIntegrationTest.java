@@ -44,6 +44,9 @@ class SourceExtractionServiceIntegrationTest {
 		var connectionFactory = ConnectionFactories.get(r2dbcUrl());
 		databaseClient = DatabaseClient.create(connectionFactory);
 		databaseClient.sql("DELETE FROM outbox_messages").fetch().rowsUpdated().block();
+		// This class owns its container and every synthetic child in it.
+		databaseClient.sql("DELETE FROM source_command_issues").fetch().rowsUpdated().block();
+		databaseClient.sql("DELETE FROM source_command_authorities").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM jobs").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM papers").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM arxiv_categories").fetch().rowsUpdated().block();
@@ -70,6 +73,10 @@ class SourceExtractionServiceIntegrationTest {
 		assertThat(count("jobs")).isEqualTo(1);
 		assertThat(count("job_items")).isEqualTo(2);
 		assertThat(count("outbox_messages")).isEqualTo(1);
+		assertThat(count("source_command_authorities")).isEqualTo(1);
+		assertThat(text("SELECT payload_fingerprint FROM source_command_authorities"))
+				.isEqualTo(com.camel_hub.advertisement.arxiv.extraction.admission.SourceCommandIdentity.fingerprint(
+						text("SELECT parameters::text FROM jobs")));
 		assertThat(text("SELECT type FROM jobs WHERE id = '" + result.jobId() + "'"))
 				.isEqualTo("ARXIV_FETCH_AND_PARSE_SOURCE");
 		assertThat(text("SELECT payload::text FROM outbox_messages LIMIT 1"))
@@ -99,6 +106,33 @@ class SourceExtractionServiceIntegrationTest {
 				ACTOR, List.of(PAPER_ONE, PAPER_ONE), context()).block())
 				.isInstanceOf(SourceExtractionValidationException.class);
 		assertThat(count("jobs")).isZero();
+	}
+
+	@Test
+	void onlyNewCommandTransactionInitializesAndUsesEmittedAuthorBudgetPayload() {
+		String payload="{\"parserVersion\":\"0.1.0\",\"targets\":[{\"paperId\":\""+PAPER_ONE+"\",\"arxivId\":\"2608.00001\",\"metadataAuthors\":[]}]}";
+		UUID job=UUID.randomUUID(), message=UUID.randomUUID(); String key="synthetic:"+UUID.randomUUID();
+		var repository=new SourceExtractionRepository(databaseClient);
+		var transactions=TransactionalOperator.create(new R2dbcTransactionManager(databaseClient.getConnectionFactory()));
+		var command=new SourceExtractionRepository.Command(job,message,ACTOR,"ARXIV_FETCH_AND_PARSE_SOURCE",key,"synthetic-trace",payload,"{}",
+				List.of(new SourceExtractionRepository.PaperTarget(PAPER_ONE,"2608.00001",List.of("Raw author deliberately omitted"))));
+		transactions.transactional(repository.create(command)).block();
+		assertThat(text("SELECT payload_fingerprint FROM source_command_authorities"))
+				.isEqualTo(com.camel_hub.advertisement.arxiv.extraction.admission.SourceCommandIdentity.fingerprint(payload));
+		var duplicate=new SourceExtractionRepository.Command(UUID.randomUUID(),UUID.randomUUID(),ACTOR,command.type(),key,"synthetic-trace","{}","{}",command.targets());
+		assertThat(transactions.transactional(repository.create(duplicate)).block().jobId()).isEqualTo(job);
+		assertThat(count("source_command_authorities")).isEqualTo(1);
+		assertThat(text("SELECT message_id::text FROM source_command_authorities")).isEqualTo(message.toString());
+	}
+
+	@Test
+	void invalidIdentityRollsBackNewJobItemsEventAndOutboxTogether() {
+		var repository=new SourceExtractionRepository(databaseClient);
+		var transactions=TransactionalOperator.create(new R2dbcTransactionManager(databaseClient.getConnectionFactory()));
+		var command=new SourceExtractionRepository.Command(UUID.randomUUID(),UUID.randomUUID(),ACTOR,"ARXIV_FETCH_AND_PARSE_SOURCE","synthetic:"+UUID.randomUUID(),"synthetic-trace","{}","{}",
+				List.of(new SourceExtractionRepository.PaperTarget(PAPER_ONE,"2608.00001",List.of())));
+		assertThatThrownBy(()->transactions.transactional(repository.create(command)).block()).isInstanceOf(IllegalArgumentException.class);
+		assertThat(count("jobs")).isZero(); assertThat(count("job_items")).isZero(); assertThat(count("job_events")).isZero(); assertThat(count("outbox_messages")).isZero(); assertThat(count("source_command_authorities")).isZero();
 	}
 
 	private void seed() {

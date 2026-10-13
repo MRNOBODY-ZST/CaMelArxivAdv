@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -54,6 +55,30 @@ class CampaignSafetyRuntimePolicyTest {
 				Duration.ofSeconds(121), Duration.ofMinutes(2)).requireReady()).isNotNull();
 	}
 
+	@Test
+	void additiveAllowlistPreservesExistingHmacAndResolvesOnlyConfiguredNamedDestinations() {
+		CampaignSafetyRuntimePolicy oldPolicy = policy(true, true, true, "https://tracking.example.test");
+		byte[] oldHmac = oldPolicy.requireReady().hmac();
+		CampaignSafetyRuntimePolicy expanded = policy(new CampaignSafetyProperties(
+				true, "Fixed.Inbox@example.com", 20,
+				Map.of("qq", "Owner@QQ.COM", "gmail", "owner@gmail.com")),
+				true, true, "https://tracking.example.test", Duration.ofDays(30), Duration.ofMinutes(2));
+
+		assertThat(expanded.requireMatching(oldHmac).address()).isEqualTo("Fixed.Inbox@example.com");
+		assertThat(expanded.requireReady("default").hmac()).isEqualTo(oldHmac);
+		for (String key : new String[] {"qq", "gmail"}) {
+			CampaignSafetyRuntimePolicy.Destination destination = expanded.requireReady(key);
+			assertThat(expanded.requireMatching(destination.hmac()).address()).isEqualTo(destination.address());
+			assertThat(destination.hmac()).isNotEqualTo(oldHmac);
+			assertThatThrownBy(() -> oldPolicy.requireMatching(destination.hmac())).hasMessageContaining("changed");
+		}
+		assertThat(expanded.requireReady("qq").address()).isEqualTo("Owner@qq.com");
+		for (String unknown : new String[] {"unknown", "", "qq ", "owner@qq.com"}) {
+			assertThatThrownBy(() -> expanded.requireReady(unknown)).hasMessageContaining("not configured");
+		}
+		assertThatThrownBy(() -> expanded.requireMatching(null)).hasMessageContaining("changed");
+	}
+
 	private CampaignSafetyRuntimePolicy policy(
 			boolean enabled, boolean liveSmtp, boolean trackingEnabled, String origin
 	) {
@@ -65,6 +90,13 @@ class CampaignSafetyRuntimePolicyTest {
 			Duration tokenTtl, Duration deliveryLease
 	) {
 		CampaignSafetyProperties safety = new CampaignSafetyProperties(enabled, "Fixed.Inbox@EXAMPLE.COM", 20);
+		return policy(safety, liveSmtp, trackingEnabled, origin, tokenTtl, deliveryLease);
+	}
+
+	private CampaignSafetyRuntimePolicy policy(
+			CampaignSafetyProperties safety, boolean liveSmtp, boolean trackingEnabled, String origin,
+			Duration tokenTtl, Duration deliveryLease
+	) {
 		MailTrackingProperties tracking = new MailTrackingProperties(
 				trackingEnabled, origin, KEY, tokenTtl, Duration.ofMinutes(15));
 		return new CampaignSafetyRuntimePolicy(

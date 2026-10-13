@@ -19,6 +19,7 @@ from app.personalization.research_invitation import (
     parse_generation,
     uses_research_invitation,
 )
+from app.personalization.runtime_config import normalize_origin
 
 
 class AnthropicEmailClient:
@@ -35,8 +36,7 @@ class AnthropicEmailClient:
         self._api_key = api_key
         self._model = model
         self._auth_scheme = auth_scheme
-        base = base_url.rstrip("/")
-        self._base_url = base if base.endswith("/v1") else f"{base}/v1"
+        self._base_url = normalize_origin(base_url)
 
     async def generate(
         self, command: PersonalizationCommand, target: PersonalizationTarget

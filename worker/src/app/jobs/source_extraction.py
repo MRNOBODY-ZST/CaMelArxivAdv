@@ -325,19 +325,27 @@ class SourceExtractionRunner:
             try:
                 download_dir = work_path / "download"
                 download_dir.mkdir(parents=True, exist_ok=True)
-                downloaded = await self._downloader.download(
-                    target.arxiv_id, download_dir
-                )
-                parse_timeout = asyncio.timeout(self._maximum_parse_seconds)
                 try:
-                    async with parse_timeout:
-                        result = await self._extract(
-                            target, work_path, started, downloaded
-                        )
-                except TimeoutError as exception:
-                    if parse_timeout.expired():
-                        raise SourceParseTimeoutError from exception
-                    raise
+                    downloaded = await self._downloader.download(target.arxiv_id, download_dir)
+                except httpx.HTTPStatusError as exception:
+                    if exception.response.status_code >= 500:
+                        raise
+                    result = self._failure(
+                        target,
+                        started,
+                        "FAILED",
+                        "SOURCE_HTTP_REJECTED",
+                        "Official arXiv Source request was rejected",
+                    )
+                else:
+                    parse_timeout = asyncio.timeout(self._maximum_parse_seconds)
+                    try:
+                        async with parse_timeout:
+                            result = await self._extract(target, work_path, started, downloaded)
+                    except TimeoutError as exception:
+                        if parse_timeout.expired():
+                            raise SourceParseTimeoutError from exception
+                        raise
             except SourceUnavailableError:
                 result = self._failure(
                     target,
@@ -377,16 +385,6 @@ class SourceExtractionRunner:
                     "FAILED",
                     "SOURCE_PARSE_TIMEOUT",
                     "Source parsing exceeded the configured deadline",
-                )
-            except httpx.HTTPStatusError as exception:
-                if exception.response.status_code >= 500:
-                    raise
-                result = self._failure(
-                    target,
-                    started,
-                    "FAILED",
-                    "SOURCE_HTTP_REJECTED",
-                    "Official arXiv Source request was rejected",
                 )
         if work_path is None or work_path.exists():
             raise RuntimeError("Source temporary directory cleanup could not be confirmed")

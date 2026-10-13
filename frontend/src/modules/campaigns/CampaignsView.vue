@@ -13,6 +13,7 @@ import DsModal from '@/components/design-skill/DsModal.vue'
 import DsPagination from '@/components/design-skill/DsPagination.vue'
 import DsSelect from '@/components/design-skill/DsSelect.vue'
 import { campaignErrorMessage, campaignsApi } from '@/modules/campaigns/campaigns.api'
+import CampaignSelectionSummary from '@/modules/campaigns/CampaignSelectionSummary.vue'
 import type { CampaignGenerationStatus, CampaignView, SegmentView } from '@/modules/campaigns/campaigns.types'
 import { emailApi } from '@/modules/email/email.api'
 import type { SmtpAccountView, TemplateView } from '@/modules/email/email.types'
@@ -127,6 +128,9 @@ onMounted(load)
         <p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
           根据作者论文生成逐人草稿，并在人工审核后进入后续发送流程。
         </p>
+        <p class="mt-2 max-w-2xl text-sm/6 text-slate-600">
+          剩余未发送为只读归属库存，不代表审批、预检通过或发送许可。已转出仍保留历史记录；不在库存边界不等于发送失败。
+        </p>
       </div>
       <DsButton
         class="mt-4 shrink-0 sm:mt-0"
@@ -200,6 +204,12 @@ onMounted(load)
             </dd>
           </div>
         </dl>
+        <CampaignSelectionSummary
+          class="mt-5 border-t border-slate-200 pt-4"
+          :counts="campaign.selectionCounts"
+          :references="campaign.migrationReferences"
+          :campaign-id="campaign.id"
+        />
         <RouterLink
           data-testid="campaign-detail-link"
           :to="`/email/campaigns/${campaign.id}`"

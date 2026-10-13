@@ -1,5 +1,7 @@
 # CaMel Arxiv Outreach Platform
 
+未发送模板迁移仅创建独立草稿，不审核或启动活动；未知提交必须按原键对账。参见[模板迁移验证与回滚](docs/operations/template-migration-runbook.md)和[Source admission / 发布协议](docs/operations/source-publication-runbook.md)。
+
 面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库包含生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取、真实 PostgreSQL 分析、安全模板/私有图片/SMTP，以及基于 Kafka、Ray Core、OpenAI / Anthropic API 的逐作者个性化草稿生成链路。
 
 活动发送已实现为显式状态机：生成草稿、预检、提交审核、批准、安全实流和正式发送彼此分离。正式发送由 PostgreSQL 租约、Kafka 唤醒、SMTP 频控、退订/抑制/冷却检查和只读 IMAP 回传共同约束；SMTP 接受不等于最终送达，图片或点击回传也不等于确认人工阅读。所有发送开关默认关闭，部署和安全实流步骤见[活动投递运行手册](docs/operations/campaign-delivery-runbook.md)。
@@ -72,7 +74,7 @@ frontend/                Vue 3 + TypeScript strict 管理端
 infra/nginx/             单一生产入口与安全响应头
 infra/postgres/          PostgreSQL 初始化挂载点
 scripts/                 Compose 与镜像契约验证
-docs/                    架构、ERD、API、部署、运维与设计证据
+docs/                    架构、ERD、API、部署、运维与组件映射
 docker-compose.yml       生产形态基线
 docker-compose.dev.yml   仅开发环境的 Mailpit/MinIO 控制台入口
 ```
@@ -94,7 +96,7 @@ cd .. && bash scripts/verify-compose.sh
 bash scripts/verify-container-images.sh
 ```
 
-Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+当前版本须在隔离环境执行质量门；私有运行记录不随公开源码发布。
 
 ## 文档
 
@@ -111,7 +113,6 @@ Phase 1–6 的实际验收结果记录在 [IMPLEMENTATION_PLAN.md](IMPLEMENTATI
 - [运维](docs/OPERATIONS.md)
 - [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)
 - [第三方与授权说明](docs/THIRD_PARTY_NOTICES.md)
-- [实施任务](TASKS.md)
 
 ## 安全边界
 

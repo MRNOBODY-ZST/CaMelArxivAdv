@@ -121,16 +121,29 @@ public final class SourceExtractionResultRepository {
 	}
 
 	private Flux<AuthorLink> upsertAuthors(ArxivResultMessage.SourceExtraction result) {
-		return Flux.fromIterable(safe(result.authors())).concatMap(author -> {
-			String display = normalizeName(author.name());
-			String normalized = display.toLowerCase(Locale.ROOT);
-			return existingPaperAuthorByName(result.paperId(), normalized)
-					.flatMap(paperAuthorId -> updatePaperAuthor(paperAuthorId, author))
-					.switchIfEmpty(existingPaperAuthor(result.paperId(), author.order())
-							.switchIfEmpty(findOrCreateAuthor(normalized, display))
-							.flatMap(authorId -> upsertPaperAuthor(
-									result.paperId(), authorId, author, display)));
-		});
+		return hasPaperAuthors(result.paperId()).flatMapMany(hasPaperAuthors ->
+				Flux.fromIterable(safe(result.authors())).concatMap(author -> {
+					String display = normalizeName(author.name());
+					String normalized = display.toLowerCase(Locale.ROOT);
+					Mono<AuthorLink> exactMatch = existingPaperAuthorByName(
+							result.paperId(), normalized)
+							.flatMap(paperAuthorId -> updatePaperAuthor(paperAuthorId, author));
+					if (hasPaperAuthors) {
+						return exactMatch;
+					}
+					return exactMatch.switchIfEmpty(findOrCreateAuthor(normalized, display)
+							.flatMap(authorId -> insertOrResolvePaperAuthor(
+									result.paperId(), authorId, author, normalized, display)));
+				}));
+	}
+
+	private Mono<Boolean> hasPaperAuthors(UUID paperId) {
+		return databaseClient.sql("""
+				SELECT EXISTS (
+				  SELECT 1 FROM paper_authors WHERE paper_id = :paperId
+				) AS present
+				""").bind("paperId", paperId)
+				.map((row, metadata) -> Boolean.TRUE.equals(row.get("present", Boolean.class))).one();
 	}
 
 	private Mono<UUID> existingPaperAuthorByName(UUID paperId, String normalized) {
@@ -139,17 +152,10 @@ public final class SourceExtractionResultRepository {
 				JOIN authors a ON a.id = pa.author_id
 				WHERE pa.paper_id = :paperId AND a.normalized_name = :normalized
 				ORDER BY pa.author_order, pa.id
-				LIMIT 1
+				LIMIT 2
 				""").bind("paperId", paperId).bind("normalized", normalized)
-				.map((row, metadata) -> row.get("id", UUID.class)).one();
-	}
-
-	private Mono<UUID> existingPaperAuthor(UUID paperId, int authorOrder) {
-		return databaseClient.sql("""
-				SELECT author_id FROM paper_authors
-				WHERE paper_id = :paperId AND author_order = :authorOrder
-				""").bind("paperId", paperId).bind("authorOrder", authorOrder)
-				.map((row, metadata) -> row.get("author_id", UUID.class)).one();
+				.map((row, metadata) -> row.get("id", UUID.class)).all()
+				.collectList().filter(matches -> matches.size() == 1).map(List::getFirst);
 	}
 
 	private Mono<UUID> findOrCreateAuthor(String normalized, String display) {
@@ -163,10 +169,11 @@ public final class SourceExtractionResultRepository {
 						.map((row, metadata) -> row.get("id", UUID.class)).one());
 	}
 
-	private Mono<AuthorLink> upsertPaperAuthor(
+	private Mono<AuthorLink> insertOrResolvePaperAuthor(
 			UUID paperId,
 			UUID authorId,
 			ArxivResultMessage.SourceAuthor author,
+			String normalized,
 			String display
 	) {
 		List<String> affiliations = safe(author.affiliations()).stream()
@@ -178,22 +185,16 @@ public final class SourceExtractionResultRepository {
 				VALUES (
 				  :paperId, :authorId, :authorOrder, :corresponding,
 				  :rawName, :affiliationText, CAST(:affiliations AS jsonb))
-				ON CONFLICT (paper_id, author_order) DO UPDATE SET
-				  corresponding_author = paper_authors.corresponding_author
-				                             OR EXCLUDED.corresponding_author,
-				  affiliation_text = CASE WHEN EXCLUDED.affiliation_text = ''
-				                          THEN paper_authors.affiliation_text
-				                          ELSE EXCLUDED.affiliation_text END,
-				  affiliation_data = CASE WHEN EXCLUDED.affiliation_data = '[]'::jsonb
-				                          THEN paper_authors.affiliation_data
-				                          ELSE EXCLUDED.affiliation_data END
+				ON CONFLICT DO NOTHING
 				RETURNING id
 				""").bind("paperId", paperId).bind("authorId", authorId)
 				.bind("authorOrder", author.order()).bind("corresponding", author.corresponding())
 				.bind("rawName", display).bind("affiliationText", String.join("; ", affiliations))
 				.bind("affiliations", json(affiliations))
 				.map((row, metadata) -> new AuthorLink(
-						author.order(), row.get("id", UUID.class))).one();
+						author.order(), row.get("id", UUID.class))).one()
+				.switchIfEmpty(existingPaperAuthorByName(paperId, normalized)
+						.flatMap(paperAuthorId -> updatePaperAuthor(paperAuthorId, author)));
 	}
 
 	private Mono<AuthorLink> updatePaperAuthor(
@@ -262,6 +263,8 @@ public final class SourceExtractionResultRepository {
 			UUID paperAuthorId,
 			ArxivResultMessage.SourceContact contact
 	) {
+		String confidence = contact.authorOrder() != null && paperAuthorId == null
+				? "LOW" : contact.confidence();
 		DatabaseClient.GenericExecuteSpec statement = databaseClient.sql("""
 				INSERT INTO paper_author_contacts (
 				  paper_author_id, paper_id, contact_id, extraction_run_id,
@@ -270,7 +273,7 @@ public final class SourceExtractionResultRepository {
 				  :paperAuthorId, :paperId, :contactId, :runId, :confidence, :corresponding)
 				RETURNING id
 				""").bind("paperId", paperId).bind("contactId", contactId).bind("runId", runId)
-				.bind("confidence", contact.confidence()).bind("corresponding", contact.corresponding());
+				.bind("confidence", confidence).bind("corresponding", contact.corresponding());
 		statement = bindNullable(statement, "paperAuthorId", paperAuthorId, UUID.class);
 		return statement.map((row, metadata) -> row.get("id", UUID.class)).one();
 	}

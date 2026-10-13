@@ -1,11 +1,6 @@
 # SMTP account quotas
 
-`perMonthLimit` is an optional SMTP account field. A configured value must be at least `perDayLimit`; for the SendPulse account use `perDayLimit: 400` and `perMonthLimit: 12000`.
-
-The former SendPulse account is now disabled. The current two Salmon submission
-identities split that safety budget into 300/day + 9,000/month for `itshades.dev`
-and 100/day + 3,000/month for `salmon.cloudflare.lat`. These are independent account
-limits, not a shared pool; see the [current cutover report](../email/salmon-smtp-cutover-2026-09-14.md).
+`perMonthLimit` is an optional SMTP account field. A configured value must be at least `perDayLimit`. Choose limits from the approved provider policy and operational budget; this document does not change any configured account.
 
 - Minute, hour, day, and recipient-domain-hour limits use rolling windows. The day window is the preceding 24 hours.
 - The month window is a UTC calendar month, from 00:00 UTC on its first day through the beginning of the next month. In China Standard Time the reset is 08:00 on the first day.

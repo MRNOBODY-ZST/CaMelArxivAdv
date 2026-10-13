@@ -1,5 +1,9 @@
 package com.camel_hub.advertisement.campaign.delivery;
 
+import com.camel_hub.advertisement.campaign.partner.PartnerInviteOutboundFinalizer;
+import com.camel_hub.advertisement.campaign.partner.PartnerInviteException;
+import com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy;
+
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyOutboundPreparer;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRepository;
 import com.camel_hub.advertisement.contact.security.ContactCrypto;
@@ -14,6 +18,8 @@ import java.time.Instant;
 
 import static com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.AttemptStatus;
 import static com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryModels.TransportStage;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.*;
+import static com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic.PreparationStage.*;
 
 /** Executes exactly one durable claim; SMTP I/O always occurs after claim commit. */
 public final class CampaignDeliveryExecutor {
@@ -25,6 +31,7 @@ public final class CampaignDeliveryExecutor {
 	private final ContactCrypto contactCrypto;
 	private final CampaignSmtpSender sender;
 	private final Clock clock;
+	private final PartnerInviteOutboundFinalizer partnerFinalizer;
 
 	public CampaignDeliveryExecutor(
 			CampaignDeliveryRepository repository, CampaignOutboundPreparer preparer,
@@ -38,6 +45,16 @@ public final class CampaignDeliveryExecutor {
 			CampaignSafetyRepository safetyRepository, CampaignSafetyOutboundPreparer safetyPreparer,
 			ContactCrypto contactCrypto, CampaignSmtpSender sender, Clock clock
 	) {
+		this(repository, preparer, safetyRepository, safetyPreparer, contactCrypto, sender, clock,
+				new PartnerInviteOutboundFinalizer(null, contactCrypto, clock));
+	}
+
+	public CampaignDeliveryExecutor(
+			CampaignDeliveryRepository repository, CampaignOutboundPreparer preparer,
+			CampaignSafetyRepository safetyRepository, CampaignSafetyOutboundPreparer safetyPreparer,
+			ContactCrypto contactCrypto, CampaignSmtpSender sender, Clock clock,
+			PartnerInviteOutboundFinalizer partnerFinalizer
+	) {
 		this.repository = repository;
 		this.preparer = preparer;
 		this.safetyRepository = safetyRepository;
@@ -45,6 +62,7 @@ public final class CampaignDeliveryExecutor {
 		this.contactCrypto = contactCrypto;
 		this.sender = sender;
 		this.clock = clock;
+		this.partnerFinalizer = partnerFinalizer;
 	}
 
 	public CampaignDeliveryExecutor(
@@ -65,10 +83,14 @@ public final class CampaignDeliveryExecutor {
 	}
 
 	private Mono<PumpResult> execute(CampaignDeliveryRepository.ProductionClaim claim) {
-		return Mono.defer(() -> preparer.prepare(claim))
-				.switchIfEmpty(Mono.error(new IllegalArgumentException("Campaign preparation returned no result")))
-				.flatMap(prepared -> Mono.fromCallable(() -> send(claim, prepared))
-						.subscribeOn(Schedulers.boundedElastic()))
+		return at(CLAIM_VALIDATION, () -> repository.productionEligible(claim, clock)).filter(Boolean::booleanValue)
+				.flatMap(eligible -> at(TRACKING_RENDER, () -> preparer.prepare(claim)
+						.switchIfEmpty(Mono.error(new IllegalArgumentException("Campaign preparation returned no result")))))
+				.onErrorMap(error -> PartnerContentPolicy.optedIn(claim.renderedHtml(), claim.renderedText())
+						? remap(error, new PartnerInviteException(PartnerInviteException.Reason.INVALID_INPUT)) : error)
+				.flatMap(prepared -> at(CLAIM_VALIDATION, () -> repository.productionEligible(claim, clock))
+						.filter(Boolean::booleanValue).flatMap(eligible -> at(PARTNER_FINALIZE, () -> partnerFinalizer.finalizeOutbound(claim, prepared))))
+				.flatMap(prepared -> Mono.fromCallable(() -> send(claim, prepared)).subscribeOn(Schedulers.boundedElastic()))
 				.map(SendResolution::accepted)
 				.onErrorResume(error -> settleFailure(claim, error).map(SendResolution::settled))
 				.flatMap(resolution -> {
@@ -84,11 +106,14 @@ public final class CampaignDeliveryExecutor {
 	}
 
 	private Mono<PumpResult> execute(CampaignDeliveryRepository.SafetyClaim claim) {
-		if (safetyRepository == null || safetyPreparer == null) {
-			return settleSafetyFailure(claim, new IllegalStateException("Campaign safety delivery is unavailable"));
+		if (safetyRepository == null) {
+			return Mono.error(new IllegalStateException("Campaign safety settlement is unavailable"));
 		}
-		return Mono.defer(() -> safetyPreparer.prepare(claim))
-				.switchIfEmpty(Mono.error(new IllegalArgumentException("Campaign safety preparation returned no result")))
+		return at(CLAIM_VALIDATION, () -> {
+			if (safetyPreparer == null) return Mono.error(new IllegalStateException("Campaign safety preparation is unavailable"));
+			return at(TRACKING_RENDER, () -> safetyPreparer.prepare(claim)
+					.switchIfEmpty(Mono.error(new IllegalArgumentException("Campaign safety preparation returned no result"))));
+		})
 				.flatMap(prepared -> Mono.fromCallable(() -> send(claim, prepared))
 						.subscribeOn(Schedulers.boundedElastic()))
 				.map(SendResolution::accepted)
@@ -109,38 +134,75 @@ public final class CampaignDeliveryExecutor {
 			CampaignDeliveryRepository.ProductionClaim claim,
 			CampaignOutboundPreparer.PreparedOutbound prepared
 	) {
-		String recipient = contactCrypto.decrypt(new ContactCrypto.EncryptedValue(
-				claim.emailCiphertext(), claim.emailNonce()));
-		SmtpTransport.OutboundMessage outbound = new SmtpTransport.OutboundMessage(
-				recipient, prepared.subject(), claim.fromName(), claim.replyTo(),
-				prepared.html(), prepared.text(), claim.correlationId(), claim.fromEmail(),
-				claim.rfcMessageId(), prepared.headers());
+		SmtpTransport.OutboundMessage outbound = during(MESSAGE_BUILD, () -> {
+			if (prepared.subject().contains("{{") || prepared.html().contains("{{") || prepared.text().contains("{{")) {
+				throw new IllegalArgumentException("Campaign content is unresolved");
+			}
+			String recipient = crypto(MESSAGE_BUILD, () -> contactCrypto.decrypt(new ContactCrypto.EncryptedValue(
+					claim.emailCiphertext(), claim.emailNonce())));
+			return new SmtpTransport.OutboundMessage(
+					recipient, prepared.subject(), claim.fromName(), claim.replyTo(),
+					prepared.html(), prepared.text(), claim.correlationId(), claim.fromEmail(),
+					claim.rfcMessageId(), prepared.headers());
+		});
+		// Already on the bounded transport worker: do not queue a stale fenced claim.
+		// The short database transaction commits before any SMTP I/O begins.
+		boolean fenced = during(SMTP_FENCE, () -> {
+			if (inviteExpired(prepared)) throw new PartnerInviteException(PartnerInviteException.Reason.EXPIRED);
+			if (!Boolean.TRUE.equals(repository.beginSmtp(claim, clock).block())) return false;
+			// Only this exact execution path knows that its committed fence has not yet reached SMTP.
+			if (inviteExpired(prepared)) throw new InviteExpiredBeforeSmtp();
+			return true;
+		});
+		if (!fenced) return null;
 		return sender.send(claim.smtpAccount(), outbound);
+	}
+
+	private boolean inviteExpired(CampaignOutboundPreparer.PreparedOutbound prepared) {
+		return prepared.partnerInviteExpiresAt() != null && !prepared.partnerInviteExpiresAt().isAfter(clock.instant());
+	}
+
+	private static final class InviteExpiredBeforeSmtp extends RuntimeException {
+		private InviteExpiredBeforeSmtp() { super("PARTNER_INVITE_EXPIRED_BEFORE_SMTP"); }
 	}
 
 	private SmtpTransport.SmtpOutcome send(
 			CampaignDeliveryRepository.SafetyClaim claim,
 			CampaignSafetyOutboundPreparer.PreparedSafetyOutbound prepared
 	) {
-		prepared = safetyPreparer.validateForSend(claim, prepared);
-		SmtpTransport.OutboundMessage outbound = new SmtpTransport.OutboundMessage(
-				prepared.recipient(), prepared.subject(), claim.fromName(), claim.replyTo(),
-				prepared.html(), prepared.text(), claim.correlationId(), claim.fromEmail(),
-				claim.rfcMessageId(), prepared.headers());
+		var validated = during(MESSAGE_BUILD, () -> safetyPreparer.validateForSend(claim, prepared));
+		SmtpTransport.OutboundMessage outbound = during(MESSAGE_BUILD, () -> new SmtpTransport.OutboundMessage(
+				validated.recipient(), validated.subject(), claim.fromName(), claim.replyTo(),
+				validated.html(), validated.text(), claim.correlationId(), claim.fromEmail(),
+				claim.rfcMessageId(), validated.headers()));
+		if (!Boolean.TRUE.equals(during(SMTP_FENCE, () -> safetyRepository.beginSafetySmtp(
+				claim.withPreparedBodies(validated.subject(), validated.html(), validated.text()), clock).block()))) return null;
 		return sender.send(claim.smtpAccount(), outbound);
 	}
 
 	private Mono<PumpResult> settleFailure(
 			CampaignDeliveryRepository.ProductionClaim claim, Throwable error
 	) {
+		PreparationDiagnostic diagnostic = diagnostic(error);
+		error = original(error);
+		if (error instanceof InviteExpiredBeforeSmtp) {
+			return repository.holdExpiredBeforeSmtp(claim, clock.instant(), diagnostic)
+					.map(applied -> applied ? PumpResult.PARTNER_INVITE_HELD : PumpResult.NO_WORK);
+		}
+		if (error instanceof PartnerInviteException invite) {
+			return repository.holdPartnerInvite(claim, invite.reasonCode(), clock.instant(), diagnostic)
+					.map(applied -> applied ? PumpResult.PARTNER_INVITE_HELD : PumpResult.NO_WORK);
+		}
 		SmtpTransportException failure = error instanceof SmtpTransportException smtp
 				? smtp
 				: new SmtpTransportException(
 						SmtpTransportException.FailureCategory.PREPARATION_FAILED,
 						AttemptStatus.PERMANENT_FAILURE, TransportStage.MAIL_FROM,
 						null, null, false);
-		return repository.completeFailureDetailed(
-				claim.recipientId(), claim.attemptId(), claim.leaseDigest(), failure, clock.instant())
+		Mono<CampaignDeliveryRepository.FailureSettlement> settlementResult = diagnostic == null
+				? repository.completeFailureDetailed(claim.recipientId(), claim.attemptId(), claim.leaseDigest(), failure, clock.instant())
+				: repository.completeFailureDetailed(claim.recipientId(), claim.attemptId(), claim.leaseDigest(), failure, clock.instant(), diagnostic);
+		return settlementResult
 				.flatMap(settlement -> settlement.applied()
 						? Mono.just(switch (settlement.recipientStatus()) {
 							case TEMPORARY_FAILURE -> PumpResult.TEMPORARY_FAILURE;
@@ -154,6 +216,8 @@ public final class CampaignDeliveryExecutor {
 	private Mono<PumpResult> settleSafetyFailure(
 			CampaignDeliveryRepository.SafetyClaim claim, Throwable error
 	) {
+		PreparationDiagnostic diagnostic = diagnostic(error);
+		error = original(error);
 		SmtpTransportException failure = error instanceof SmtpTransportException smtp
 				? smtp
 				: new SmtpTransportException(
@@ -162,7 +226,7 @@ public final class CampaignDeliveryExecutor {
 						null, null, false);
 		return safetyRepository.completeFailure(
 				claim.messageId(), claim.attemptId(), claim.leaseDigest(), failure, clock.instant(),
-				repository.maximumAttempts(), repository.firstRetryDelay(), repository.secondRetryDelay())
+				repository.maximumAttempts(), repository.firstRetryDelay(), repository.secondRetryDelay(), diagnostic)
 				.flatMap(settlement -> {
 					if (!settlement.applied()) {
 						return Mono.error(new IllegalStateException(
@@ -183,7 +247,7 @@ public final class CampaignDeliveryExecutor {
 	}
 
 	public enum PumpResult {
-		NO_WORK, SMTP_ACCEPTED, TEMPORARY_FAILURE, PERMANENT_FAILURE, OUTCOME_UNKNOWN
+		NO_WORK, SMTP_ACCEPTED, TEMPORARY_FAILURE, PERMANENT_FAILURE, OUTCOME_UNKNOWN, PARTNER_INVITE_HELD
 	}
 
 	private record SendResolution(SmtpTransport.SmtpOutcome outcome, PumpResult result) {

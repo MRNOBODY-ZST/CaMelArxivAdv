@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -79,6 +80,38 @@ class CampaignSafetyApiTest {
 						"extra", true))) {
 			client.post().uri("/api/v1/campaigns/{campaign}/safety-runs", campaign)
 					.bodyValue(body).exchange().expectStatus().isBadRequest();
+		}
+		verifyNoInteractions(service);
+	}
+
+	@Test
+	void optionalNamedDestinationIsPassedToTheServiceWithoutAcceptingAnAddress() {
+		UUID campaign = UUID.randomUUID();
+		when(service.start(eq(campaign), eq(ACTOR), any(), any()))
+				.thenReturn(Mono.just(view(UUID.randomUUID(), campaign, "QUEUED", 0L)));
+		client.post().uri("/api/v1/campaigns/{campaign}/safety-runs", campaign)
+				.bodyValue(Map.of("expectedLockVersion", 7, "recipientLimit", 20,
+						"confirmation", "SAFETY_REDIRECT", "destinationKey", "qq"))
+				.exchange().expectStatus().isCreated();
+		verify(service).start(eq(campaign), eq(ACTOR), any(),
+				eq(new CampaignSafetyService.StartCommand(7, 20, "SAFETY_REDIRECT", "qq")));
+	}
+
+	@Test
+	void malformedDestinationKeyFailsBeforeServiceAndCannotCarryAnAddress() {
+		UUID campaign = UUID.randomUUID();
+		for (String key : List.of("", "qq ", "QQ", "owner@qq.com", "qq\r\nBcc:other@example.test")) {
+			client.post().uri("/api/v1/campaigns/{campaign}/safety-runs", campaign)
+					.bodyValue(Map.of("expectedLockVersion", 0, "recipientLimit", 20,
+							"confirmation", "SAFETY_REDIRECT", "destinationKey", key))
+					.exchange().expectStatus().isBadRequest();
+		}
+		for (String value : List.of("null", "1", "true", "[]", "{}", "\"qq\",\"destinationKey\":\"gmail\"")) {
+			client.post().uri("/api/v1/campaigns/{campaign}/safety-runs", campaign)
+					.contentType(MediaType.APPLICATION_JSON).bodyValue(
+							"{\"expectedLockVersion\":0,\"recipientLimit\":20,\"confirmation\":\"SAFETY_REDIRECT\","
+									+ "\"destinationKey\":" + value + "}")
+					.exchange().expectStatus().isBadRequest();
 		}
 		verifyNoInteractions(service);
 	}

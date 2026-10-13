@@ -7,6 +7,7 @@ import com.camel_hub.advertisement.email.smtp.SmtpQuotaRepository;
 import com.camel_hub.advertisement.email.smtp.SmtpTransport;
 import com.camel_hub.advertisement.email.smtp.SmtpTransportException;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetyRuntimePolicy;
+import com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence;
 import io.r2dbc.spi.Row;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -35,35 +36,41 @@ public final class CampaignDeliveryRepository {
 	private static final Instant COOLDOWN_SENTINEL = Instant.parse("1900-01-01T00:00:00Z");
 	private static final Pattern ENHANCED_STATUS = Pattern.compile("(?<!\\d)([245]\\.\\d\\.\\d{1,3})(?!\\d)");
 	private static final SecureRandom RANDOM = new SecureRandom();
+	private static final String PAPER_CONTACT_POLICY = """
+			EXISTS (SELECT 1 FROM campaigns policy WHERE policy.id = r.campaign_id
+			  AND policy.recipient_policy = 'PAPER_CONTACT' AND r.paper_id = ANY(policy.paper_contact_ids))
+			""";
 	private static final String CURRENT_APPROVED_EVIDENCE = """
 			EXISTS (
 			    SELECT 1
 			    FROM paper_author_contacts pac
-			    JOIN paper_authors pa ON pa.id = pac.paper_author_id
-			    JOIN extraction_runs er ON er.id = pac.extraction_run_id
+			    LEFT JOIN paper_authors pa ON pa.id = pac.paper_author_id
+			    JOIN papers p ON p.id = pac.paper_id AND p.deleted_at IS NULL
+			    JOIN extraction_runs er ON er.id = pac.extraction_run_id AND er.paper_id = pac.paper_id
 			    WHERE pac.contact_id = r.contact_id
 			      AND pac.paper_id = r.paper_id
-			      AND pa.author_id = r.author_id
-			      AND pa.paper_id = r.paper_id
-			      AND pac.verification_status = 'CONFIRMED'
-			      AND pac.confidence = 'HIGH'
-			      AND pac.human_verified
+			      AND pac.verification_status <> 'REJECTED'
+			      AND ((%s AND (r.author_name_snapshot IS NULL OR (
+			        pa.author_id = r.author_id AND pa.paper_id = r.paper_id
+			        AND (pac.confidence = 'HIGH' OR (pac.human_verified AND pac.verification_status = 'CONFIRMED')))))
+			        OR (pa.author_id = r.author_id AND pa.paper_id = r.paper_id
+			        AND (pac.confidence = 'HIGH' OR (pac.confidence = 'MEDIUM'
+			           AND pac.human_verified AND pac.verification_status = 'CONFIRMED'))))
 			      AND er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
 			      AND pac.id = (
 			          SELECT latest_pac.id
 			          FROM paper_author_contacts latest_pac
-			          JOIN extraction_runs latest_er ON latest_er.id = latest_pac.extraction_run_id
+			          JOIN extraction_runs latest_er ON latest_er.id = latest_pac.extraction_run_id AND latest_er.paper_id = latest_pac.paper_id
 			            AND latest_er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
 			          WHERE latest_pac.contact_id = r.contact_id
 			            AND latest_pac.paper_id = r.paper_id
-			            AND latest_pac.paper_author_id = pa.id
 			          ORDER BY latest_er.completed_at DESC NULLS LAST,
 			                   latest_pac.created_at DESC, latest_pac.id
 			          LIMIT 1)
 			      AND EXISTS (SELECT 1 FROM extraction_evidence ev
 			                  WHERE ev.paper_author_contact_id = pac.id)
 			)
-			""";
+			""".formatted(PAPER_CONTACT_POLICY);
 	private static final String UNDELIVERABLE_PREDICATE = """
 			EXISTS (SELECT 1 FROM unsubscribe_records u WHERE u.email_hmac = r.email_hmac)
 			OR EXISTS (SELECT 1 FROM suppression_entries s
@@ -92,7 +99,7 @@ public final class CampaignDeliveryRepository {
 			      AND NOT contact.example_address AND contact.suppression_status = 'ACTIVE'
 			      AND contact.deleted_at IS NULL)
 			OR r.personalization_status <> 'GENERATED'
-			OR r.confidence <> 'HIGH'
+			OR (r.confidence NOT IN ('HIGH', 'MEDIUM') AND NOT (%s))
 			OR r.rendered_subject IS NULL OR btrim(r.rendered_subject) = ''
 			OR r.rendered_html IS NULL OR btrim(r.rendered_html) = ''
 			OR r.rendered_text IS NULL OR btrim(r.rendered_text) = ''
@@ -100,13 +107,19 @@ public final class CampaignDeliveryRepository {
 			    position('{{unsubscribe_url}}' in r.rendered_html) = 0
 			    OR position('{{unsubscribe_url}}' in r.rendered_text) = 0))
 			OR NOT (%s)
-			""".formatted(CURRENT_APPROVED_EVIDENCE);
+			""".formatted(PAPER_CONTACT_POLICY, CURRENT_APPROVED_EVIDENCE);
 
 	private final DatabaseClient database;
 	private final TransactionalOperator transactions;
 	private final CampaignDeliveryProperties properties;
 	private final CampaignSafetyProperties safety;
 	private final CampaignSafetyRuntimePolicy safetyPolicy;
+	private final PreparationDiagnosticRepository diagnostics;
+	// Scan position only; immutable checkpoint identity prevents stale concurrent pumps from rewinding it.
+	private final java.util.concurrent.atomic.AtomicReference<DiscoveryCheckpoint> discoveryContinuation =
+			new java.util.concurrent.atomic.AtomicReference<>(new DiscoveryCheckpoint(null));
+	private final java.util.concurrent.atomic.AtomicReference<SafetyCheckpoint> safetyContinuation =
+			new java.util.concurrent.atomic.AtomicReference<>(new SafetyCheckpoint(null));
 
 	public CampaignDeliveryRepository(
 			DatabaseClient database, TransactionalOperator transactions,
@@ -125,19 +138,61 @@ public final class CampaignDeliveryRepository {
 		this.properties = properties;
 		this.safety = safety;
 		this.safetyPolicy = safetyPolicy;
+		this.diagnostics = new PreparationDiagnosticRepository(database);
 	}
 
 	/** Claims at most one tagged production or safety message and commits its lease before returning. */
 	public Mono<DeliveryClaim> claimNext(Instant now) {
 		if (!safety.enabled() || safetyPolicy == null) {
-			return claimProduction(now).cast(DeliveryClaim.class).as(transactions::transactional);
+			return claimProductionTransaction(now);
 		}
-		return claimSafety(now).as(transactions::transactional)
+		return claimSafetyTransaction(now)
 				.flatMap(decision -> {
 					if (decision.claim() != null) return Mono.just(decision.claim());
 					if (decision.handled()) return Mono.empty();
-					return claimProduction(now).cast(DeliveryClaim.class).as(transactions::transactional);
+					return claimProductionTransaction(now);
 				});
+	}
+
+	private Mono<DeliveryClaim> claimProductionTransaction(Instant now) {
+		return Mono.defer(() -> {
+			DiscoveryScan scan = new DiscoveryScan(discoveryContinuation.get());
+			return claimProductionTransaction(now, scan).doOnSuccess(claim -> {
+				if (!scan.suspended) discoveryContinuation.compareAndSet(scan.checkpoint, new DiscoveryCheckpoint(null));
+			});
+		});
+	}
+
+	private Mono<DeliveryClaim> claimProductionTransaction(Instant now, DiscoveryScan scan) {
+		if (scan.excluded.size() >= 120) {
+			scan.suspended = true;
+			discoveryContinuation.compareAndSet(scan.checkpoint, new DiscoveryCheckpoint(scan.after));
+			return Mono.empty();
+		}
+		return Mono.defer(() -> claimProduction(now, scan)).cast(DeliveryClaim.class).as(transactions::transactional)
+				.retryWhen(reactor.util.retry.Retry.max(120).filter(CandidateChanged.class::isInstance))
+				.onErrorResume(CandidateRejected.class, rejected -> {
+					scan.excluded.add(rejected.position.recipient());
+					scan.after = rejected.position;
+					return claimProductionTransaction(now, scan);
+				});
+	}
+
+	private static final class CandidateChanged extends RuntimeException { }
+	private static final class CandidateRejected extends RuntimeException {
+		private final DiscoveryPosition position;
+		private CandidateRejected(Candidate candidate) {
+			this.position = new DiscoveryPosition(candidate.campaignId(), candidate.nextAttemptAt(), candidate.id());
+		}
+	}
+	private record DiscoveryPosition(UUID campaign, Instant due, UUID recipient) { }
+	private record DiscoveryCheckpoint(DiscoveryPosition after) { }
+	private static final class DiscoveryScan {
+		private final DiscoveryCheckpoint checkpoint;
+		private final java.util.Set<UUID> excluded = new java.util.HashSet<>();
+		private DiscoveryPosition after;
+		private boolean wrapped, suspended;
+		private DiscoveryScan(DiscoveryCheckpoint checkpoint) { this.checkpoint = checkpoint; this.after = checkpoint.after(); }
 	}
 
 	/** Production-specific assertion used by package tests while {@link #claimNext} stays exhaustively tagged. */
@@ -160,9 +215,19 @@ public final class CampaignDeliveryRepository {
 		return properties.secondRetryDelay();
 	}
 
-	private Mono<ProductionClaim> claimProduction(Instant now) {
-		return selectCandidate(now)
-				.flatMap(candidate -> lockAccount(candidate.smtpAccountId())
+	private Mono<ProductionClaim> claimProduction(Instant now, DiscoveryScan scan) {
+		return selectCandidate(now, scan).switchIfEmpty(Mono.defer(() -> {
+			if (scan.after == null || scan.wrapped) return Mono.empty();
+			scan.wrapped = true;
+			scan.after = null;
+			return selectCandidate(now, scan);
+		}))
+				.flatMap(candidate -> new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
+						.lockCandidateAndVerify(candidate.campaignId(), candidate.id(), candidate.emailHmac(), candidate.attemptCount() == 0)
+						.flatMap(allowed -> allowed ? Mono.just(true) : Mono.error(new CandidateRejected(candidate)))
+						.flatMap(allowed -> database.sql("SELECT id FROM campaign_recipients WHERE id=:id AND status IN ('QUEUED','TEMPORARY_FAILURE') AND attempt_count=:attempt")
+								.bind("id",candidate.id()).bind("attempt",candidate.attemptCount()).fetch().all().hasElements()
+								.flatMap(current -> current ? lockAccount(candidate.smtpAccountId()) : Mono.error(new CandidateChanged())))
 						.flatMap(account -> lockCooldown(candidate, now)
 								.flatMap(cooldown -> verifyAfterLocks(candidate, cooldown, now)
 										.flatMap(eligible -> new SmtpQuotaRepository(database).reservations(account, now)
@@ -175,13 +240,98 @@ public final class CampaignDeliveryRepository {
 												})))));
 	}
 
-	private Mono<SafetyClaimDecision> claimSafety(Instant now) {
-		return lockSafetyRun(now)
-				.flatMap(run -> claimSafety(run, now))
+	private Mono<SafetyClaimDecision> claimSafetyTransaction(Instant now) {
+		return Mono.defer(() -> {
+			SafetyScan scan = new SafetyScan(safetyContinuation.get());
+			return claimSafetyTransaction(now, scan).doOnSuccess(decision -> {
+				if (!scan.suspended) safetyContinuation.compareAndSet(scan.checkpoint, new SafetyCheckpoint(null));
+			});
+		});
+	}
+
+	private Mono<SafetyClaimDecision> claimSafetyTransaction(Instant now, SafetyScan scan) {
+		if (scan.excluded.size() >= 120) {
+			scan.suspended = true;
+			safetyContinuation.compareAndSet(scan.checkpoint, new SafetyCheckpoint(scan.after));
+			// No safety action in this bounded scan, not proof of exhaustive absence.
+			// Independently fenced production may progress; it cannot reset this safety hint.
+			return Mono.just(SafetyClaimDecision.noWork());
+		}
+		return Mono.defer(() -> claimSafety(now, scan)).as(transactions::transactional)
+				.onErrorResume(SafetyCandidateRejected.class, rejected -> {
+					// The candidate transaction has rolled back before opening the next root/lock scope.
+					scan.excluded.add(rejected.position.message());
+					scan.after = rejected.position;
+					return claimSafetyTransaction(now, scan);
+				});
+	}
+
+	// Exact PostgreSQL priority tuple: RUNNING rank, run creation/id, message due/id.
+	// This is only a process-local scan hint, never eligibility. Restart begins at the head;
+	// one wrap rechecks earlier work. Checkpoint identity CAS prevents a stale concurrent
+	// subscription from overwriting publication/reset; success or exhausted scan resets it.
+	private record SafetyPosition(int rank, Instant created, UUID run, Instant due, UUID message) { }
+	private record SafetyCheckpoint(SafetyPosition after) { }
+	private static final class SafetyScan {
+		private final SafetyCheckpoint checkpoint;
+		private final java.util.Set<UUID> excluded = new java.util.HashSet<>();
+		private SafetyPosition after;
+		private boolean wrapped, suspended;
+		private SafetyScan(SafetyCheckpoint checkpoint) { this.checkpoint = checkpoint; this.after = checkpoint.after(); }
+	}
+	private static final class SafetyCandidateRejected extends RuntimeException {
+		private final SafetyPosition position;
+		private SafetyCandidateRejected(SafetyPosition position) { this.position = position; }
+	}
+
+	private Mono<SafetyClaimDecision> claimSafety(Instant now, SafetyScan scan) {
+		return discoverSafety(now, scan).switchIfEmpty(Mono.defer(() -> {
+			if (scan.after == null || scan.wrapped) return Mono.empty();
+			scan.wrapped = true;
+			scan.after = null;
+			return discoverSafety(now, scan);
+		})).flatMap(discovered -> {
+			var fence=new CampaignMigrationDeliveryFence(database);
+			return fence.lockSources(List.of(discovered.source())).flatMap(receipt -> lockSafetyRun(discovered.run(),now)
+				.filter(run -> run.campaignId().equals(discovered.source().campaignId()))
+				.flatMap(run -> lockSafetyMessage(run.id(),discovered.message(),now)
+					.filter(message -> message.campaignRecipientId().equals(discovered.source().recipientId()))
+					.flatMap(message -> database.sql("SELECT id FROM campaign_safety_attempts WHERE safety_message_id=:id ORDER BY id FOR UPDATE")
+						.bind("id",message.id()).fetch().all().then(fence.verifyLocked(receipt,true,List.of(run.smtpAccountId())))
+						.filter(Boolean::booleanValue).flatMap(allowed -> claimSafety(run,message,now)))))
+				.switchIfEmpty(Mono.error(new SafetyCandidateRejected(discovered.position())));
+		})
 				.defaultIfEmpty(SafetyClaimDecision.noWork());
 	}
 
-	private Mono<SafetyClaimDecision> claimSafety(SafetyRunCandidate run, Instant now) {
+	private record SafetyDiscovery(UUID run, UUID message, CampaignMigrationDeliveryFence.Source source, SafetyPosition position) { }
+
+	private Mono<SafetyDiscovery> discoverSafety(Instant now, SafetyScan scan) {
+		SafetyPosition after = scan.after;
+		UUID zero = new UUID(0,0);
+		return database.sql("""
+			SELECT sr.id AS run,m.id AS message,r.id AS recipient,r.campaign_id,encode(r.email_hmac,'hex') AS hmac,
+			 CASE WHEN sr.status='RUNNING' THEN 0 ELSE 1 END AS rank,sr.created_at,m.next_attempt_at
+			FROM campaign_safety_runs sr JOIN campaign_safety_messages m ON m.run_id=sr.id
+			JOIN campaign_recipients r ON r.id=m.campaign_recipient_id AND r.campaign_id=sr.campaign_id
+			WHERE sr.status IN ('QUEUED','RUNNING') AND m.status IN ('QUEUED','TEMPORARY_FAILURE')
+			 AND m.next_attempt_at<=:now AND m.attempt_count<:maximumAttempts
+			 AND NOT (m.id=ANY(:excluded))
+			 AND (NOT :hasAfter OR (CASE WHEN sr.status='RUNNING' THEN 0 ELSE 1 END,sr.created_at,sr.id,m.next_attempt_at,m.id)
+			   > (:rank,:created,:run,:due,:message))
+			ORDER BY CASE WHEN sr.status='RUNNING' THEN 0 ELSE 1 END,sr.created_at,sr.id,m.next_attempt_at,m.id LIMIT 1
+			""").bind("now",now).bind("maximumAttempts",properties.maximumAttempts())
+			.bind("excluded",scan.excluded.toArray(UUID[]::new)).bind("hasAfter",after!=null)
+			.bind("rank",after==null?0:after.rank()).bind("created",after==null?Instant.EPOCH:after.created())
+			.bind("run",after==null?zero:after.run()).bind("due",after==null?Instant.EPOCH:after.due())
+			.bind("message",after==null?zero:after.message())
+			.map((r,m)->new SafetyDiscovery(r.get("run",UUID.class),r.get("message",UUID.class),
+				new CampaignMigrationDeliveryFence.Source(r.get("campaign_id",UUID.class),r.get("recipient",UUID.class),r.get("hmac",String.class)),
+				new SafetyPosition(r.get("rank",Integer.class),r.get("created_at",Instant.class),r.get("run",UUID.class),
+					r.get("next_attempt_at",Instant.class),r.get("message",UUID.class)))).one();
+	}
+
+	private Mono<SafetyClaimDecision> claimSafety(SafetyRunCandidate run, SafetyMessageCandidate message, Instant now) {
 		CampaignSafetyRuntimePolicy.Destination destination;
 		try {
 			destination = safetyPolicy.requireMatching(run.destinationHmac());
@@ -193,10 +343,8 @@ public final class CampaignDeliveryRepository {
 				|| !destination.domain().equals(run.destinationDomain())) {
 			return terminalizeSafetyRun(run.id(), now).thenReturn(SafetyClaimDecision.handledWork());
 		}
-		return lockSafetyMessage(run.id(), now)
-				.flatMap(message -> lockAccount(run.smtpAccountId())
-						.flatMap(account -> claimSafety(run, message, account, destination, now)))
-				.defaultIfEmpty(SafetyClaimDecision.handledWork());
+		return lockAccount(run.smtpAccountId())
+				.flatMap(account -> claimSafety(run, message, account, destination, now));
 	}
 
 	private Mono<SafetyClaimDecision> claimSafety(
@@ -216,12 +364,11 @@ public final class CampaignDeliveryRepository {
 								.thenReturn(SafetyClaimDecision.handledWork());
 					}
 					return reserveSafety(run, message, account, destination, now)
-							.map(SafetyClaimDecision::claimed)
-							.defaultIfEmpty(SafetyClaimDecision.handledWork());
+							.map(SafetyClaimDecision::claimed);
 				});
 	}
 
-	private Mono<SafetyRunCandidate> lockSafetyRun(Instant now) {
+	private Mono<SafetyRunCandidate> lockSafetyRun(UUID runId, Instant now) {
 		return database.sql("""
 				SELECT sr.id, sr.campaign_id, sr.smtp_account_id, sr.destination_hmac,
 				       sr.destination_masked,
@@ -229,7 +376,7 @@ public final class CampaignDeliveryRepository {
 				       sr.from_name_snapshot, sr.from_email_snapshot, sr.reply_to_snapshot,
 				       sr.tracking_opens_enabled, sr.tracking_clicks_enabled
 				FROM campaign_safety_runs sr
-				WHERE sr.status IN ('QUEUED','RUNNING')
+				WHERE sr.id=:run AND sr.status IN ('QUEUED','RUNNING')
 				  AND EXISTS (
 				      SELECT 1 FROM campaign_safety_messages m
 				      WHERE m.run_id = sr.id AND m.status IN ('QUEUED','TEMPORARY_FAILURE')
@@ -237,7 +384,7 @@ public final class CampaignDeliveryRepository {
 				ORDER BY CASE WHEN sr.status = 'RUNNING' THEN 0 ELSE 1 END, sr.created_at, sr.id
 				FOR UPDATE OF sr SKIP LOCKED
 				LIMIT 1
-				""").bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
+				""").bind("run",runId).bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
 				.map((row, metadata) -> new SafetyRunCandidate(
 						row.get("id", UUID.class), row.get("campaign_id", UUID.class),
 						row.get("smtp_account_id", UUID.class), copy(row.get("destination_hmac", byte[].class)),
@@ -248,17 +395,18 @@ public final class CampaignDeliveryRepository {
 						Boolean.TRUE.equals(row.get("tracking_clicks_enabled", Boolean.class)))).one();
 	}
 
-	private Mono<SafetyMessageCandidate> lockSafetyMessage(UUID runId, Instant now) {
+	private Mono<SafetyMessageCandidate> lockSafetyMessage(UUID runId, UUID messageId, Instant now) {
 		return database.sql("""
 				SELECT id, campaign_recipient_id, attempt_count, rfc_message_id,
 				       rendered_subject, rendered_html, rendered_text
 				FROM campaign_safety_messages
-				WHERE run_id = :run AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				WHERE id=:message AND run_id = :run AND status IN ('QUEUED','TEMPORARY_FAILURE')
+				  AND smtp_account_id=(SELECT smtp_account_id FROM campaign_safety_runs WHERE id=:run)
 				  AND next_attempt_at <= :now AND attempt_count < :maximumAttempts
 				ORDER BY next_attempt_at, id
 				FOR UPDATE SKIP LOCKED
 				LIMIT 1
-				""").bind("run", runId).bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
+				""").bind("message",messageId).bind("run", runId).bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
 				.map((row, metadata) -> new SafetyMessageCandidate(
 						row.get("id", UUID.class), row.get("campaign_recipient_id", UUID.class),
 						requiredInt(row, "attempt_count"), row.get("rfc_message_id", String.class),
@@ -395,6 +543,7 @@ public final class CampaignDeliveryRepository {
 				          SELECT 1 FROM campaign_recipients r
 				          WHERE r.campaign_id = c.id
 				            AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
+				            AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 				            AND (%1$s))
 				    ORDER BY c.id
 				    FOR UPDATE OF c SKIP LOCKED
@@ -404,6 +553,7 @@ public final class CampaignDeliveryRepository {
 				    FROM locked_campaign c
 				    JOIN campaign_recipients r ON r.campaign_id = c.id
 				    WHERE r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
+				      AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 				      AND (%1$s)
 				    ORDER BY r.id
 				    FOR UPDATE OF r SKIP LOCKED
@@ -443,14 +593,18 @@ public final class CampaignDeliveryRepository {
 				.fetch().rowsUpdated().map(Number::intValue);
 	}
 
-	private Mono<Candidate> selectCandidate(Instant now) {
-		return database.sql("""
+	private Mono<Candidate> selectCandidate(Instant now, DiscoveryScan scan) {
+		return bindDiscoveryScan(database.sql("""
 				SELECT c.id
 				FROM campaigns c
 				WHERE c.status = 'RUNNING'
+				  AND NOT EXISTS (SELECT 1 FROM campaign_recipients held WHERE held.campaign_id=c.id AND held.partner_invite_hold_reason IS NOT NULL)
 				  AND EXISTS (SELECT 1 FROM campaign_recipients r
 				              WHERE r.campaign_id = c.id
+				                AND r.id <> ALL(:excluded)
+				                AND (NOT :hasAfter OR (c.id,r.next_attempt_at,r.id) > (:afterCampaign,:afterDue,:afterRecipient))
 				                AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
+				                AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 				                AND r.next_attempt_at <= :now
 				                AND r.attempt_count < :maximumAttempts
 				                AND NOT EXISTS (SELECT 1 FROM campaign_recipients guarded
@@ -460,14 +614,13 @@ public final class CampaignDeliveryRepository {
 				  AND NOT EXISTS (SELECT 1 FROM campaign_safety_runs sr
 				                  WHERE sr.campaign_id = c.id AND sr.status IN ('QUEUED', 'RUNNING'))
 				ORDER BY c.id
-				FOR SHARE OF c SKIP LOCKED
 				LIMIT 1
-				""").bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
+				"""), scan).bind("now", now).bind("maximumAttempts", properties.maximumAttempts())
 				.map((row, metadata) -> row.get("id", UUID.class)).one()
-				.flatMap(campaignId -> database.sql("""
+				.flatMap(campaignId -> bindDiscoveryScan(database.sql("""
 				SELECT r.id, r.campaign_id, r.contact_id, r.paper_id, r.author_id,
 				       r.email_ciphertext, r.email_nonce, r.email_hmac, r.email_domain,
-				       r.attempt_count, r.rfc_message_id, r.rendered_subject,
+				       r.attempt_count, r.next_attempt_at, r.rfc_message_id, r.rendered_subject,
 				       r.rendered_html, r.rendered_text,
 				       c.smtp_account_id, c.template_version_id, c.from_name, c.from_email,
 				       c.reply_to, c.tracking_opens_enabled, c.tracking_clicks_enabled,
@@ -475,7 +628,11 @@ public final class CampaignDeliveryRepository {
 				FROM campaign_recipients r
 				JOIN campaigns c ON c.id = r.campaign_id
 				WHERE c.id = :campaignId AND c.status = 'RUNNING'
+				  AND r.id <> ALL(:excluded)
+				  AND (NOT :hasAfter OR (c.id,r.next_attempt_at,r.id) > (:afterCampaign,:afterDue,:afterRecipient))
+				  AND NOT EXISTS (SELECT 1 FROM campaign_recipients held WHERE held.campaign_id=c.id AND held.partner_invite_hold_reason IS NOT NULL)
 				  AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
+				  AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 				  AND r.next_attempt_at <= :now
 				  AND r.attempt_count < :maximumAttempts
 				  AND NOT EXISTS (SELECT 1 FROM campaign_recipients guarded
@@ -485,11 +642,18 @@ public final class CampaignDeliveryRepository {
 				  AND NOT EXISTS (SELECT 1 FROM campaign_safety_runs sr
 				                  WHERE sr.campaign_id = c.id AND sr.status IN ('QUEUED', 'RUNNING'))
 				ORDER BY r.next_attempt_at, r.id
-				FOR UPDATE OF r SKIP LOCKED
 				LIMIT 1
-				""").bind("campaignId", campaignId).bind("now", now)
+				"""), scan).bind("campaignId", campaignId).bind("now", now)
 						.bind("maximumAttempts", properties.maximumAttempts())
 						.map((row, metadata) -> candidate(row)).one());
+	}
+
+	private DatabaseClient.GenericExecuteSpec bindDiscoveryScan(DatabaseClient.GenericExecuteSpec statement, DiscoveryScan scan) {
+		DiscoveryPosition after = scan.after;
+		return statement.bind("excluded", scan.excluded.toArray(UUID[]::new)).bind("hasAfter", after != null)
+				.bind("afterCampaign", after == null ? new UUID(0,0) : after.campaign())
+				.bind("afterDue", after == null ? Instant.EPOCH : after.due())
+				.bind("afterRecipient", after == null ? new UUID(0,0) : after.recipient());
 	}
 
 	private Mono<SmtpRepository.SmtpAccountRecord> lockAccount(UUID id) {
@@ -566,7 +730,7 @@ public final class CampaignDeliveryRepository {
 				    WHEN contact.id IS NULL OR contact.deleted_at IS NOT NULL
 				         OR NOT contact.syntax_valid OR contact.example_address
 				         OR contact.suppression_status <> 'ACTIVE' THEN 'CONTACT_INVALID'
-				    WHEN r.confidence <> 'HIGH' THEN 'EVIDENCE_INVALID'
+				    WHEN r.confidence NOT IN ('HIGH', 'MEDIUM') AND NOT (%s) THEN 'EVIDENCE_INVALID'
 				    WHEN r.personalization_status <> 'GENERATED'
 				         OR r.rendered_subject IS NULL OR btrim(r.rendered_subject) = ''
 				         OR r.rendered_html IS NULL OR btrim(r.rendered_html) = ''
@@ -574,28 +738,7 @@ public final class CampaignDeliveryRepository {
 				         OR (r.attempt_count = 0 AND (
 				             position('{{unsubscribe_url}}' in r.rendered_html) = 0
 				             OR position('{{unsubscribe_url}}' in r.rendered_text) = 0)) THEN 'CONTENT_INVALID'
-				    WHEN NOT EXISTS (
-				        SELECT 1 FROM paper_author_contacts pac
-				        JOIN paper_authors pa ON pa.id = pac.paper_author_id
-				        JOIN extraction_runs er ON er.id = pac.extraction_run_id
-				        WHERE pac.contact_id = r.contact_id AND pac.paper_id = r.paper_id
-				          AND pa.author_id = r.author_id AND pa.paper_id = r.paper_id
-				          AND pac.verification_status = 'CONFIRMED'
-				          AND pac.confidence = 'HIGH' AND pac.human_verified
-				          AND er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
-				          AND pac.id = (
-				              SELECT latest_pac.id
-				              FROM paper_author_contacts latest_pac
-				              JOIN extraction_runs latest_er ON latest_er.id = latest_pac.extraction_run_id
-				                AND latest_er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
-				              WHERE latest_pac.contact_id = r.contact_id
-				                AND latest_pac.paper_id = r.paper_id
-				                AND latest_pac.paper_author_id = pa.id
-				              ORDER BY latest_er.completed_at DESC NULLS LAST,
-				                       latest_pac.created_at DESC, latest_pac.id
-				              LIMIT 1)
-				          AND EXISTS (SELECT 1 FROM extraction_evidence ev
-				                      WHERE ev.paper_author_contact_id = pac.id)) THEN 'EVIDENCE_INVALID'
+				    WHEN NOT (%s) THEN 'EVIDENCE_INVALID'
 				    ELSE NULL END AS reason
 				FROM campaign_recipients r
 				JOIN campaigns c ON c.id = r.campaign_id
@@ -603,7 +746,7 @@ public final class CampaignDeliveryRepository {
 				LEFT JOIN mailbox_accounts mailbox ON mailbox.id = c.mailbox_account_id
 				LEFT JOIN contacts contact ON contact.id = r.contact_id
 				WHERE r.id = :id AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
-				""").bind("now", now).bind("id", recipientId)
+				""".formatted(PAPER_CONTACT_POLICY, CURRENT_APPROVED_EVIDENCE)).bind("now", now).bind("id", recipientId)
 				.map((row, metadata) -> new Eligibility(row.get("reason", String.class))).one();
 	}
 
@@ -647,9 +790,10 @@ public final class CampaignDeliveryRepository {
 				    delivery_lease_expires_at = :expires,
 				    rfc_message_id = :messageId
 				WHERE r.id = :id
+				  AND r.partner_invite_hold_reason IS NULL
 				  AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
 				  AND r.next_attempt_at <= :now AND r.attempt_count = :oldAttemptCount
-				  AND r.confidence = 'HIGH'
+				  AND (r.confidence IN ('HIGH', 'MEDIUM') OR (%s))
 				  AND (r.attempt_count > 0 OR (
 				      position('{{unsubscribe_url}}' in r.rendered_html) > 0
 				      AND position('{{unsubscribe_url}}' in r.rendered_text) > 0))
@@ -679,29 +823,8 @@ public final class CampaignDeliveryRepository {
 				        AND mailbox.last_tested_at >= mailbox.updated_at
 				        AND NOT EXISTS (SELECT 1 FROM campaign_safety_runs sr
 				                        WHERE sr.campaign_id = c.id AND sr.status IN ('QUEUED', 'RUNNING')))
-				  AND EXISTS (
-				      SELECT 1 FROM paper_author_contacts pac
-				      JOIN paper_authors pa ON pa.id = pac.paper_author_id
-				      JOIN extraction_runs er ON er.id = pac.extraction_run_id
-				      WHERE pac.contact_id = r.contact_id AND pac.paper_id = r.paper_id
-				        AND pa.author_id = r.author_id AND pa.paper_id = r.paper_id
-				        AND pac.verification_status = 'CONFIRMED'
-				        AND pac.confidence = 'HIGH' AND pac.human_verified
-				        AND er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
-				        AND pac.id = (
-				            SELECT latest_pac.id
-				            FROM paper_author_contacts latest_pac
-				            JOIN extraction_runs latest_er ON latest_er.id = latest_pac.extraction_run_id
-				              AND latest_er.status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED')
-				            WHERE latest_pac.contact_id = r.contact_id
-				              AND latest_pac.paper_id = r.paper_id
-				              AND latest_pac.paper_author_id = pa.id
-				            ORDER BY latest_er.completed_at DESC NULLS LAST,
-				                     latest_pac.created_at DESC, latest_pac.id
-				            LIMIT 1)
-				        AND EXISTS (SELECT 1 FROM extraction_evidence ev
-				                    WHERE ev.paper_author_contact_id = pac.id))
-				""").bind("number", attemptNumber).bind("oldAttemptCount", candidate.attemptCount())
+				  AND (%s)
+				""".formatted(PAPER_CONTACT_POLICY, CURRENT_APPROVED_EVIDENCE)).bind("number", attemptNumber).bind("oldAttemptCount", candidate.attemptCount())
 				.bind("now", now).bind("leaseHash", leaseHash).bind("expires", expires)
 				.bind("messageId", messageId).bind("id", candidate.id()).bind("smtp", account.id())
 				.fetch().rowsUpdated()
@@ -717,12 +840,13 @@ public final class CampaignDeliveryRepository {
 							INSERT INTO delivery_attempts (
 							    id, campaign_recipient_id, smtp_account_id, attempt_number,
 							    idempotency_key, status, transport_stage, retryable,
-							    rfc_message_id, started_at
+							    rfc_message_id, started_at, partner_preparation_pending
 							) VALUES (:attempt, :recipient, :smtp, :number, :key, 'CONNECTING',
-							          'CONNECT', false, :messageId, :now)
+							          'CONNECT', false, :messageId, :now, :partnerPending)
 							""").bind("attempt", attemptId).bind("recipient", candidate.id())
 							.bind("smtp", account.id()).bind("number", attemptNumber)
 							.bind("key", idempotency).bind("messageId", messageId).bind("now", now)
+							.bind("partnerPending", com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.optedIn(candidate.renderedHtml(), candidate.renderedText()))
 							.fetch().rowsUpdated().then(claim);
 				});
 	}
@@ -798,6 +922,13 @@ public final class CampaignDeliveryRepository {
 			UUID recipientId, UUID attemptId, byte[] lease,
 			SmtpTransportException failure, Instant now
 	) {
+		return completeFailureDetailed(recipientId, attemptId, lease, failure, now, null);
+	}
+
+	public Mono<FailureSettlement> completeFailureDetailed(
+			UUID recipientId, UUID attemptId, byte[] lease,
+			SmtpTransportException failure, Instant now, PreparationDiagnostic diagnostic
+	) {
 		byte[] digest = sha256(lease);
 		return database.sql("""
 				SELECT attempt_count FROM campaign_recipients
@@ -810,7 +941,10 @@ public final class CampaignDeliveryRepository {
 				""").bind("recipient", recipientId).bind("lease", digest).bind("attempt", attemptId)
 					.map((row, metadata) -> requiredInt(row, "attempt_count")).one()
 					.flatMap(attemptNumber -> settleFailure(
-							recipientId, attemptId, attemptNumber, failure, now))
+							recipientId, attemptId, attemptNumber, failure, now)
+							.flatMap(settlement -> settlement.applied() && diagnostic != null
+									? diagnostics.record(attemptId, "PRODUCTION", diagnostic).thenReturn(settlement)
+									: Mono.just(settlement)))
 					.defaultIfEmpty(new FailureSettlement(false, null))
 					.as(transactions::transactional);
 	}
@@ -873,6 +1007,7 @@ public final class CampaignDeliveryRepository {
 				    SELECT id
 				    FROM campaign_recipients
 				    WHERE status = 'CONNECTING' AND delivery_lease_expires_at <= :now
+				      AND NOT EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.campaign_recipient_id=campaign_recipients.id AND a.status='CONNECTING' AND a.partner_preparation_pending)
 				    ORDER BY delivery_lease_expires_at, id
 				    FOR UPDATE SKIP LOCKED
 				    LIMIT :batchSize
@@ -897,8 +1032,115 @@ public final class CampaignDeliveryRepository {
 				SELECT count(*)::int AS total FROM expired
 				""").bind("now", now).bind("batchSize", properties.batchSize())
 				.map((row, metadata) -> requiredInt(row, "total")).one();
-		return work.as(transactions::transactional);
+		return reconcilePartnerPreparations(now).flatMap(held -> work.map(unknown -> held + unknown)).as(transactions::transactional);
 	}
+
+	/** Recheck the exact live claim after preparation and immediately before partner I/O. */
+	public Mono<Boolean> productionEligible(ProductionClaim claim, java.time.Clock clock) {
+		return activeProduction(claim, clock, false).as(transactions::transactional);
+	}
+
+	/** Commit the SMTP-started fence only after all preparation, with campaign-before-recipient locks. */
+	public Mono<Boolean> beginSmtp(ProductionClaim claim, java.time.Clock clock) {
+		return activeProduction(claim, clock, true).as(transactions::transactional);
+	}
+
+	private Mono<Boolean> activeProduction(ProductionClaim claim, java.time.Clock clock, boolean beginSmtp) {
+		return new com.camel_hub.advertisement.campaign.migration.CampaignMigrationDeliveryFence(database)
+				.lockProductionAndVerify(claim).filter(Boolean::booleanValue)
+				.flatMap(ignored -> Mono.defer(() -> {
+					// All potentially waiting row locks are held before consulting time.
+					Instant now = clock.instant();
+					return database.sql("""
+					SELECT r.id FROM campaign_recipients r JOIN campaigns c ON c.id=r.campaign_id
+					WHERE r.id=:recipient AND r.campaign_id=:campaign AND c.status='RUNNING'
+					 AND r.status='CONNECTING' AND r.delivery_lease_hash=:lease AND r.delivery_lease_expires_at>:now
+					 AND NOT EXISTS (SELECT 1 FROM campaign_recipients held WHERE held.campaign_id=c.id AND held.partner_invite_hold_reason IS NOT NULL)
+					 AND EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.id=:attempt AND a.campaign_recipient_id=r.id AND a.status='CONNECTING' AND a.smtp_started_at IS NULL)
+					 AND NOT (%s)
+					""".formatted(UNDELIVERABLE_PREDICATE))
+					.bind("recipient", claim.recipientId()).bind("campaign", claim.campaignId()).bind("attempt", claim.attemptId())
+					.bind("lease", sha256(claim.leaseDigest())).bind("now", now).bind("cooldownCutoff", now.minus(properties.productionCooldown()))
+					.map((row, metadata) -> row.get("id", UUID.class)).one();
+				}))
+				.flatMap(ignored -> !beginSmtp ? Mono.just(true) : Mono.defer(() -> {
+					Instant fenceTime = clock.instant();
+					return database.sql("""
+					 UPDATE delivery_attempts SET smtp_started_at=:now, partner_preparation_pending=false
+					 WHERE id=:attempt AND status='CONNECTING' AND smtp_started_at IS NULL
+					 AND EXISTS (SELECT 1 FROM campaign_recipients r WHERE r.id=:recipient AND r.delivery_lease_hash=:lease AND r.delivery_lease_expires_at>:now)
+					 """).bind("now", fenceTime).bind("attempt", claim.attemptId()).bind("recipient", claim.recipientId())
+						.bind("lease", sha256(claim.leaseDigest())).fetch().rowsUpdated().map(rows -> rows.longValue() == 1);
+				})).defaultIfEmpty(false);
+	}
+
+	public Mono<Boolean> holdPartnerInvite(ProductionClaim claim, String reason, Instant now) {
+		return holdPartnerInvite(claim, reason, now, null);
+	}
+
+	public Mono<Boolean> holdPartnerInvite(ProductionClaim claim, String reason, Instant now, PreparationDiagnostic diagnostic) {
+		return holdPreparation(claim.campaignId(), claim.recipientId(), claim.attemptId(), sha256(claim.leaseDigest()), reason, now, false, false)
+				.flatMap(applied -> applied && diagnostic != null
+						? diagnostics.record(claim.attemptId(), "PRODUCTION", diagnostic).thenReturn(true) : Mono.just(applied))
+				.as(transactions::transactional);
+	}
+
+	/** Only the current executor, after its own fence but strictly before sender.send, may compensate. */
+	public Mono<Boolean> holdExpiredBeforeSmtp(ProductionClaim claim, Instant now) {
+		return holdExpiredBeforeSmtp(claim, now, null);
+	}
+
+	public Mono<Boolean> holdExpiredBeforeSmtp(ProductionClaim claim, Instant now, PreparationDiagnostic diagnostic) {
+		return holdPreparation(claim.campaignId(), claim.recipientId(), claim.attemptId(), sha256(claim.leaseDigest()), "EXPIRED", now, false, true)
+				.flatMap(applied -> applied && diagnostic != null
+						? diagnostics.record(claim.attemptId(), "PRODUCTION", diagnostic).thenReturn(true) : Mono.just(applied))
+				.as(transactions::transactional);
+	}
+
+	private Mono<Boolean> holdPreparation(UUID campaign, UUID recipient, UUID attempt, byte[] leaseHash, String reason, Instant now, boolean expired, boolean fencedButUnsent) {
+		if (!java.util.Set.of("DISABLED", "HELD", "EXPIRED", "CLAIMED", "INVALID_INPUT", "UNAVAILABLE", "PREPARATION_INTERRUPTED").contains(reason)) return Mono.error(new IllegalArgumentException("Invalid partner hold reason"));
+		return database.sql("SELECT status FROM campaigns WHERE id=:campaign FOR UPDATE").bind("campaign", campaign)
+				.map((row, metadata) -> row.get("status", String.class)).one().flatMap(status -> database.sql("""
+				 UPDATE campaign_recipients r SET status=:status, partner_invite_hold_reason=:reason,
+				  delivery_lease_hash=NULL, delivery_lease_expires_at=NULL, next_attempt_at=:now
+				 WHERE r.id=:recipient AND r.campaign_id=:campaign AND r.status='CONNECTING' AND r.delivery_lease_hash=:lease
+				 AND (:fenced OR (:expired AND r.delivery_lease_expires_at<=:now) OR (NOT :expired AND r.delivery_lease_expires_at>:now))
+				 AND EXISTS (SELECT 1 FROM delivery_attempts a WHERE a.id=:attempt AND a.campaign_recipient_id=r.id
+				  AND a.status='CONNECTING' AND ((NOT :fenced AND a.partner_preparation_pending AND a.smtp_started_at IS NULL)
+				   OR (:fenced AND NOT a.partner_preparation_pending AND a.smtp_started_at IS NOT NULL)))
+				 """).bind("status", "CANCELED".equals(status) ? "CANCELED" : "QUEUED").bind("reason", reason)
+				.bind("now", now).bind("recipient", recipient).bind("campaign", campaign).bind("lease", leaseHash)
+				.bind("expired", expired).bind("fenced", fencedButUnsent).bind("attempt", attempt).fetch().rowsUpdated())
+				.flatMap(rows -> rows.longValue()!=1 ? Mono.just(false) : database.sql("""
+				 UPDATE delivery_attempts SET status='CANCELED', transport_stage=NULL, failure_category=:reason,
+				 retryable=false, completed_at=:now, partner_preparation_pending=false WHERE id=:attempt AND status='CONNECTING'
+				 """).bind("reason", "PARTNER_INVITE_" + reason).bind("now", now).bind("attempt", attempt).fetch().rowsUpdated()
+				.then(database.sql("UPDATE campaigns SET status='PAUSED', status_changed_at=:now, updated_at=:now, lock_version=lock_version+1 WHERE id=:campaign AND status IN ('RUNNING','PAUSED')")
+					.bind("now", now).bind("campaign", campaign).fetch().rowsUpdated())
+				.then(database.sql("""
+				 INSERT INTO audit_logs(action,resource_type,resource_id,trace_id,before_summary,after_summary,result)
+				 VALUES ('CAMPAIGN_PARTNER_INVITE_HELD','CAMPAIGN_RECIPIENT',:recipient,:trace,'{}'::jsonb,
+				 jsonb_build_object('reason',CAST(:reason AS text),'attemptId',CAST(:attempt AS text)),'SUCCESS')
+				 """).bind("recipient", recipient.toString()).bind("trace", attempt.toString().replace("-", ""))
+					.bind("reason", reason).bind("attempt", attempt.toString()).fetch().rowsUpdated()).thenReturn(true)).defaultIfEmpty(false);
+	}
+
+	private Mono<Integer> reconcilePartnerPreparations(Instant now) {
+		return database.sql("""
+			 SELECT c.id FROM campaigns c WHERE EXISTS (SELECT 1 FROM campaign_recipients r JOIN delivery_attempts a ON a.campaign_recipient_id=r.id
+			 WHERE r.campaign_id=c.id AND r.status='CONNECTING' AND r.delivery_lease_expires_at<=:now AND a.status='CONNECTING' AND a.partner_preparation_pending)
+			 ORDER BY c.id FOR UPDATE OF c SKIP LOCKED LIMIT :batchSize
+			 """).bind("now", now).bind("batchSize", properties.batchSize()).map((row, metadata) -> row.get("id", UUID.class)).all()
+				.concatMap(campaign -> database.sql("""
+				 SELECT r.id, r.delivery_lease_hash, a.id AS attempt FROM campaign_recipients r JOIN delivery_attempts a ON a.campaign_recipient_id=r.id
+				 WHERE r.campaign_id=:campaign AND r.status='CONNECTING' AND r.delivery_lease_expires_at<=:now AND a.status='CONNECTING' AND a.partner_preparation_pending
+				 ORDER BY r.id FOR UPDATE OF r,a SKIP LOCKED
+				 """).bind("campaign", campaign).bind("now", now)
+					.map((row, metadata) -> new PendingPreparation(campaign, row.get("id", UUID.class), row.get("attempt", UUID.class), row.get("delivery_lease_hash", byte[].class))).all())
+				.concatMap(pending -> holdPreparation(pending.campaign(), pending.recipient(), pending.attempt(), pending.leaseHash(), "PREPARATION_INTERRUPTED", now, true, false))
+				.filter(Boolean::booleanValue).count().map(Long::intValue);
+	}
+	private record PendingPreparation(UUID campaign, UUID recipient, UUID attempt, byte[] leaseHash) { }
 
 	public Mono<Integer> activateDueCampaigns(Instant now) {
 		return database.sql("""
@@ -924,6 +1166,7 @@ public final class CampaignDeliveryRepository {
 				    JOIN campaign_recipients r ON r.campaign_id = c.id
 				    WHERE c.status = 'CANCELED'
 				      AND r.status IN ('QUEUED', 'TEMPORARY_FAILURE')
+				      AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_recipient_id=r.id)
 				    ORDER BY r.id
 				    FOR UPDATE OF r SKIP LOCKED
 				    LIMIT :batchSize
@@ -944,6 +1187,7 @@ public final class CampaignDeliveryRepository {
 				    SELECT c.id
 				    FROM campaigns c
 				    WHERE c.status = 'RUNNING'
+				      AND NOT EXISTS (SELECT 1 FROM campaign_recipient_transfers t WHERE t.source_campaign_id=c.id)
 				      AND EXISTS (SELECT 1 FROM campaign_recipients r WHERE r.campaign_id = c.id)
 				      AND NOT EXISTS (
 				          SELECT 1 FROM campaign_recipients r WHERE r.campaign_id = c.id
@@ -972,7 +1216,7 @@ public final class CampaignDeliveryRepository {
 				Boolean.TRUE.equals(row.get("tracking_clicks_enabled", Boolean.class)),
 				Boolean.TRUE.equals(row.get("unsubscribe_enabled", Boolean.class)),
 				row.get("rendered_subject", String.class), row.get("rendered_html", String.class),
-				row.get("rendered_text", String.class));
+				row.get("rendered_text", String.class), row.get("next_attempt_at", Instant.class));
 	}
 
 	private SmtpRepository.SmtpAccountRecord account(Row row) {
@@ -1045,7 +1289,7 @@ public final class CampaignDeliveryRepository {
 			byte[] emailCiphertext, byte[] emailNonce, byte[] emailHmac, String emailDomain,
 			int attemptCount, String messageId, String fromName, String fromEmail, String replyTo,
 			boolean trackingOpens, boolean trackingClicks, boolean unsubscribeEnabled,
-			String renderedSubject, String renderedHtml, String renderedText
+			String renderedSubject, String renderedHtml, String renderedText, Instant nextAttemptAt
 	) { }
 
 	private record SafetyClaimDecision(SafetyClaim claim, boolean handled) {
@@ -1123,6 +1367,13 @@ public final class CampaignDeliveryRepository {
 		public SafetyClaim {
 			leaseDigest = copy(leaseDigest);
 			destinationHmac = copy(destinationHmac);
+		}
+
+		/** Exact validated outbound bytes, not an authorization; the durable fence compares them to storage. */
+		public SafetyClaim withPreparedBodies(String subject, String html, String text) {
+			return new SafetyClaim(messageId,runId,campaignRecipientId,attemptId,attemptNumber,idempotencyKey,rfcMessageId,
+				correlationId,leaseDigest,destinationHmac,destinationMasked,destinationDomain,smtpAccount,fromName,fromEmail,
+				replyTo,trackingOpensEnabled,trackingClicksEnabled,subject,html,text);
 		}
 
 		@Override public byte[] leaseDigest() { return copy(leaseDigest); }
