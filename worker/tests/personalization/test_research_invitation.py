@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -13,6 +14,9 @@ from app.personalization.prompt import public_generation_input
 from app.personalization.research_invitation import (
     CAMPAIGN_PURPOSE,
     CONNECTION_SLOT,
+    COPY_INSTRUCTIONS,
+    IDEA_SLOT,
+    TEMPLATE_MARKER,
     ResearchInvitationCopy,
     parse_generation,
     render_invitation,
@@ -49,6 +53,104 @@ def copy_payload() -> dict[str, str]:
         ),
         "rationale": "The proposal follows the tool-selection evaluation in the supplied abstract.",
     }
+
+
+@pytest.mark.parametrize("source", ["reusable", "default", "command"])
+def test_future_research_copy_owns_qualified_trial_offer_and_manual_cta(source: str) -> None:
+    active = invitation_command()
+    if source == "reusable":
+        content = reusable_template("research@example.org")["content"]
+        assert isinstance(content, dict)
+        assert content["replyTo"] == "research@example.org"
+        bodies = (str(content["htmlContent"]), str(content["textContent"]))
+    else:
+        output = render_invitation(
+            ResearchInvitationCopy.model_validate(copy_payload()),
+            active.payload.targets[0],
+            active if source == "command" else None,
+        )
+        bodies = (output.html, output.text)
+    for body in bodies:
+        assert (
+            "Eligible new users can register and try Camel Hub with free trial credits, "
+            "subject to current eligibility, availability, and daily-grant terms."
+        ) in body
+        assert "Activate and try Camel Hub" in body
+        assert (
+            "Trial credits are for eligible new users, subject to current eligibility, "
+            "availability, and daily-grant terms."
+        ) in body
+        assert "subject to separate agreement on scope, resources, and terms" in body
+        assert body.index("free trial credits") < body.index("model API token credits")
+        assert body.count("{{partner_claim_url}}") == 1
+        assert body.count("{{unsubscribe_url}}") == 1
+        assert not re.search(r"(?:[$€£]\s*\d|\b\d[\d,.]*\s+(?:[\w-]+\s+){0,4}credits?\b)", body)
+        for unsupported in (
+            "guaranteed award", "no payment needed", "already funded", "unlimited access"
+        ):
+            assert unsupported not in body.lower()
+    assert TEMPLATE_MARKER == "Camel Hub research invitation v1"
+    assert bodies[0].count(f'title="{TEMPLATE_MARKER}"') == 1
+    assert bodies[0].count(f'title="{CONNECTION_SLOT}"') == 1
+    assert bodies[0].count(f'title="{IDEA_SLOT}"') == 1
+
+
+def test_generation_brief_keeps_trial_terms_renderer_owned_and_support_secondary() -> None:
+    assert "free trial credits for eligible new users" in CAMPAIGN_PURPOSE
+    assert "current eligibility, availability, and daily-grant terms" in CAMPAIGN_PURPOSE
+    assert "separate agreement" in CAMPAIGN_PURPOSE
+    assert "trial offer and eligibility terms" in COPY_INSTRUCTIONS
+    assert "Do not write trial terms or resource offers" in COPY_INSTRUCTIONS
+    assert "free trial credits for eligible new users" in str(
+        reusable_template("research@example.org")["description"]
+    )
+
+
+@pytest.mark.parametrize("claim_link", ["{{partner_claim_url}}", "https://api.camel-hub.com/"])
+def test_supplied_frozen_command_html_never_gains_future_offer_or_rewrites_fixed_copy(
+    claim_link: str,
+) -> None:
+    active = invitation_command()
+    frozen = (
+        '<table style="color:#102030"><tr><td>'
+        '<p>Hello {{author_name}},</p><p>Operator-approved older invitation.</p>'
+        '<span title="Camel Hub research connection">Older connection</span>'
+        '<a href="{{paper_url}}">{{paper_title}}</a>'
+        '<span title="Camel Hub collaboration idea">Older idea</span>'
+        '<p>We can discuss compute sponsorship for an agreed research plan.</p>'
+        f'<a href="{claim_link}" title="Camel Hub research invitation v1">Original CTA</a>'
+        '<a href="https://api.camel-hub.com/">Original official link</a>'
+        '<a href="{{unsubscribe_url}}">Original unsubscribe</a>'
+        '</td></tr></table>'
+    )
+    active.payload.template_html = frozen
+    frozen_text = f"Older fixed text: {claim_link} {{{{unsubscribe_url}}}}"
+    active.payload.template_text = frozen_text
+    target = active.payload.targets[0]
+    expected = (
+        frozen.replace("{{author_name}}", target.author_name or "research team")
+        .replace("{{paper_url}}", target.paper_url)
+        .replace("{{paper_title}}", target.paper_title)
+        .replace("Older connection", copy_payload()["researchConnection"])
+        .replace("Older idea", copy_payload()["collaborationIdea"])
+    )
+    output = render_invitation(
+        ResearchInvitationCopy.model_validate(copy_payload()), target, active
+    )
+    assert output.html == expected
+    assert parse_generation(copy_payload(), active, target) == output
+    assert active.payload.template_html == frozen
+    assert active.payload.template_text == frozen_text
+    for body in (output.html, output.text):
+        assert "Operator-approved older invitation." in body
+        assert "We can discuss compute sponsorship for an agreed research plan." in body
+        assert "Original CTA" in body
+        assert claim_link in body
+        assert "Original official link" in body
+        assert "Original unsubscribe" in body
+        assert "free trial" not in body.lower()
+        assert "daily-grant" not in body
+        assert "Activate and try Camel Hub" not in body
 
 
 def test_new_research_template_offers_fixed_password_only_partner_activation() -> None:
@@ -189,7 +291,7 @@ def test_renders_ai_prose_inside_branded_html_and_equivalent_plain_text() -> Non
         assert value.count("{{unsubscribe_url}}") == 1
         assert "{{paper_title}}" not in value
         assert "{{author_name}}" not in value
-        assert "scope, resources, and terms would be worked out together" in value
+        assert "subject to separate agreement on scope, resources, and terms" in value
     assert "script" not in generated.html
     assert "<img" not in generated.html
 

@@ -47,6 +47,38 @@ class OutreachBrandedTemplateTest {
 	}
 
 	@Test
+	void qualifiedTrialOfferAndOfficialRootCtaRemainSeparateFromManualActivation() throws IOException {
+		var rendered = policy.render(template(), target("Ada Lovelace", "Frozen source paper", "2601.00001"));
+		var document = Jsoup.parseBodyFragment(rendered.html());
+		for (String body : List.of(document.text(), rendered.text())) {
+			assertThat(body).contains("Eligible new users can register and try Camel Hub with free trial credits, subject to current eligibility, availability, and daily-grant terms.",
+					"Register and try Camel Hub", "separate agreement on scope, resources, and terms")
+					.doesNotContain("partner_claim_url", "/partner/claim", "Set a password", "Log in", "bind this invitation", "guaranteed award", "no payment needed", "already funded", "unlimited access")
+					.doesNotContainPattern("(?i)(?:[$€£]\\s*\\d|\\b\\d[\\d,.]*\\s+(?:[\\w-]+\\s+){0,4}credits?\\b)");
+			assertThat(body.indexOf("free trial credits")).isLessThan(body.indexOf("model API token credits"));
+		}
+		assertThat(document.select("a").stream().filter(link -> link.text().equals("Register and try Camel Hub"))
+				.map(link -> link.attr("href"))).containsExactly("https://api.camel-hub.com/");
+		assertThat(document.select("a[href='https://api.camel-hub.com/']").first().parent().text())
+				.contains("Trial credits are for eligible new users, subject to current eligibility, availability, and daily-grant terms.");
+		assertThat(OutreachTemplateContentPolicy.VERSION).isEqualTo("exact-v1");
+		assertFrozenPaper(rendered, "Frozen source paper", "https://arxiv.org/abs/2601.00001");
+	}
+
+	@Test
+	void staticPreviewMatchesSyntheticFixtureWithoutIssuingCapabilities() throws IOException {
+		var rendered = engine.render(engine.prepare(draft(template())), Map.of(
+				"author_name", "Alex Example", "paper_title", "Fictional Study: Reliable Research Tools",
+				"arxiv_id", "SYNTHETIC-PAPER", "paper_url", "https://papers.example.invalid/synthetic-paper",
+				"unsubscribe_url", "https://unsubscribe.example.invalid/preview"));
+		Path project = Path.of("").toAbsolutePath();
+		if (project.getFileName().toString().equals("backend")) project = project.getParent();
+		var preview = Jsoup.parse(Files.readString(project.resolve("docs/email/camel-hub-auto-outreach-preview.html")));
+		assertThat(preview.body().html()).isEqualTo(Jsoup.parseBodyFragment(rendered.html()).body().html());
+		assertThat(preview.select("script, iframe, form, img, link")).isEmpty();
+	}
+
+	@Test
 	void namedRecipientBindsOnlyTheFrozenPaperAndRetainsLateBoundUnsubscribe() throws IOException {
 		var template = template();
 		var first = policy.render(template, target("Ada Lovelace", "Frozen source paper", "2601.00001"));

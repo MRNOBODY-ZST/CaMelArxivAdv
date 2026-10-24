@@ -23,12 +23,16 @@ IDEA_SLOT = "Camel Hub collaboration idea"
 WEBSITE_URL = "https://api.camel-hub.com/"
 PARTNER_CLAIM_PLACEHOLDER = "{{partner_claim_url}}"
 CAMPAIGN_PURPOSE = """We are the Camel Hub team, an API Gateway company (https://api.camel-hub.com/).
-Invite researchers working on AI agents to explore a research collaboration with us.
+Invite researchers working on AI agents to register and try Camel Hub with free trial credits for eligible new users,
+subject to current eligibility, availability, and daily-grant terms. The renderer owns this fixed
+offer and its terms; do not add or promise trial terms in the generated prose. Research collaboration
+is an optional next conversation, not a condition or guarantee of the trial offer.
 Use the supplied paper title and abstract to identify a specific research question or method,
 then suggest one modest, technically relevant joint experiment. Make clear that the experiment
 is a proposal, not work already performed. Explain how it relates to the author's paper without
-claiming to have read the full paper or code. We can discuss sponsorship such as model API token
-credits or compute support for an agreed research plan; never invent a budget, guaranteed award,
+claiming to have read the full paper or code. As a secondary discussion, we can consider model API token
+credits or compute support for an agreed research plan, subject to separate agreement on scope,
+resources, and terms; never invent a budget, guaranteed award,
 partnership, product capability, performance result, existing customer, or named colleague.
 Use warm, precise, professional English suitable for a researcher. Avoid generic praise,
 sales pressure, artificial urgency, and promises of publication. The purpose is mutual research,
@@ -39,8 +43,10 @@ The email must be individualized from actual public paper metadata, ready for hu
 
 COPY_INSTRUCTIONS = """Use the Camel Hub research invitation layout. Return only the requested
 subject, researchConnection, collaborationIdea, and rationale fields. The renderer adds the
-greeting, team introduction, paper citation, sponsorship terms, reply invitation, signature,
+greeting, team introduction, paper citation, trial offer and eligibility terms, optional support
+discussion, reply invitation, signature,
 official website link, and unsubscribe footer. Do not repeat those fixed sections.
+Do not write trial terms or resource offers in the generated fields; those are renderer-owned.
 researchConnection: 2 concise sentences (about 35-65 words) explaining the specific research
 connection, grounded only in the supplied title and abstract. Avoid generic flattering adjectives.
 collaborationIdea: 2 concise sentences (about 35-65 words) proposing one feasible experiment
@@ -247,7 +253,8 @@ def reusable_template(reply_to: str) -> dict[str, object]:
         "name": "Camel Hub · Agent Research Collaboration",
         "description": (
             "Paper-grounded AI invitation with a branded email layout, research collaboration "
-            "proposal, and optional compute or token sponsorship."
+            "proposal, free trial credits for eligible new users subject to current eligibility, "
+            "availability, and daily-grant terms, and a secondary optional support discussion."
         ),
         "status": "ACTIVE",
         "content": {
@@ -283,7 +290,7 @@ def _html(author: str, title: str, paper_url: str, connection: str, idea: str) -
       <tr><td style="padding:28px 28px 22px;border-bottom:1px solid #e7e8e3;">
         <p style="margin:0 0 8px;font-size:12px;line-height:18px;font-weight:700;letter-spacing:2px;color:#b3542b;">CAMEL HUB / RESEARCH</p>
         <h1 style="margin:0;font-size:27px;line-height:35px;font-weight:700;color:#183d33;">A research idea, together.</h1>
-        <p style="margin:10px 0 0;font-size:14px;line-height:22px;color:#68756f;">AI agents · Collaborative research · Compute &amp; token support</p>
+        <p style="margin:10px 0 0;font-size:14px;line-height:22px;color:#68756f;">AI agents · Free trial credits · Collaborative research</p>
       </td></tr>
       <tr><td style="padding:26px 28px 10px;font-size:16px;line-height:26px;">
         <p style="margin:0 0 18px;">Hello {author},</p>
@@ -301,18 +308,18 @@ def _html(author: str, title: str, paper_url: str, connection: str, idea: str) -
         <p style="margin:0 0 20px;"><span title="{IDEA_SLOT}">{idea}</span></p>
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;background-color:#fff7ed;">
           <tr><td style="padding:17px 18px;">
-            <p style="margin:0 0 6px;font-size:14px;line-height:22px;font-weight:700;color:#904422;">Room to explore, with practical support</p>
-            <p style="margin:0;font-size:14px;line-height:23px;">We can discuss model API token credits or compute sponsorship for an agreed research plan. The scope, resources, and terms would be worked out together.</p>
+            <p style="margin:0 0 6px;font-size:14px;line-height:22px;font-weight:700;color:#904422;">Register and try Camel Hub</p>
+            <p style="margin:0;font-size:14px;line-height:23px;">Eligible new users can register and try Camel Hub with free trial credits, subject to current eligibility, availability, and daily-grant terms.</p>
           </td></tr>
         </table>
       </td></tr>
       <tr><td style="padding:20px 28px 28px;font-size:16px;line-height:26px;">
-        <p style="margin:0 0 20px;">Would this be worth a conversation? A short reply with your current research priorities or an experiment you’d like to explore would be a helpful start.</p>
+        <p style="margin:0 0 20px;">Interested in a research collaboration as well? We can discuss model API token credits or compute support for an agreed research plan, subject to separate agreement on scope, resources, and terms. A short reply with your current priorities or an experiment you’d like to explore is welcome.</p>
         <p style="margin:0 0 22px;">Best,<br><strong>Camel Hub Research Team</strong></p>
-        <p style="margin:0 0 16px;font-size:14px;line-height:23px;">New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account.</p>
+        <p style="margin:0 0 16px;font-size:14px;line-height:23px;">New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account. Trial credits are for eligible new users, subject to current eligibility, availability, and daily-grant terms.</p>
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
           <tr><td style="padding:12px 20px;background-color:#183d33;border-radius:6px;">
-            <a href="{{{{partner_claim_url}}}}" title="{TEMPLATE_MARKER}" style="font-size:14px;line-height:22px;font-weight:700;color:#ffffff;text-decoration:none;">Activate on Camel Hub →</a>
+            <a href="{{{{partner_claim_url}}}}" title="{TEMPLATE_MARKER}" style="font-size:14px;line-height:22px;font-weight:700;color:#ffffff;text-decoration:none;">Activate and try Camel Hub →</a>
           </td></tr>
         </table>
         <p style="margin:14px 0 0;font-size:12px;line-height:19px;">Official website: <a href="{WEBSITE_URL}" style="color:#235646;text-decoration:underline;">Camel Hub</a></p>
@@ -340,17 +347,17 @@ The work that brought us here:
 A possible starting point
 {idea}
 
-Room to explore, with practical support
-We can discuss model API token credits or compute sponsorship for an agreed research plan. The scope, resources, and terms would be worked out together.
+Register and try Camel Hub
+Eligible new users can register and try Camel Hub with free trial credits, subject to current eligibility, availability, and daily-grant terms.
 
-Would this be worth a conversation? A short reply with your current research priorities or an experiment you’d like to explore would be a helpful start.
+Interested in a research collaboration as well? We can discuss model API token credits or compute support for an agreed research plan, subject to separate agreement on scope, resources, and terms. A short reply with your current priorities or an experiment you’d like to explore is welcome.
 
 Best,
 Camel Hub Research Team
 
-New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account.
+New to Camel Hub? Set a password to activate your account. Already have an account? Log in to bind this invitation to your account. Trial credits are for eligible new users, subject to current eligibility, availability, and daily-grant terms.
 
-Activate on Camel Hub: {{{{partner_claim_url}}}}
+Activate and try Camel Hub: {{{{partner_claim_url}}}}
 Official website: {WEBSITE_URL}
 
 This invitation relates to your publicly listed research. Replies are directed to our research team’s monitored mailbox.

@@ -63,7 +63,9 @@ class OutreachTemplateContentPolicyTest {
 
 	@Test
 	void unrelatedArxivLinksAndUnapprovedExternalLinksBlock() {
-		for (String url : List.of("https://arxiv.org/abs/2601.00002", "https://arxiv.org.evil.test/abs/2601.00001", "https://unknown.example/")) {
+		assertThat(OutreachTemplateContentPolicy.VERSION).isEqualTo("exact-v1");
+		for (String url : List.of("https://arxiv.org/abs/2601.00002", "https://arxiv.org.evil.test/abs/2601.00001", "https://unknown.example/",
+				"https://api.camel-hub.com/register", "https://api.camel-hub.com/login", "https://api.camel-hub.com/invite")) {
 			assertThatThrownBy(() -> policy.render(template("Invitation", "<a href=\"" + url + "\">Visit</a><a href=\"{{unsubscribe_url}}\">Unsubscribe</a>", "{{unsubscribe_url}}"), target("Ada", "Title")))
 					.isInstanceOf(CampaignValidationException.class);
 		}

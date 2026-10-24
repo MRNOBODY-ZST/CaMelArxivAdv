@@ -1,128 +1,413 @@
-# CaMel Arxiv Outreach Platform
+# CaMel arXiv Outreach Platform
 
-未发送模板迁移仅创建独立草稿，不审核或启动活动；未知提交必须按原键对账。参见[模板迁移验证与回滚](docs/operations/template-migration-runbook.md)和[Source admission / 发布协议](docs/operations/source-publication-runbook.md)。
+Paper discovery, evidence-based contacts, and auditable research outreach.
 
-面向 arXiv 论文发现、联系人证据提取、合规邮件活动与数据分析的一体化平台。仓库包含生产形态基础设施、认证/RBAC、官方分类与论文导入、异步任务、Source 安全提取、真实 PostgreSQL 分析、安全模板/私有图片/SMTP，以及基于 Kafka、Ray Core、OpenAI / Anthropic API 的逐作者个性化草稿生成链路。
+[Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Development](#development) · [Documentation](#documentation) · [中文文档](README.zh-CN.md)
 
-活动发送已实现为显式状态机：生成草稿、预检、提交审核、批准、安全实流和正式发送彼此分离。正式发送由 PostgreSQL 租约、Kafka 唤醒、SMTP 频控、退订/抑制/冷却检查和只读 IMAP 回传共同约束；SMTP 接受不等于最终送达，图片或点击回传也不等于确认人工阅读。所有发送开关默认关闭，部署和安全实流步骤见[活动投递运行手册](docs/operations/campaign-delivery-runbook.md)。
+CaMel brings arXiv discovery, metadata import, bounded TeX Source extraction, contact evidence, personalized email drafts, campaign delivery, and analytics into one administrative platform. A Vue interface manages the workflow; Spring Boot services own authorization and durable state; Python workers and Ray handle asynchronous research-data and draft-generation jobs.
 
-个性化生成默认关闭。只有在运行环境通过 Secret 注入 `PERSONALIZATION_API_KEY` 并设置 `PERSONALIZATION_ENABLED=true` 后，活动页才允许提交生成任务。`PERSONALIZATION_PROVIDER` 支持 `openai` 与 `anthropic`，模型和 HTTPS 网关分别由 `PERSONALIZATION_MODEL`、`PERSONALIZATION_API_BASE_URL` 配置；Compose 兼容旧 `OPENAI_API_KEY` / `OPENAI_API_BASE_URL` 并优先使用非空通用变量，原生 Worker/Ray 进程请使用 `PERSONALIZATION_*`。OpenAI 使用 Responses API 严格 JSON Schema 且设置 `store=false`；Anthropic 使用 Messages API 的具名结构化工具输出，不执行任何发送工具。两者均校验正文、退订占位符和输出结构。公开作者/论文内容经过字段白名单；邮箱地址和 SMTP 凭据不会发送给模型。
+The platform supports both individually reviewed campaigns and explicitly authorized automated outreach. Finding a public address is not proof of authorship, permission to contact someone, or confirmation that an address can receive mail.
 
-Anthropic 兼容网关示例：`PERSONALIZATION_PROVIDER=anthropic`、`PERSONALIZATION_MODEL=claude-opus-4-6`、`PERSONALIZATION_API_BASE_URL=https://your-provider/v1`。默认使用标准 `x-api-key`；要求 Bearer 鉴权的网关设置 `PERSONALIZATION_API_AUTH_SCHEME=bearer`。网关必须支持具名工具与结构化返回；拒绝、截断或其他工具调用会被拒收，不会触发工具执行或发信。密钥只放在被 Git 忽略的本机 `.env` 或受保护运行时 Secret 中；提供方的 API 计费独立于聊天产品订阅。
+## Features
 
-SMTP 测试发送必须显式选择账户和测试收件人，公网账户会真实发信。IMAP 对声明 `ID` 能力的服务器发送仅含应用名/版本的标准客户端标识，以兼容要求客户端身份的邮箱服务；不发送用户信息。POP3、IMAP 和 SMTP 可能需要在邮箱服务商处分别开启，认证失败不能等同于网络或 TLS 失败。
+### Paper discovery and research data
 
-SMTP 诊断和模板测试可在每一封测试邮件中选择“检测图片加载与链接点击（可选）”，默认不勾选。发送后可从结果链接打开单独的测试邮件记录；图片加载和签名重定向请求都只是估算信号，不表示人工阅读或点击。详情、权限和回传范围见[测试邮件与互动回传](docs/EMAIL_TRACKING.md)。
+- Search official arXiv metadata by research phrase, category, author, and date; preview results and save reusable searches.
+- Import selected papers or bounded search results, synchronize taxonomy and OAI-PMH metadata, and retain paper versions and import provenance.
+- Follow asynchronous jobs through progress, events, errors, and worker-heartbeat information.
+- Explore the paper library, author relationships, and ingestion, paper, and contact analytics.
 
-## 快速启动
+### Source extraction and contact evidence
 
-要求：Docker Desktop（Compose v2）、8 GB 以上可用内存。复制环境模板，替换所有 `change-this-*` 值，并为五个当前必填密钥分别生成独立的 32 字节 Base64 值：
+- Inspect supported TeX/source archives from fixed official HTTPS endpoints without compiling TeX or executing archive contents.
+- Apply shared request pacing (at least three seconds between official requests), redirect checks, archive/path/size limits, parsing deadlines, and temporary-file cleanup.
+- Extract publicly stated contact evidence with confidence and author-mapping information; keep machine findings distinct from human verification.
+- Encrypt contact values, deduplicate with an independent HMAC key, mask ordinary listings, and audit authorized single-contact disclosure.
+- Do not guess email addresses, crawl unrelated websites, or probe SMTP deliverability.
 
-```bash
+### Templates and personalized drafts
+
+- Edit rich HTML and plain-text alternatives, preview server-rendered content, manage immutable versions, and use private image assets.
+- Generate paper-grounded drafts through OpenAI-compatible Responses or Anthropic-compatible Messages integrations, with validated structured output and a separate Ray-backed worker.
+- Configure provider, model, gateway, and credentials through permission-controlled model settings.
+- Keep recipient email fields and SMTP credentials out of the model-input contract. Generating a draft does not itself invoke SMTP.
+- Use the supplied research-invitation fixtures to emphasize registration and free trial credits for eligible new users, subject to the provider's current terms. Optional research support requires separate agreement; no fixed credit amount is promised.
+
+### Campaigns and mail operations
+
+- Manage recipient segments, selected-paper campaigns, sender accounts, recipient-specific content, preflight checks, review, approval, and delivery.
+- Freeze campaign content and recipient selections; use database coordination, bounded retries, quota checks, unsubscribe, suppression, and cooldown rules.
+- Configure SMTP and read-only IMAP/POP3 previews, send explicit diagnostic messages, and inspect delivery/preparation diagnostics.
+- Keep normal delivery, controlled safety sends, test-mail records, inbound feedback, and tracking outcomes distinguishable.
+- Copy eligible unsent selections into independent HTML drafts through the draft-only template-migration workflow, without changing sent history or automatically starting a campaign.
+
+### Automated and weekly outreach
+
+Choose a sender, template, research direction, and target in the automation workspace. Authorized workflows can search, import, extract, generate, review, approve, and start child campaigns on the server.
+
+| Workflow | Scope |
+| --- | --- |
+| Small-scale run | Target papers or eligible unique contacts within the limits shown by the application. |
+| Bulk run | Search for up to 10,000 unique papers and process them through separately gated child campaigns. |
+| Weekly schedule | Incremental discovery every Monday at 09:00 in Asia/Shanghai, with up to 5,000 new papers per occurrence. |
+
+Weekly discovery combines configured research directions with available public trend evidence and the configured model, with bounded fallback behavior. It is not a ChatGPT subscription or browser integration.
+
+Paper targets are not email quotas: papers may have no usable contact, share contacts, or produce multiple candidates. Runs can block on insufficient results, changed configuration, permissions, or delivery checks. Automated sending requires the combined permissions and the explicit `AUTO_OUTREACH_SEND` confirmation. Where offered, audited acceptance of historical deliverability warnings is not an override for content, security, unsubscribe, or transport requirements.
+
+Closing the browser does not stop a run. Canceling cannot retract accepted or in-flight mail; pausing a weekly schedule prevents future triggers rather than canceling existing runs.
+
+### Analytics and administration
+
+- Inspect ingestion, papers, contacts, author networks, campaigns, links, and supported aggregate CSV exports.
+- Manage users, roles, current permissions, audit events, mail accounts, and runtime settings.
+- Use server-side authorization in addition to frontend permission-aware navigation.
+- Treat image loads and signed-link requests as estimated engagement signals, not proof of human reading or clicking.
+
+## Architecture
+
+~~~text
+Browser
+   |
+Nginx + Vue frontend
+   | HTTP API / job events
+Spring Boot API ---------------- PostgreSQL (durable business state)
+   |                             Redis (coordination, cache, rate limits)
+   |                             MinIO (private assets)
+   |
+Kafka jobs / results / retry / dead-letter topics
+   |                     |                         |
+arXiv Python worker      Personalization worker    Spring mail worker
+   |                     |                         |
+Official arXiv APIs      Ray tasks -> model API    SMTP / inbound IMAP
+~~~
+
+| Component | Responsibility |
+| --- | --- |
+| `backend-api` | Authentication, RBAC, APIs, orchestration, analytics, and Flyway migrations. |
+| `mail-worker` | Delivery and inbound processing using the same backend image with a separate runtime profile. It does not expose business controllers. |
+| `arxiv-worker` | Metadata, taxonomy, and bounded Source processing. |
+| `personalization-worker` | Kafka draft-generation consumer and result aggregation. |
+| `ray-head` / `ray-worker` | Distributed, bounded draft-generation tasks. |
+| PostgreSQL / Redis / Kafka | Durable facts / temporary coordination / asynchronous transport. |
+| MinIO / Mailpit / GreenMail | Private assets / local mail capture / isolated mail-protocol fixtures. |
+
+PostgreSQL is the source of truth. A Redis lease, Kafka acknowledgment, HTTP timeout, or empty mailbox is not proof that a business operation completed.
+
+### Technology stack
+
+| Layer | Technologies |
+| --- | --- |
+| Frontend | Vue 3, TypeScript, Vite 8, Tailwind CSS 4, Pinia, Vue Router, Headless UI, TipTap, ECharts, vis-network. |
+| Backend | Java 25, Spring Boot 4.1, WebFlux, R2DBC PostgreSQL, Flyway, Spring Security, Kafka, Redis, Spring Modulith, MinIO SDK. |
+| Worker | Python 3.12, uv, aiokafka, httpx, Pydantic, defusedxml, Redis, Ray Core/Client. |
+| Local infrastructure | PostgreSQL 17.5, Redis 8.0.2, Kafka 4.1.2, MinIO, Mailpit, GreenMail, Docker Compose. |
+
+Exact dependencies and image versions are recorded in the build files, lockfiles, and Compose configuration.
+
+## Quick Start
+
+These instructions are for a **fresh, isolated local installation**, not an upgrade or restart of an existing deployment. Do not reuse production configuration, volumes, queues, credentials, or recipient data.
+
+### 1. Prepare the checkout
+
+You need Git, OpenSSL, and a running Docker engine with Compose v2. Docker Desktop is suitable for local development; allow at least 8 GB of available memory as a starting budget, not a capacity guarantee. Container builds provide the application toolchains.
+
+~~~bash
+git clone https://github.com/MRNOBODY-ZST/CaMelArxivAdv.git
+cd CaMelArxivAdv
 cp .env.example .env
-openssl rand -base64 32  # 填入 JWT_SIGNING_KEY_BASE64
-openssl rand -base64 32  # 另生成一次，填入 AUTH_FINGERPRINT_HMAC_KEY_BASE64
-openssl rand -base64 32  # 另生成一次，填入 APP_ENCRYPTION_KEY_BASE64
-openssl rand -base64 32  # 另生成一次，填入 APP_EMAIL_HMAC_KEY_BASE64
-openssl rand -base64 32  # 另生成一次，填入 TEMPLATE_ASSET_SIGNING_KEY_BASE64
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
-```
+~~~
 
-不要复用任何一次输出，也不要提交 `.env`。其余空白 `*_KEY_BASE64` 应在相应业务阶段启用前同样使用独立随机值填充。
+Do not overwrite an existing `.env`. Choose an unused Compose project name and an `APP_VERSION` tag unique to this checkout. The examples below use `camel-arxiv-demo` and `local-demo`; change them if already in use. A project name separates Compose networks and volumes, but does not isolate globally named image tags.
 
-启动后：
+### 2. Configure secrets and the initial administrator
 
-- 应用入口：[http://localhost:8080](http://localhost:8080)
-- Mailpit：[http://localhost:8025](http://localhost:8025)
-- MinIO Console：[http://localhost:9001](http://localhost:9001)
-- 健康 API：[http://localhost:8080/api/v1/system/health](http://localhost:8080/api/v1/system/health)
-- 论文发现：[http://localhost:8080/arxiv/discovery](http://localhost:8080/arxiv/discovery)
-- 导入任务：[http://localhost:8080/jobs](http://localhost:8080/jobs)
-- 论文库：[http://localhost:8080/papers](http://localhost:8080/papers)
-- 作者与联系人：[http://localhost:8080/contacts](http://localhost:8080/contacts)
-- 采集分析：[http://localhost:8080/analytics/ingestion](http://localhost:8080/analytics/ingestion)
-- 论文分析：[http://localhost:8080/analytics/papers](http://localhost:8080/analytics/papers)
-- 联系人分析：[http://localhost:8080/analytics/contacts](http://localhost:8080/analytics/contacts)
-- 邮件模板：[http://localhost:8080/email/templates](http://localhost:8080/email/templates)
-- 邮件账户（SMTP/IMAP/POP3）：[http://localhost:8080/admin/mail-accounts](http://localhost:8080/admin/mail-accounts)
-- 收件人分组：[http://localhost:8080/email/segments](http://localhost:8080/email/segments)
-- 邮件活动：[http://localhost:8080/email/campaigns](http://localhost:8080/email/campaigns)
-- 发送记录（测试邮件、安全实流与正式活动）：[http://localhost:8080/email/deliveries](http://localhost:8080/email/deliveries)
-- 活动分析：[http://localhost:8080/analytics/campaigns](http://localhost:8080/analytics/campaigns)
-- 链接分析：[http://localhost:8080/analytics/links](http://localhost:8080/analytics/links)
-- 系统运行状态：[http://localhost:8080/admin/settings](http://localhost:8080/admin/settings)
+Replace the example PostgreSQL and MinIO passwords. Generate a different 32-byte Base64 value for **each** of these five required keys:
 
-首次启动需在 `.env` 设置四个 `INITIAL_ADMIN_*` 值；临时密码必须满足至少 12 位以及大小写、数字、符号要求。首次登录会强制改密。生产部署完成后应从运行时 Secret 中移除初始密码，详见 [认证与 RBAC](docs/RBAC.md)。
+| Variable | Purpose |
+| --- | --- |
+| `JWT_SIGNING_KEY_BASE64` | Access-token signing. |
+| `AUTH_FINGERPRINT_HMAC_KEY_BASE64` | Authentication fingerprints. |
+| `APP_ENCRYPTION_KEY_BASE64` | Protected application data and stored credentials. |
+| `APP_EMAIL_HMAC_KEY_BASE64` | Contact deduplication. |
+| `TEMPLATE_ASSET_SIGNING_KEY_BASE64` | Signed private template assets. |
 
-PostgreSQL、Redis、Kafka、邮件协议测试服务、后端、Worker 与 Ray Client/GCS 均不发布宿主端口。公网 SMTP 与邮箱连接由 `ALLOW_LIVE_SMTP`、`ALLOW_PUBLIC_MAILBOX` 控制；公网目标强制 STARTTLS 或隐式 TLS，明文模式仅允许本地白名单。
+~~~bash
+openssl rand -base64 32
+~~~
 
-停止服务但保留数据：
+Run that command separately for every key; never reuse its output. Compose also requires an independent internal configuration token, **even when model generation is disabled**:
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml down
-```
+~~~bash
+openssl rand -hex 32
+~~~
 
-不要在需要保留数据时添加 `--volumes`。
+Put that value in `PERSONALIZATION_RUNTIME_CONFIG_TOKEN`. Keep all values in the ignored local `.env` or protected runtime secrets, never in frontend code or Git.
 
-## 工程结构
+Set `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_DISPLAY_NAME`, and `INITIAL_ADMIN_PASSWORD`. The temporary password must contain at least 12 characters, uppercase and lowercase letters, a digit, and a symbol; it must not contain the username or email local part. Set `ARXIV_CONTACT_EMAIL` to a monitored contact before making arXiv requests.
 
-```text
-backend/                 Spring Boot WebFlux API 与 Mail Worker
-worker/                  Python 3.12 arXiv/Source 隔离 Worker
-frontend/                Vue 3 + TypeScript strict 管理端
-infra/nginx/             单一生产入口与安全响应头
-infra/postgres/          PostgreSQL 初始化挂载点
-scripts/                 Compose 与镜像契约验证
-docs/                    架构、ERD、API、部署、运维与组件映射
-docker-compose.yml       生产形态基线
-docker-compose.dev.yml   仅开发环境的 Mailpit/MinIO 控制台入口
-```
+The bootstrap creates the initial administrator without overwriting existing accounts. First login requires a password change; remove the bootstrap password from runtime secrets afterward.
 
-## 本地质量门
+### 3. Keep external mail and optional integrations disabled
 
-```bash
-cd backend && ./gradlew --no-daemon clean check bootJar
-cd ../worker && uv run pytest -q
-uv run ruff check .
-uv run mypy src tests
-cd ../frontend && npm test -- --run
+Set these values explicitly in `.env`:
+
+~~~dotenv
+APP_VERSION=local-demo
+ALLOW_LIVE_SMTP=false
+ALLOW_PUBLIC_MAILBOX=false
+PERSONALIZATION_ENABLED=false
+TRACKING_ENABLED=false
+CAMPAIGN_DELIVERY_ENABLED=false
+CAMPAIGN_SAFETY_ENABLED=false
+CAMPAIGN_INBOUND_ENABLED=false
+PARTNER_INVITE_ENABLED=false
+~~~
+
+The current environment example and Compose public-mail protocol fallbacks allow external connections unless you override them. Do not assume every switch defaults to false. The configuration above still permits the allowlisted local mail fixtures, but does not enable campaign delivery.
+
+### 4. Build and start the local stack
+
+Run from the repository root, using the same project name throughout:
+
+~~~bash
+docker compose -p camel-arxiv-demo -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+docker compose -p camel-arxiv-demo -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose -p camel-arxiv-demo -f docker-compose.yml -f docker-compose.dev.yml ps
+~~~
+
+The development overlay disables Secure cookies for local HTTP and publishes the Mailpit and MinIO consoles. It is not a public deployment configuration. Published ports are not explicitly bound to loopback; use a trusted local network/firewall.
+
+| Entry | Default address |
+| --- | --- |
+| Application | [http://localhost:8080](http://localhost:8080) |
+| Public API health | [http://localhost:8080/api/v1/system/health](http://localhost:8080/api/v1/system/health) |
+| Mailpit inbox | [http://localhost:8025](http://localhost:8025) |
+| MinIO console | [http://localhost:9001](http://localhost:9001) |
+| OpenAPI JSON | [http://localhost:8080/api/openapi.json](http://localhost:8080/api/openapi.json) |
+
+`HTTP_PORT`, `MAILPIT_WEB_PORT`, and `MINIO_CONSOLE_PORT` change the published ports. The configured Swagger UI path is `/api/docs`; the OpenAPI JSON is the direct API reference.
+
+PostgreSQL, Redis, Kafka, backend services, mail-protocol fixture ports, and Ray Client/GCS are not published to the host. For example, `mailpit:1025` is a **container-network** SMTP address, not `localhost:1025`.
+
+### 5. Explore without contacting recipients
+
+1. Sign in with the bootstrap account and complete the password change.
+2. Open paper discovery, preview a narrow search, and import a small selection.
+3. Follow the import job and inspect paper metadata. Source extraction additionally requires compatible Source-admission configuration; complete that setup before requesting it.
+4. Inspect masked contact evidence; do not treat automated mapping as human verification.
+5. Create and preview a template. For a local test, configure SMTP to `mailpit:1025` with `PLAIN_LOCAL_ONLY` and an explicit synthetic recipient.
+6. Check Mailpit and delivery records. Enable paid model calls, external mail, or automation only after reviewing the relevant configuration and permissions.
+
+To inspect selected service logs without dumping configuration:
+
+~~~bash
+docker compose -p camel-arxiv-demo -f docker-compose.yml -f docker-compose.dev.yml logs --tail=100 backend-api arxiv-worker
+~~~
+
+To stop **this local stack** while preserving named volumes:
+
+~~~bash
+docker compose -p camel-arxiv-demo -f docker-compose.yml -f docker-compose.dev.yml down
+~~~
+
+Do not add `--volumes` if you need the data. These commands are not a safe-stop procedure for an existing sending deployment.
+
+## Configuration
+
+Use [.env.example](.env.example) as the variable inventory and [Deployment](docs/DEPLOYMENT.md) for environment-specific setup.
+
+| Area | Main controls |
+| --- | --- |
+| Origin and ports | `PUBLIC_BASE_URL`, `HTTP_PORT`, `MAILPIT_WEB_PORT`, `MINIO_CONSOLE_PORT`. |
+| Model generation | `PERSONALIZATION_ENABLED`, `PERSONALIZATION_PROVIDER`, `PERSONALIZATION_MODEL`, `PERSONALIZATION_API_BASE_URL`, `PERSONALIZATION_API_KEY`, and the internal configuration token. |
+| Mail protocols | `ALLOW_LIVE_SMTP`, `ALLOW_PUBLIC_MAILBOX`, and exact local-host allowlists. |
+| Campaign processing | Separate `CAMPAIGN_DELIVERY_ENABLED`, `CAMPAIGN_SAFETY_ENABLED`, and `CAMPAIGN_INBOUND_ENABLED` gates. |
+| Tracking | `TRACKING_ENABLED`, reachable callback origin, and a separate `TRACKING_SIGNING_KEY_BASE64`. |
+| Partner activation | `PARTNER_INVITE_ENABLED`, a dedicated server-side token, and a separate invitation encryption key. |
+
+Source admission (`app.arxiv.source-admission.enabled`) and draft-only template migration (`app.campaign.template-migrations.enabled`) are separately disabled by default. They require compatible API/worker execution paths and the checks in the [Source publication](docs/operations/source-publication-runbook.md) and [template-migration](docs/operations/template-migration-runbook.md) runbooks; they are not automatically enabled by the local quick start.
+
+Environment model settings seed the administration settings; saved settings govern subsequent generation. Supported provider values are `openai` and `anthropic`; the gateway must support the corresponding API contract. Provider calls can incur separate charges.
+
+Partner activation is optional and distinct from ordinary draft generation. When enabled and used, it sends recipient data, including the email address, to the configured fixed partner service. Keep partner credentials and issued claim links out of logs and public artifacts. Trial-credit eligibility and grants belong to the provider; template copy is not a credit guarantee.
+
+Public mail requires STARTTLS or implicit TLS with certificate checks. Plaintext mode is reserved for exact allowlisted local test endpoints. Public tracking needs reachable HTTPS and upstream log exclusions; configuring an HTTPS URL does not establish reachability. Never open real tracking, unsubscribe, or claim links to manufacture test events.
+
+## Typical workflow
+
+~~~text
+Discover -> Import -> Extract evidence -> Select contacts/template/sender
+         -> Generate drafts -> Inspect content and preflight
+         -> Permissioned review/approval -> Start or schedule -> Observe outcomes
+~~~
+
+Ordinary campaigns use separate review, approval, and start transitions. Explicit automated outreach may carry out those transitions under its authorized actor; it does not imply a human reviewed each message.
+
+| Workspace | UI paths |
+| --- | --- |
+| Discovery and jobs | `/arxiv/discovery`, `/jobs` |
+| Papers and contacts | `/papers`, `/contacts` |
+| Templates and audiences | `/email/templates`, `/email/segments` |
+| Campaigns and delivery | `/email/campaigns`, `/email/deliveries` |
+| Automation | `/email/automation` |
+| Research analytics | `/analytics/ingestion`, `/analytics/papers`, `/analytics/contacts`, `/analytics/authors` |
+| Outreach analytics | `/analytics/campaigns`, `/analytics/links` |
+| Administration | `/admin/users`, `/admin/roles`, `/admin/audit`, `/admin/mail-accounts`, `/admin/settings` |
+
+### API overview
+
+Business APIs use `/api/v1` and require authentication plus operation-specific permissions. The platform bootstraps an administrator rather than exposing public self-registration for platform operators.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/auth/login` | Username/email login. |
+| `GET /api/v1/arxiv/taxonomy` | Current classification snapshot. |
+| `POST /api/v1/arxiv/search/preview` | Structured discovery preview. |
+| `POST /api/v1/arxiv/imports` | Create an import job. |
+| `GET /api/v1/jobs/{id}` | Read durable job status. |
+| `GET /api/v1/jobs/{id}/stream` | Job progress over SSE. |
+| `GET /api/v1/papers` | Filter the paper library. |
+| `GET /api/v1/contacts` | Read masked contact listings. |
+| `POST /api/v1/templates/preview` | Render and validate a template preview. |
+
+See [API documentation](docs/API.md) and the generated OpenAPI schema for full request shapes, limits, and state-changing operations.
+
+## Development
+
+### Toolchains
+
+| Component | Local requirement |
+| --- | --- |
+| Backend | JDK 25; use the included Gradle wrapper. |
+| Frontend | Node.js 24.x; the container pins 24.10.0. |
+| Worker | Python 3.12, not 3.13; uv and the checked-in lockfile. |
+| Integration tests | A working Docker engine and isolated owned fixtures. |
+
+### Frontend
+
+With the isolated Compose API available at port 8080:
+
+~~~bash
+cd frontend
+npm ci
+npm run dev
+~~~
+
+Vite serves port 5173 and proxies `/api` and `/t` to `http://localhost:8080`. It does not publish the internal databases.
+
+~~~bash
+npm test -- --run
 npm run lint
 npm run typecheck
 npm run build
-# 需要具备 template/smtp 管理权限的本地账号；测试自行创建并归档夹具
-E2E_USER=... E2E_PASSWORD=... npm run test:e2e
-cd .. && bash scripts/verify-compose.sh
-bash scripts/verify-container-images.sh
-```
+~~~
 
-当前版本须在隔离环境执行质量门；私有运行记录不随公开源码发布。
+### Backend
 
-## 文档
+From `backend/`:
 
-- [架构](docs/ARCHITECTURE.md)
-- [数据模型与 ERD](docs/ERD.md)
-- [API 约定](docs/API.md)
-- [认证与 RBAC](docs/RBAC.md)
-- [TeX Source 提取](docs/TEX_EXTRACTION.md)
-- [数据统计口径与看板](docs/ANALYTICS.md)
-- [安全与隐私](docs/SECURITY_AND_PRIVACY.md)
-- [测试邮件与图片回传](docs/EMAIL_TRACKING.md)
-- [活动投递运行手册](docs/operations/campaign-delivery-runbook.md)
-- [部署](docs/DEPLOYMENT.md)
-- [运维](docs/OPERATIONS.md)
-- [DesignSkill 组件映射](docs/DESIGN_SKILL_COMPONENT_MAP.md)
-- [第三方与授权说明](docs/THIRD_PARTY_NOTICES.md)
+~~~bash
+./gradlew --no-daemon check bootJar
+~~~
 
-## 安全边界
+Integration tests use Testcontainers and need Docker; missing dependencies or skipped tests are not passing evidence. Running the backend natively also requires explicitly configured database, Redis, Kafka, and asset connections—the main Compose stack does not publish them for host access.
 
-- arXiv Legacy API、OAI-PMH、分类和 Source 只允许固定官方 HTTPS 主机；Java/Python 共享 Redis 全局三秒租约。Source 下载、重定向、归档尺寸/路径/链接/压缩比、include 深度和解析时间均有边界，临时文件只在有界 tmpfs 存在并在结果发布前清理。
-- 联系人规范化值和显示值用独立随机 nonce 做 AES-256-GCM 加密，另一把 HMAC 密钥去重；列表和证据默认脱敏，完整披露必须单条授权并审计。
-- SMTP/IMAP/POP3、JWT、HMAC 与追踪密钥必须由独立随机值提供；数据库只保存受保护的 Secret 材料。
-- 邮箱、Token、Authorization、Cookie 和 Source 内容不得写入日志。
-- 邮件发送必须经过快照、抑制、退订、频控和审批状态机；SMTP 接受不等于最终送达。
-- 跟踪打开率仅是估算指标，点击跳转必须防止开放重定向。
+### Python worker
+
+From `worker/`:
+
+~~~bash
+uv sync --frozen --group dev --python 3.12
+uv run pytest -q
+uv run ruff check .
+uv run mypy src tests
+~~~
+
+The installed entry points are `uv run arxiv-worker` and `uv run personalization-worker`. They are real consumers, not offline demos; use only with the intended Kafka, Redis, Ray, and runtime configuration. Do not attach a development worker to production queues.
+
+### Browser and container checks
+
+Playwright uses an installed Microsoft Edge and local synthetic fixtures. From `frontend/`, provide a dedicated local test account through `E2E_USER` and `E2E_PASSWORD`, then run:
+
+~~~bash
+npm run test:e2e
+~~~
+
+These tests can create, archive, and delete test resources; do not run against production or shared operational data. Required permissions and fixture behavior are described in [Operations](docs/OPERATIONS.md).
+
+For the baseline Compose configuration-contract check, install Bash, `jq`, and Docker Compose, then run from the repository root:
+
+~~~bash
+bash scripts/verify-compose.sh
+~~~
+
+This checks rendered configuration, not the health or correctness of a running stack.
+
+The separate [image-contract checker](scripts/verify-container-images.sh) starts short-lived containers and currently targets literal `camel-arxiv/*:dev` images; it does not read `APP_VERSION`. It cannot validate the `local-demo` images above. Review its fixed targets in a separate validation environment; do not overwrite or retag shared `:dev` images to make it pass. Neither utility proves that an arbitrary checkout or deployment passed its operational gates.
+
+## Project structure
+
+~~~text
+CaMelArxivAdv/
+├── backend/
+│   ├── src/main/java/com/camel_hub/advertisement/
+│   │   ├── arxiv/           # Discovery, papers, and Source processing
+│   │   ├── campaign/        # Campaign workflow, delivery, tracking, partner
+│   │   ├── outreach/        # Single, bulk, and weekly orchestration
+│   │   ├── identity/        # Authentication, RBAC, and users
+│   │   ├── email/           # Templates, assets, SMTP, and mailboxes
+│   │   └── analytics/       # Aggregates and exports
+│   └── src/main/resources/db/migration/
+├── worker/src/app/          # arXiv, extraction, and personalization workers
+├── frontend/src/            # Vue modules, components, layouts, and router
+├── infra/                   # Nginx and database initialization
+├── scripts/                 # Verification and operational tools
+├── docs/                    # Architecture, API, security, and runbooks
+├── docker-compose.yml       # Production-shaped baseline
+└── docker-compose.dev.yml   # Local development overlay
+~~~
+
+## Security and operational boundaries
+
+- Use a true sender identity, an accurate research purpose, an authorized audience, and applicable privacy/anti-spam obligations. Publicly available contact details alone do not establish consent.
+- Model input excludes recipient email fields and SMTP credentials, but optional partner activation has its own external-data boundary.
+- Keep contact values encrypted and ordinary views masked. Never commit credentials, author contact lists, operational ledgers, frozen message bodies, or issued capability links.
+- `SMTP_ACCEPTED` means the SMTP server accepted a message, not that it reached an inbox. Image/click events can come from proxies, prefetchers, and scanners; no event does not prove a message was unread.
+- Preserve `UNKNOWN` / `OUTCOME_UNKNOWN` results. Reconcile the original operation instead of treating uncertainty as permission to send again.
+- arXiv access uses official hosts and shared pacing; Source contents are not executed or retained as business assets. Source-admission and result-publication protocols have additional deployment compatibility gates.
+- Draft-only template migration does not approve, start, resume, or resend campaigns. Preserve historical attempts, feedback, and original reconciliation keys.
+- Existing deployments require verified safe admission stop, in-flight completion, backups, and compatible API/worker/result protocols before replacement or rollback. An additive database schema or local green test is not a safe-restart proof. Do not treat experimental deployment-drain code as an operational gate.
+- Put public deployments behind TLS and appropriate network controls. The local Compose Kafka setup is not a hardened public broker, and the development overlay must not be exposed as a production service.
+
+## Documentation
+
+Most detailed subsystem guides are currently in Chinese; this repository overview is maintained in both languages.
+
+| Guide | Contents |
+| --- | --- |
+| [Architecture](docs/ARCHITECTURE.md) · [ERD](docs/ERD.md) | Components, data paths, and relational model. |
+| [API](docs/API.md) · [RBAC](docs/RBAC.md) | Request conventions, authentication, and authorization. |
+| [Source extraction](docs/TEX_EXTRACTION.md) | Archive/parser restrictions and contact evidence. |
+| [Analytics](docs/ANALYTICS.md) | Metric definitions, filters, freshness, and exports. |
+| [Security and privacy](docs/SECURITY_AND_PRIVACY.md) | Data classes, secrets, encryption, and audit boundaries. |
+| [Mail tracking](docs/EMAIL_TRACKING.md) | Test-mail, image, and click outcome semantics. |
+| [Deployment](docs/DEPLOYMENT.md) · [Operations](docs/OPERATIONS.md) | Environment preparation, runtime checks, and maintenance. |
+| [Campaign delivery](docs/operations/campaign-delivery-runbook.md) · [SMTP quotas](docs/operations/smtp-quotas.md) | Delivery gates, limits, and feedback. |
+| [Template migration](docs/operations/template-migration-runbook.md) | Draft-only transfer and original-key reconciliation. |
+| [Source publication](docs/operations/source-publication-runbook.md) | Admission, result handling, retries, and compatible rollout. |
+| [Email fixtures](docs/email/README.md) · [Preparation diagnostics](docs/email/preparation-diagnostics.md) | Synthetic invitation examples and bounded failure evidence. |
+| [Component mapping](docs/DESIGN_SKILL_COMPONENT_MAP.md) · [Third-party notices](docs/THIRD_PARTY_NOTICES.md) | UI provenance and licensing boundaries. |
+
+## Contributing
+
+Open an [issue](https://github.com/MRNOBODY-ZST/CaMelArxivAdv/issues) or submit a focused pull request with the relevant tests and documentation updates. Keep schema changes additive, preserve immutable history, and explain any protocol or operational compatibility impact.
+
+Use synthetic fixtures in tests and documentation. Exclude real contacts, credentials, private operational records, and build artifacts. Maintain matching English and Chinese README sections when changing setup instructions or safety requirements.
 
 ## License
 
-项目代码遵循仓库 [LICENSE](LICENSE)。Tailwind Plus/DesignSkill 资产依据用户持有的 Pro License 在本项目内适配；授权来源和组件映射见第三方说明，不应将上游付费资产作为独立素材再分发。
+[MIT](LICENSE) © 2026 Hades.
+
+The project includes application adaptations of commercially licensed Tailwind Plus materials; those assets are not a separately redistributable component/template pack. See [Third-party notices](docs/THIRD_PARTY_NOTICES.md).
