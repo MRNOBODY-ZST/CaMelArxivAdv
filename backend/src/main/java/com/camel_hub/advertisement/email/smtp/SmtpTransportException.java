@@ -16,6 +16,10 @@ public class SmtpTransportException extends RuntimeException {
 			"(?i)\\b(?:proxy-)?authorization\\s*:\\s*(?:bearer|basic)\\s+[^\\s,;]{1,500}");
 	private static final java.util.regex.Pattern BEARER_LIKE = java.util.regex.Pattern.compile(
 			"(?i)\\bbearer\\s+[A-Z0-9._~+/=\\-]{1,500}");
+	private static final java.util.regex.Pattern PARTNER_CAPABILITY = java.util.regex.Pattern.compile(
+			"(?i)https://api\\.camel-hub\\.cn/partner/claim\\?");
+	private static final java.util.regex.Pattern MIME_ENCODED_WORD = java.util.regex.Pattern.compile(
+			"=\\?[^?\\s]+\\?[bBqQ]\\?[^?]*\\?=");
 	private static final String CAMPAIGN_UUID = "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}";
 	private static final String CAMPAIGN_CAPABILITY_TAIL =
 			"[0-9]{1,19}\\.[A-Z0-9_-]{32}\\.[A-Z0-9_-]{43}";
@@ -91,6 +95,8 @@ public class SmtpTransportException extends RuntimeException {
 	public static String sanitize(String value) {
 		if (value == null || value.isBlank()) return null;
 		String safe = value.replaceAll("[\\p{Cntrl}]", " ").replaceAll("\\s+", " ").strip();
+		// Inspect before partial URL redaction or truncation can hide an encoded capability's prefix.
+		if (containsEncodedCapability(safe, PARTNER_CAPABILITY)) return "[redacted-capability]";
 		safe = QUOTED_EMAIL_LIKE.matcher(safe).replaceAll("[redacted-address]");
 		safe = EMAIL_LIKE.matcher(safe).replaceAll("[redacted-address]");
 		safe = AUTHORIZATION_LIKE.matcher(safe).replaceAll("Authorization: [redacted]");
@@ -98,16 +104,17 @@ public class SmtpTransportException extends RuntimeException {
 		safe = SECRET_LIKE.matcher(safe).replaceAll("$1=[redacted]");
 		safe = URL_LIKE.matcher(safe).replaceAll("[redacted-url]");
 		safe = CAMPAIGN_CAPABILITY.matcher(safe).replaceAll("[redacted-capability]");
-		if (containsEncodedCampaignCapability(safe)) safe = "[redacted-capability]";
+		if (containsEncodedCapability(safe, CAMPAIGN_CAPABILITY)) safe = "[redacted-capability]";
 		return safe.substring(0, Math.min(safe.length(), 500));
 	}
 
-	private static boolean containsEncodedCampaignCapability(String value) {
+	private static boolean containsEncodedCapability(String value, java.util.regex.Pattern capability) {
 		String decoded = value;
 		try {
+			if (capability.matcher(decoded).find()) return true;
 			for (int round = 0; round < 8; round++) {
 				String next = decodeInspectionRound(decoded);
-				if (CAMPAIGN_CAPABILITY.matcher(next).find()) return true;
+				if (capability.matcher(next).find()) return true;
 				if (next.equals(decoded)) return false;
 				decoded = next;
 			}
@@ -125,8 +132,16 @@ public class SmtpTransportException extends RuntimeException {
 		decoded = org.jsoup.parser.Parser.unescapeEntities(decoded, false);
 		try {
 			decoded = jakarta.mail.internet.MimeUtility.decodeText(decoded);
+			// Provider diagnostics may concatenate encoded words without MIME header whitespace.
+			var words = MIME_ENCODED_WORD.matcher(decoded);
+			StringBuilder inspected = new StringBuilder();
+			while (words.find()) {
+				words.appendReplacement(inspected, java.util.regex.Matcher.quoteReplacement(
+						jakarta.mail.internet.MimeUtility.decodeWord(words.group())));
+			}
+			decoded = words.appendTail(inspected).toString();
 		}
-		catch (java.io.UnsupportedEncodingException rejected) {
+		catch (java.io.UnsupportedEncodingException | jakarta.mail.internet.ParseException rejected) {
 			throw new IllegalArgumentException("SMTP response encoding is invalid", rejected);
 		}
 		return java.text.Normalizer.normalize(decoded, java.text.Normalizer.Form.NFKC);

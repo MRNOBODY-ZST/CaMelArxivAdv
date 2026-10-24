@@ -121,9 +121,30 @@ class ArxivResultHandlerIntegrationTest {
 	}
 
 	@Test
+	void lateDuplicateMetadataDoesNotResurrectTerminalJobOrParent() {
+		UUID parent = UUID.randomUUID();
+		databaseClient.sql("INSERT INTO jobs(id,type,status,idempotency_key,ended_at) VALUES(:id,'ARXIV_IMPORT_METADATA','CANCELED',:key,now())")
+				.bind("id", parent).bind("key", "synthetic-parent:" + parent).fetch().rowsUpdated().block();
+		databaseClient.sql("UPDATE jobs SET status='FAILED',ended_at=now(),parent_job_id=:parent WHERE id=:id")
+				.bind("parent", parent).bind("id", jobId).fetch().rowsUpdated().block();
+		String batch = batchMessage(UUID.randomUUID());
+		handler.handle(batch).block();
+		assertThat(handler.handle(batch).block().duplicate()).isTrue();
+		handler.handle(progressMessage(UUID.randomUUID(), 2, 2, 100)).block();
+		handler.handle(completedMessage(UUID.randomUUID())).block();
+		assertThat(text("SELECT status FROM jobs WHERE id='" + jobId + "'")).isEqualTo("FAILED");
+		assertThat(text("SELECT status FROM jobs WHERE id='" + parent + "'")).isEqualTo("CANCELED");
+		assertThat(number("SELECT processed_count FROM jobs WHERE id='" + parent + "'")).isZero();
+	}
+
+	@Test
 	void appliesMonotonicProgressAndTerminalStatus() {
+		handler.handle(batchMessage(UUID.randomUUID())).block();
 		handler.handle(progressMessage(UUID.randomUUID(), 1, 2, 50)).block();
 		handler.handle(progressMessage(UUID.randomUUID(), 0, 2, 10)).block();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		handler.handle(batchMessage(UUID.randomUUID()).replace("2608.00001", "2608.00002")).block();
 		handler.handle(completedMessage(UUID.randomUUID())).block();
 
 		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
@@ -132,6 +153,122 @@ class ArxivResultHandlerIntegrationTest {
 				.isEqualTo("SUCCEEDED");
 		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
 				.isEqualTo(100);
+	}
+
+	@Test
+	void preservesDistinctSameNormalizedNameCoauthorsAndStableIdentitiesOnReimport() {
+		String authors = "\"authors\":[{\"name\":\"Alex Kim\",\"affiliations\":[\"North Institute\"]},"
+				+ "{\"name\":\"Ａlex   Kim\",\"affiliations\":[\"South Institute\"]}]";
+		String original = "\"authors\":[{\"name\":\"Ada Lovelace\",\"affiliations\":[\"Institute\"]}]";
+		handler.handle(batchMessage(UUID.randomUUID()).replace(original, authors)).block();
+		List<UUID> identities = authorIds();
+		assertThat(identities).hasSize(2).doesNotHaveDuplicates();
+		assertThat(databaseClient.sql("SELECT affiliation_text FROM paper_authors ORDER BY author_order")
+				.map((row, metadata) -> row.get(0, String.class)).all().collectList().block())
+				.containsExactly("North Institute", "South Institute");
+		// Another global name match sorting earlier must not steal an existing paper position.
+		databaseClient.sql("UPDATE authors SET created_at = '2000-01-01' WHERE id = :id")
+				.bind("id", identities.get(1)).fetch().rowsUpdated().block();
+		handler.handle(batchMessage(UUID.randomUUID()).replace(original, authors)).block();
+		assertThat(authorIds()).containsExactlyElementsOf(identities);
+		assertThat(count("paper_imports")).isEqualTo(1);
+		assertThat(count("paper_authors")).isEqualTo(2);
+		assertThat(databaseClient.sql("SELECT affiliation_data::text FROM paper_authors ORDER BY author_order")
+				.map((row, metadata) -> row.get(0, String.class)).all().collectList().block())
+				.containsExactly("[\"North Institute\"]", "[\"South Institute\"]");
+	}
+
+	@Test
+	void metadataProgressUsesPersistedImportsAndCorrectsPreviouslyInflatedCounts() {
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		databaseClient.sql("UPDATE jobs SET processed_count = 99, success_count = 99, progress_percent = 100 WHERE id = :id")
+				.bind("id", jobId).fetch().rowsUpdated().block();
+		handler.handle(progressMessage(UUID.randomUUID(), 2, 2, 100)).block();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT progress_percent::bigint FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(50);
+		handler.handle(progressMessage(UUID.randomUUID(), 0, 2, 0)).block();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+	}
+
+	@Test
+	void rollsBackInvalidBatchAndReportsPartialPersistenceInsteadOfWorkerSuccess() {
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		assertThatThrownBy(() -> handler.handle(batchMessage(UUID.randomUUID())
+				.replace("2608.00001", "2608.00002").replace("cs.AI", "unknown.category")).block())
+				.isInstanceOf(IllegalArgumentException.class);
+		handler.handle(progressMessage(UUID.randomUUID(), 2, 2, 100)).block();
+		// A job upgraded after the old progress handler ran must also reconcile downward at terminal.
+		databaseClient.sql("UPDATE jobs SET processed_count = 99, success_count = 99 WHERE id = :id")
+				.bind("id", jobId).fetch().rowsUpdated().block();
+		String completion = completedMessage(UUID.randomUUID());
+		handler.handle(completion).block();
+		assertThat(handler.handle(completion).block().duplicate()).isTrue();
+		assertThat(count("paper_imports")).isEqualTo(1);
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("PARTIALLY_SUCCEEDED");
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT failed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(2);
+		assertThat(text("SELECT details->>'errorCode' FROM job_events WHERE job_id = '" + jobId
+				+ "' AND event_type = 'ARXIV_JOB_COMPLETED'"))
+				.isEqualTo("METADATA_PERSISTENCE_INCOMPLETE");
+	}
+
+	@Test
+	void terminalBeforeAnyPersistedBatchFailsClosedInsteadOfClaimingSuccess() {
+		handler.handle(completedMessage(UUID.randomUUID())).block();
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("FAILED");
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isZero();
+		assertThat(number("SELECT failed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(2);
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		assertThat(count("paper_imports")).isZero();
+	}
+
+	@Test
+	void terminalWithZeroWorkerCountersStillCountsPersistedPapers() {
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_COMPLETED", """
+				{"status":"SUCCEEDED","stage":"COMPLETED","processedCount":0,
+				 "successCount":0,"failedCount":0,"totalCount":0,"progressPercent":100,
+				 "checkpoint":{},"papers":[]}
+				""")).block();
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("SUCCEEDED");
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT total_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+	}
+
+	@Test
+	void preservesWorkerFailuresAndSkippedCountsAlongsidePersistenceDeficits() {
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_COMPLETED", """
+				{"status":"PARTIALLY_SUCCEEDED","stage":"COMPLETED","processedCount":4,
+				 "successCount":2,"skippedCount":1,"failedCount":1,"totalCount":4,"progressPercent":100,
+				 "checkpoint":{},"papers":[]}
+				""")).block();
+		assertThat(number("SELECT success_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT skipped_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(1);
+		assertThat(number("SELECT failed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(2);
+		assertThat(number("SELECT processed_count FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo(4);
 	}
 
 	@Test
@@ -162,6 +299,7 @@ class ArxivResultHandlerIntegrationTest {
 				  :key, 'FETCHING_OAI')
 				""").bind("id", jobId).bind("actor", ACTOR).bind("key", "oai-result:" + jobId)
 				.fetch().rowsUpdated().block();
+		handler.handle(batchMessage(UUID.randomUUID())).block();
 
 		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", """
 				{"status":"RUNNING","stage":"FETCHING_OAI","processedCount":1,
@@ -172,12 +310,38 @@ class ArxivResultHandlerIntegrationTest {
 
 		assertThat(text("SELECT resumption_token FROM arxiv_sync_cursors WHERE last_job_id = '" + jobId + "'"))
 				.isEqualTo("opaque-token");
+		handler.handle(batchMessage(UUID.randomUUID()).replace("2608.00001", "2608.00002")).block();
 		handler.handle(completedMessage(UUID.randomUUID())).block();
 		assertThat(databaseClient.sql("""
 				SELECT resumption_token IS NULL AS cleared
 				FROM arxiv_sync_cursors WHERE last_job_id = :jobId
 				""").bind("jobId", jobId)
 				.map((row, metadata) -> row.get("cleared", Boolean.class)).one().block()).isTrue();
+	}
+
+	@Test
+	void persistenceDeficitDoesNotAdvanceOrCompleteAnOaiCursor() {
+		databaseClient.sql("UPDATE jobs SET type = 'ARXIV_SYNC_OAI' WHERE id = :id")
+				.bind("id", jobId).fetch().rowsUpdated().block();
+		handler.handle(batchMessage(UUID.randomUUID())).block();
+		String progress = """
+				{"status":"RUNNING","stage":"FETCHING_OAI","processedCount":1,
+				 "successCount":1,"failedCount":0,"totalCount":0,"progressPercent":0,
+				 "checkpoint":{"resumptionToken":"safe-token","responseDate":"2026-08-05T00:00:00Z"},
+				 "papers":[]}
+				""";
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", progress)).block();
+		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", progress
+				.replace("Count\":1", "Count\":2").replace("safe-token", "unsafe-token"))).block();
+		assertThat(text("SELECT resumption_token FROM arxiv_sync_cursors WHERE last_job_id = '" + jobId + "'"))
+				.isEqualTo("safe-token");
+		handler.handle(completedMessage(UUID.randomUUID())).block();
+		assertThat(text("SELECT status FROM jobs WHERE id = '" + jobId + "'"))
+				.isEqualTo("PARTIALLY_SUCCEEDED");
+		assertThat(text("SELECT resumption_token FROM arxiv_sync_cursors WHERE last_job_id = '" + jobId + "'"))
+				.isEqualTo("safe-token");
+		assertThat(number("SELECT count(*) FROM arxiv_sync_cursors WHERE last_completed_datestamp IS NOT NULL"))
+				.isZero();
 	}
 
 	@Test
@@ -192,6 +356,7 @@ class ArxivResultHandlerIntegrationTest {
 				  :key, 'FETCHING_OAI')
 				""").bind("id", jobId).bind("actor", ACTOR).bind("key", "oai-failed:" + jobId)
 				.fetch().rowsUpdated().block();
+		handler.handle(batchMessage(UUID.randomUUID())).block();
 		handler.handle(envelope(UUID.randomUUID(), "ARXIV_JOB_PROGRESS", """
 				{"status":"RUNNING","stage":"FETCHING_OAI","processedCount":1,
 				 "successCount":1,"failedCount":0,"totalCount":0,"progressPercent":0,
@@ -373,6 +538,11 @@ class ArxivResultHandlerIntegrationTest {
 	private long count(String table) {
 		return databaseClient.sql("SELECT count(*) AS total FROM " + table)
 				.map((row, metadata) -> row.get("total", Long.class)).one().block();
+	}
+
+	private List<UUID> authorIds() {
+		return databaseClient.sql("SELECT author_id FROM paper_authors ORDER BY author_order")
+				.map((row, metadata) -> row.get(0, UUID.class)).all().collectList().block();
 	}
 
 	private String text(String sql) {

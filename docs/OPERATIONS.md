@@ -168,16 +168,6 @@ Edge E2E 要求账号同时拥有模板和 SMTP 管理权限；它会通过 API 
 
 `data_retention_policies` 是保留任务的事实配置。原始追踪事件、IP/User-Agent 派生数据、审计和导出文件应按不同期限清理。打开事件只能解释为估算信号；报告中明确 SMTP accepted 不等同 delivered。
 
-## 阶段验收基线
+## 当前版本验证
 
-2026-08-05 实测：4 个 Flyway 迁移成功、50 张 public 表、9 个容器健康；Nginx/API/Mailpit/MinIO 宿主入口可达；后端、Python、Vue 全量质量门通过；桌面 1280×720 与移动 390×844 无横向溢出、零 console warning/error，移动抽屉关闭后焦点回到触发按钮。
-
-Phase 2 同日实测：Flyway 更新到 V5；初始管理员强制改密；改密后旧 access/refresh 均为 401；refresh 单次轮换成功，旧值重放后整族失效且写入 `AUTH_REFRESH_REPLAY`；权限目录为 26 项；普通 `ADMIN` 的四类 `SUPER_ADMIN` 接管请求均为 403 并落审计，`VIEWER` 管理端请求为带 Trace ID 的 403；logout 后 refresh 为 401。用户/角色/审计三页通过桌面与 390×844 浏览器检查，页面无全局横向溢出且控制台零 warning/error。
-
-Phase 3 于 2026-08-06 实测：Flyway V6 后为 53 张表、1 个物化视图；后端 132 tests/`clean check`/`bootJar`、Worker 31 tests/Ruff/MyPy、前端 27 tests/ESLint/`vue-tsc`/Vite build 全部通过。真实官方查询 `reliable agents` 返回结果，选中导入 Job `e42fd065-25ce-42d7-a639-090c6913625f` 完成并持久化论文 `2212.02256`。OAI 分类同步 Job `18fed311-b1af-4dd7-ae09-148a867aac71` 原子完成 166 个分类、6 个 alias 和 155 条描述，包含 `hep-th`、`math-ph`、`quant-ph` 等两段式 set；`mail-worker` 的业务健康 API 返回 404。任务详情显示 CREATED/STARTED/BATCH/PROGRESS/COMPLETED 事件和新鲜 Worker 心跳；发现、任务、论文页面桌面无 console error，390×844 发现页 `scrollWidth=clientWidth=390`。
-
-Phase 4 于 2026-08-06 实测：Flyway V7；后端 153 tests、Worker 68 tests、前端 30 tests 及各自完整质量门通过，Compose 九服务和三个镜像契约通过。真实 Source Job `81f0900e-2865-4044-8c42-dff7899505db` 对 `2212.02256` 完成 TAR_GZIP 下载、解包、作者/联系人提取和原子回写，归档/展开尺寸为 488,729/913,762 bytes，临时目录清理确认。数据库密文不含 `@`、nonce 独立、HMAC 唯一；受权联系人列表脱敏、完整披露审计与 `mail-worker` 业务 API 404 均通过。桌面 1280×720 和移动 390×844 无页面级横向溢出，控制台零 warning/error；Worker RestartCount=0，验收后四个 arXiv 队列均为空。
-
-Phase 5 于 2026-08-06 实测并经独立复核修正：Flyway V8 九条分析索引及追加式 V9 顺序修正生效；真实队列独立 SQL 与 API 的 canonical author、唯一联系人和映射数一致，导入日期、错误日期和最新映射查询计划均命中专用索引。受权 `dataset=domains` CSV 的 nosniff/文件名/审计正确；非法数据集 400、未认证 401、无 `user:read` 时用户选项为空。后端 170、Worker 68、前端 37 项测试和全部静态/构建门通过。桌面 1440×900 和移动 390×844 的三个分析页无横向溢出且控制台零 warning/error，联系人页不显示完整邮箱；九服务 healthy、应用容器 RestartCount=0、队列为空。详细口径与对账 SQL 见 [ANALYTICS.md](ANALYTICS.md)。
-
-Phase 6 于 2026-08-07 实测并经两轮独立复核修正：Flyway V10/V11；后端 201 tests、前端 45 tests、Worker 68 tests 以及 ESLint/严格类型/生产构建/Ruff/MyPy 门全部通过。API 权限为匿名 401、Viewer 403，OpenAPI 为 58 paths；MinIO 私有图片、危险内容净化、版本/恢复/复制、渲染后 Header 边界、AES-GCM SMTP 密钥轮换与保留、公网主机禁用均经真实 API 验证。匿名签名图片读取实测 `200 image/png`，历史版本引用删除为 409；Mailpit MIME 使用绝对签名图片 URL，同时包含净化 HTML 与保留论文/退订 URL 的纯文本。Microsoft Edge 桌面/移动 3/3 场景通过，覆盖真实 PNG 上传/加载、图片深拷贝、归档源模板后副本继续加载、地址脱敏、移动抽屉、无横向溢出和零控制台错误；签名 capability 未进入 Nginx/应用日志。验收对象、模板、SMTP、邮件、审计和账号均已清理。
+使用隔离环境执行当前版本的质量门并保留私有验证记录。历史运行标识、部署细节和验收报告不随公开源码发布；历史结果不能代替当前候选版本验证。

@@ -57,6 +57,9 @@ class JobServiceIntegrationTest {
 		var connectionFactory = ConnectionFactories.get(r2dbcUrl());
 		databaseClient = DatabaseClient.create(connectionFactory);
 		databaseClient.sql("DELETE FROM audit_logs").fetch().rowsUpdated().block();
+		// Only this class's private container contains these synthetic children.
+		databaseClient.sql("DELETE FROM source_command_issues").fetch().rowsUpdated().block();
+		databaseClient.sql("DELETE FROM source_command_authorities").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM jobs").fetch().rowsUpdated().block();
 		databaseClient.sql("DELETE FROM users").fetch().rowsUpdated().block();
 		databaseClient.sql("""
@@ -150,6 +153,10 @@ class JobServiceIntegrationTest {
 
 		assertThat(retry.status()).isEqualTo(JobStatus.PENDING);
 		assertThat(retry.totalCount()).isEqualTo(2);
+		assertThat(databaseClient.sql("SELECT count(*) FROM source_command_authorities WHERE job_id=:id AND sequence=0")
+				.bind("id",retry.id()).map((row,metadata)->row.get(0,Long.class)).one().block()).isEqualTo(1L);
+		assertThat(databaseClient.sql("SELECT count(*) FROM source_command_authorities WHERE job_id=:id")
+				.bind("id",original.jobId()).map((row,metadata)->row.get(0,Long.class)).one().block()).isZero();
 		assertThat(databaseClient.sql("""
 				SELECT count(*) AS total
 				FROM job_items item

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -21,6 +23,30 @@ from app.messaging.contracts import (
     SourceEvidence,
     SourceExtractionResult,
 )
+
+
+@pytest.mark.parametrize(
+    "vector",
+    json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "contracts/fixtures/source-admission-state-v2.json"
+        ).read_text()
+    )["evidence_casefold_states"],
+)
+def test_shared_state_evidence_casefold_privacy_vectors(vector: dict[str, object]) -> None:
+    state = json.loads(str(vector["raw"]))
+    result = state["result"]
+    if vector["accepted"]:
+        accepted = SourceExtractionResult.model_validate(result)
+        assert accepted.contacts[0].display_email == result["contacts"][0]["display_email"]
+        assert (
+            accepted.contacts[0].evidence[0].masked_context
+            == result["contacts"][0]["evidence"][0]["masked_context"]
+        )
+    else:
+        with pytest.raises(ValidationError, match="complete email address"):
+            SourceExtractionResult.model_validate(result)
 
 
 @pytest.mark.parametrize(

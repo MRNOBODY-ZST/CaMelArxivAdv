@@ -5,6 +5,7 @@ import com.camel_hub.advertisement.campaign.CampaignService;
 import com.camel_hub.advertisement.campaign.PersonalizationProperties;
 import com.camel_hub.advertisement.campaign.delivery.CampaignDeliveryRepository;
 import com.camel_hub.advertisement.campaign.delivery.CampaignOutboundPreparer;
+import com.camel_hub.advertisement.campaign.delivery.PreparationDiagnostic;
 import com.camel_hub.advertisement.campaign.safety.CampaignSafetySigner;
 import com.camel_hub.advertisement.common.api.PageResponse;
 import com.camel_hub.advertisement.email.tracking.MailClickController;
@@ -49,6 +50,13 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 
 	private static final AuthenticationRequestContext REQUEST =
 			new AuthenticationRequestContext("198.51.100.20", "Research Browser", "campaign-track-1");
+
+	private static void assertPreparationFailure(Throwable failure, String stage, Class<? extends Throwable> originalType) {
+		assertThat(failure).isInstanceOf(PreparationDiagnostic.PreparationFailure.class)
+				.hasMessage("PREP_" + stage + "_FAILED").hasNoCause();
+		assertThat(PreparationDiagnostic.diagnostic(failure).stage()).isEqualTo(PreparationDiagnostic.PreparationStage.valueOf(stage));
+		assertThat(PreparationDiagnostic.original(failure)).isInstanceOf(originalType);
+	}
 
 	@Test
 	void preparationFreezesOpaqueCallbacksAndRfc8058HeadersBeforeSmtp() {
@@ -172,7 +180,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 					.fetch().rowsUpdated().block();
 
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(candidate.name()).isInstanceOf(IllegalArgumentException.class)
+					.as(candidate.name()).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 					.hasMessageNotContaining(openToken(sourceHtml))
 					.hasMessageNotContaining(clickToken(sourceHtml))
 					.hasMessageNotContaining(unsubscribeToken(sourceText))
@@ -229,7 +237,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 			CampaignDeliveryRepository.ProductionClaim claim = insertClaim(candidate.html(), candidate.text());
 
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(candidate.name()).isInstanceOf(IllegalArgumentException.class)
+					.as(candidate.name()).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 					.hasMessageNotContaining("attacker.example");
 			assertThat(longValue("SELECT count(*) FROM tracking_tokens WHERE campaign_recipient_id = '"
 					+ claim.recipientId() + "'")).as(candidate.name()).isZero();
@@ -299,7 +307,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		assertThat(sameOriginRetry.headers().get("List-Unsubscribe"))
 				.isEqualTo("<" + unsubscribeUrl(first.text()) + ">");
 		assertThatThrownBy(() -> rotatedService.prepare(claim).block())
-				.isInstanceOf(IllegalArgumentException.class)
+				.satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 				.hasMessageNotContaining(unsubscribeToken(first.text()))
 				.hasMessageNotContaining("tracking.example.test");
 		assertThat(count("tracking_tokens")).isEqualTo(3);
@@ -321,7 +329,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 					.fetch().rowsUpdated().block();
 
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(injectedSubject).isInstanceOf(IllegalArgumentException.class)
+					.as(injectedSubject).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 					.hasMessageNotContaining(capability);
 		}
 	}
@@ -363,7 +371,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 					.bind("recipient", claim.recipientId()).fetch().rowsUpdated().block();
 
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(candidate.name()).isInstanceOf(IllegalArgumentException.class)
+					.as(candidate.name()).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 					.hasMessageNotContaining("campaign-safety")
 					.hasMessageNotContaining("campaign-click")
 					.hasMessageNotContaining("v1.");
@@ -545,7 +553,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 				.fetch().rowsUpdated().block();
 
 		assertThatThrownBy(() -> service.prepare(claim).block())
-				.isInstanceOf(IllegalArgumentException.class)
+				.satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 				.hasMessageNotContaining(click)
 				.hasMessageNotContaining(corrupted);
 		assertThat(count("tracking_tokens")).isEqualTo(3);
@@ -572,7 +580,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 					.fetch().rowsUpdated().block();
 
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(type).isInstanceOf(IllegalArgumentException.class)
+					.as(type).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 					.hasMessageNotContaining(capability);
 		}
 	}
@@ -592,7 +600,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 				.fetch().rowsUpdated().block();
 
 		assertThatThrownBy(() -> service.prepare(claim).block())
-				.isInstanceOf(IllegalArgumentException.class)
+				.satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class))
 				.hasMessageNotContaining(capability);
 	}
 
@@ -634,7 +642,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 				original.replyTo(), true, true, true, original.renderedSubject(), original.renderedHtml(), original.renderedText());
 
 		assertThatThrownBy(() -> service.prepare(stale).block())
-				.isInstanceOf(IllegalStateException.class)
+				.satisfies(error -> assertPreparationFailure(error, "CLAIM_VALIDATION", IllegalStateException.class))
 				.hasMessageNotContaining(original.renderedHtml())
 				.hasMessageNotContaining(original.renderedText());
 		assertThat(count("tracking_tokens")).isZero();
@@ -652,8 +660,8 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		CampaignTrackingService service = service(expiresDuringPreparation);
 
 		assertThatThrownBy(() -> service.prepare(claim).block())
-				.isInstanceOf(IllegalStateException.class)
-				.hasMessage("Campaign preparation lease is no longer active");
+				.satisfies(error -> assertPreparationFailure(error, "BODY_PERSIST", IllegalStateException.class))
+				.satisfies(error -> assertThat(PreparationDiagnostic.original(error)).hasMessage("Campaign preparation lease is no longer active"));
 		assertThat(count("tracking_tokens")).isZero();
 		assertThat(count("campaign_links")).isZero();
 		assertThat(text("SELECT rendered_html FROM campaign_recipients WHERE id = '" + claim.recipientId() + "'"))
@@ -671,7 +679,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 			database.sql("DELETE FROM tracking_tokens WHERE campaign_recipient_id = :recipient AND token_type = :type")
 					.bind("recipient", claim.recipientId()).bind("type", type).fetch().rowsUpdated().block();
 			assertThatThrownBy(() -> service.prepare(claim).block())
-					.as(type).isInstanceOf(IllegalArgumentException.class);
+					.as(type).satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class));
 		}
 
 		CampaignDeliveryRepository.ProductionClaim openMismatch = insertClaim(
@@ -680,7 +688,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		service.prepare(openMismatch).block();
 		sql("UPDATE campaigns SET tracking_opens_enabled = false WHERE id = '" + openMismatch.campaignId() + "'");
 		assertThatThrownBy(() -> service.prepare(withTrackingFlags(openMismatch, false, true)).block())
-				.isInstanceOf(IllegalArgumentException.class);
+				.satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class));
 
 		CampaignDeliveryRepository.ProductionClaim clickMismatch = insertClaim(
 				"<a href=\"https://papers.example.org/abs/42\">Paper</a>"
@@ -688,7 +696,7 @@ class CampaignTrackingApiIntegrationTest extends CampaignTrackingDatabaseTestSup
 		service.prepare(clickMismatch).block();
 		sql("UPDATE campaigns SET tracking_clicks_enabled = false WHERE id = '" + clickMismatch.campaignId() + "'");
 		assertThatThrownBy(() -> service.prepare(withTrackingFlags(clickMismatch, true, false)).block())
-				.isInstanceOf(IllegalArgumentException.class);
+				.satisfies(error -> assertPreparationFailure(error, "SOURCE_VALIDATION", IllegalArgumentException.class));
 	}
 
 	@Test

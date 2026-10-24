@@ -77,6 +77,12 @@ app:
     provider: ${PERSONALIZATION_PROVIDER:openai}
     model: ${PERSONALIZATION_MODEL:gpt-5.6-luna}
     max-recipients: ${PERSONALIZATION_MAX_RECIPIENTS:100}
+  personalization-settings:
+    api-origin: ${PERSONALIZATION_API_BASE_URL:}
+    api-key: ${PERSONALIZATION_API_KEY:}
+    auth-scheme: ${PERSONALIZATION_API_AUTH_SCHEME:}
+    service-token: ${PERSONALIZATION_RUNTIME_CONFIG_TOKEN:}
+    encryption-key-base64: ${APP_ENCRYPTION_KEY_BASE64:}
   runtime:
     ray-configured: ${RAY_CONFIGURED:false}
     kafka-configured: ${KAFKA_CONFIGURED:true}
@@ -140,6 +146,11 @@ app:
     first-retry-delay: ${CAMPAIGN_DELIVERY_FIRST_RETRY_DELAY:PT1M}
     second-retry-delay: ${CAMPAIGN_DELIVERY_SECOND_RETRY_DELAY:PT5M}
     poll-delay: ${CAMPAIGN_DELIVERY_POLL_DELAY:PT1S}
+  partner-invite:
+    enabled: ${PARTNER_INVITE_ENABLED:false}
+    bearer-token: ${PARTNER_INVITE_BEARER_TOKEN:}
+    encryption-key-base64: ${PARTNER_INVITE_ENCRYPTION_KEY_BASE64:}
+    request-timeout: ${PARTNER_INVITE_REQUEST_TIMEOUT:PT5S}
   campaign-inbound:
     enabled: ${CAMPAIGN_INBOUND_ENABLED:false}
     poll-delay: ${CAMPAIGN_INBOUND_POLL_DELAY:PT30S}
@@ -149,6 +160,9 @@ app:
     enabled: ${CAMPAIGN_SAFETY_ENABLED:false}
     recipient: ${CAMPAIGN_SAFETY_RECIPIENT:}
     maximum-recipients: ${CAMPAIGN_SAFETY_MAX_RECIPIENTS:20}
+    destinations:
+      qq: ${CAMPAIGN_SAFETY_RECIPIENT_QQ:}
+      gmail: ${CAMPAIGN_SAFETY_RECIPIENT_GMAIL:}
   smtp:
     live-allowed: ${ALLOW_LIVE_SMTP:false}
     local-allowed-hosts: ${SMTP_LOCAL_ALLOWED_HOSTS:mailpit,localhost,127.0.0.1}

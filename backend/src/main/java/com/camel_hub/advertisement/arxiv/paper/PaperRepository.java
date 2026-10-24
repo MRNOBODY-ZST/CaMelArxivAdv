@@ -15,6 +15,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 public class PaperRepository {
@@ -94,21 +95,27 @@ public class PaperRepository {
 	}
 
 	private Mono<Void> replaceRelations(UUID paperId, ArxivResultMessage.Paper paper, Instant submitted) {
-		return databaseClient.sql("DELETE FROM paper_authors WHERE paper_id = :paperId")
-				.bind("paperId", paperId).fetch().rowsUpdated()
-				.then(databaseClient.sql("DELETE FROM paper_categories WHERE paper_id = :paperId")
-						.bind("paperId", paperId).fetch().rowsUpdated())
-				.then(upsertAuthors(paperId, paper.authors()))
-				.then(upsertCategories(paperId, paper.primaryCategory(), paper.categories()))
-				.then(upsertVersion(paperId, paper.version() == null ? 1 : paper.version(), submitted));
+		return databaseClient.sql("SELECT author_id, author_order FROM paper_authors WHERE paper_id = :paperId")
+				.bind("paperId", paperId)
+				.map((row, metadata) -> new ExistingAuthor(row.get("author_id", UUID.class),
+						row.get("author_order", Integer.class))).all()
+				.collectMap(ExistingAuthor::order, ExistingAuthor::id)
+				.flatMap(previous -> databaseClient.sql("DELETE FROM paper_authors WHERE paper_id = :paperId")
+						.bind("paperId", paperId).fetch().rowsUpdated()
+						.then(databaseClient.sql("DELETE FROM paper_categories WHERE paper_id = :paperId")
+								.bind("paperId", paperId).fetch().rowsUpdated())
+						.then(upsertAuthors(paperId, paper.authors(), previous))
+						.then(upsertCategories(paperId, paper.primaryCategory(), paper.categories()))
+						.then(upsertVersion(paperId, paper.version() == null ? 1 : paper.version(), submitted)));
 	}
 
-	private Mono<Void> upsertAuthors(UUID paperId, List<ArxivResultMessage.Author> authors) {
+	private Mono<Void> upsertAuthors(UUID paperId, List<ArxivResultMessage.Author> authors,
+			Map<Integer, UUID> previous) {
 		return Flux.range(0, authors.size()).concatMap(index -> {
 			ArxivResultMessage.Author author = authors.get(index);
 			String name = normalizeDisplay(author.name());
 			String normalized = name.toLowerCase(Locale.ROOT);
-			return findOrCreateAuthor(normalized, name)
+			return findOrCreateAuthor(paperId, normalized, name, previous.get(index + 1))
 					.flatMap(authorId -> databaseClient.sql("""
 							INSERT INTO paper_authors (
 							  paper_id, author_id, author_order, raw_name, affiliation_text, affiliation_data
@@ -165,10 +172,15 @@ public class PaperRepository {
 						"Paper contains an inactive or unknown category")));
 	}
 
-	private Mono<UUID> findOrCreateAuthor(String normalized, String display) {
-		return databaseClient.sql("""
-				SELECT id FROM authors WHERE normalized_name = :normalized ORDER BY created_at, id LIMIT 1
-				""").bind("normalized", normalized).map((row, metadata) -> row.get("id", UUID.class)).one()
+	private Mono<UUID> findOrCreateAuthor(UUID paperId, String normalized, String display, UUID previousId) {
+		DatabaseClient.GenericExecuteSpec selection = databaseClient.sql("""
+				SELECT a.id FROM authors a WHERE a.normalized_name = :normalized
+				  AND NOT EXISTS (SELECT 1 FROM paper_authors pa WHERE pa.paper_id = :paperId AND pa.author_id = a.id)
+				ORDER BY CASE WHEN a.id = :previousId THEN 0 ELSE 1 END, a.created_at, a.id LIMIT 1
+				""").bind("normalized", normalized).bind("paperId", paperId);
+		selection = previousId == null ? selection.bindNull("previousId", UUID.class)
+				: selection.bind("previousId", previousId);
+		return selection.map((row, metadata) -> row.get("id", UUID.class)).one()
 				.switchIfEmpty(databaseClient.sql("""
 						INSERT INTO authors (normalized_name, display_name) VALUES (:normalized, :display)
 						RETURNING id
@@ -232,5 +244,8 @@ public class PaperRepository {
 	}
 
 	private record PaperUpsert(UUID id, boolean updated) {
+	}
+
+	private record ExistingAuthor(UUID id, int order) {
 	}
 }

@@ -24,6 +24,7 @@ from app.extraction.archive_guard import ArchiveLimits
 from app.jobs.arxiv_consumer import ArxivCommandProcessor, CommandOutcome
 from app.jobs.job_control import RedisJobStore
 from app.jobs.source_extraction import SourceExtractionRunner
+from app.jobs.source_retry import SourceRetryDecision
 from app.messaging.contracts import MessageEnvelope, MessageType, WorkerHeartbeat
 from app.messaging.kafka import (
     KafkaRecord,
@@ -121,6 +122,9 @@ async def run(settings: Settings | None = None) -> None:
                 store,
                 batch_size=active.metadata_batch_size,
                 maximum_command_bytes=active.command_max_bytes,
+                source_store=store,
+                source_invocation_lease_seconds=active.source_invocation_lease_seconds,
+                source_invocation_renew_seconds=active.source_invocation_renew_seconds,
                 source_runner=SourceExtractionRunner(
                     SourceDownloader(
                         http,
@@ -231,7 +235,9 @@ async def _handle_command_record(
             dead_letter_topic=settings.dead_letter_topic,
             retry_delay_ms=int(settings.retry_delay_seconds * 1_000),
             on_retry_exhausted=partial(
-                processor.publish_retry_exhausted_failure, record.value
+                processor.publish_retry_exhausted_failure,
+                record.value,
+                source_decision=outcome if isinstance(outcome, SourceRetryDecision) else None,
             ),
             on_permanent_failure=partial(
                 processor.publish_permanent_failure, record.value

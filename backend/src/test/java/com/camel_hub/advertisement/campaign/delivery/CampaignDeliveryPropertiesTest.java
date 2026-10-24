@@ -3,6 +3,7 @@ package com.camel_hub.advertisement.campaign.delivery;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -79,6 +80,29 @@ class CampaignDeliveryPropertiesTest {
 	void disabledModeStillRejectsAMalformedConfiguredMailbox() {
 		assertThatThrownBy(() -> new CampaignSafetyProperties(false, "not-an-address", 20))
 				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	void optionalNamedSafetyDestinationsAreStrictImmutableAndCannotReplaceDefault() {
+		CampaignSafetyProperties properties = new CampaignSafetyProperties(true, "fixed@example.test", 20,
+				Map.of("qq", " Owner@QQ.COM ", "gmail", ""));
+		assertThat(properties.destinations()).containsExactlyEntriesOf(Map.of("qq", "Owner@qq.com"));
+		assertThat(properties.validatedRecipient()).isEqualTo("fixed@example.test");
+		assertThatThrownBy(() -> properties.destinations().put("other", "other@example.test"))
+				.isInstanceOf(UnsupportedOperationException.class);
+		for (String key : new String[] {"default", "", "QQ", "owner@qq.com", "qq\r\n"}) {
+			assertThatThrownBy(() -> new CampaignSafetyProperties(true, "fixed@example.test", 20,
+					Map.of(key, "owner@qq.com"))).hasMessageContaining("key");
+		}
+		for (String address : new String[] {"Owner <owner@qq.com>", "owner@qq.com,other@gmail.com",
+				"owner@qq.com\r\nBcc:other@gmail.com", "missing-domain"}) {
+			assertThatThrownBy(() -> new CampaignSafetyProperties(false, "", 20, Map.of("qq", address)))
+					.hasMessageContaining("strict email");
+		}
+		Map<String, String> oversized = new java.util.LinkedHashMap<>();
+		for (int index = 0; index < 11; index++) oversized.put("owner-" + index, "owner@example.test");
+		assertThatThrownBy(() -> new CampaignSafetyProperties(true, "fixed@example.test", 20, oversized))
+				.hasMessageContaining("at most 10");
 	}
 
 	private CampaignDeliveryProperties delivery(

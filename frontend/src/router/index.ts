@@ -70,6 +70,10 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '收件人分组', pageSection: '邮件运营' },
   },
   {
+    path: '/email/automation', name: 'email-automation', component: () => import('@/modules/outreach/OutreachView.vue'),
+    meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '一键触达', pageSection: '邮件运营' },
+  },
+  {
     path: '/email/campaigns', name: 'email-campaigns', component: () => import('@/modules/campaigns/CampaignsView.vue'),
     meta: { requiresAuth: true, permissions: ['campaign:read'], pageTitle: '邮件活动', pageSection: '邮件运营' },
   },

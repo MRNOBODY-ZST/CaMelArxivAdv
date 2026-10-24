@@ -1,6 +1,7 @@
 package com.camel_hub.advertisement.migration;
 
 import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.MigrationInfo;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -11,6 +12,8 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +97,55 @@ class FlywayMigrationTest {
 		assertThat(constraintDefinitions().get("ck_smtp_month_limit"))
 				.contains("per_month_limit IS NULL", "per_month_limit >= per_day_limit");
 		assertThat(indexNames()).contains("ix_mail_send_account_quota");
+	}
+
+	@Test
+	void addsANullableBoundedExplicitPaperSelectionWithoutChangingLegacyCampaigns() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+		assertColumn("campaigns", "personalization_paper_ids", "ARRAY", null, true);
+		assertThat(constraintDefinitions().get("ck_campaign_personalization_papers"))
+				.contains("personalization_paper_ids IS NULL", "array_ndims", "cardinality", "array_position");
+	}
+
+	@Test
+	void addsBoundedProductionSelectionAndNullableFrozenPaperInputsWithoutChangingLegacyRows() throws SQLException {
+		assertThat(flyway().migrate().success).isTrue();
+		assertColumn("campaigns", "personalization_recipient_limit", "integer", null, true);
+		assertColumn("campaign_recipients", "paper_abstract_snapshot", "text", null, true);
+		assertColumn("campaign_recipients", "arxiv_id_snapshot", "character varying", 48, true);
+		assertThat(constraintDefinitions().get("ck_campaign_personalization_recipient_limit"))
+				.contains("personalization_recipient_limit IS NULL", "personalization_recipient_limit >= 1",
+						"personalization_recipient_limit <= 120", "personalization_paper_ids IS NULL");
+
+		SafetyFixture fixture = createSafetyFixture();
+		String campaignWhere = " WHERE id = '" + fixture.campaignId() + "'";
+		assertThat(queryLong("SELECT count(*) FROM campaigns" + campaignWhere
+				+ " AND personalization_recipient_limit IS NULL AND personalization_paper_ids IS NULL")).isEqualTo(1);
+		for (int allowed : List.of(1, 120)) {
+			execute("UPDATE campaigns SET personalization_recipient_limit = " + allowed + campaignWhere);
+			assertThat(queryLong("SELECT personalization_recipient_limit FROM campaigns" + campaignWhere)).isEqualTo(allowed);
+		}
+		for (int rejected : List.of(0, 121)) {
+			assertThatThrownBy(() -> execute("UPDATE campaigns SET personalization_recipient_limit = " + rejected + campaignWhere))
+					.isInstanceOf(SQLException.class);
+		}
+		String paperSelection = "ARRAY['" + UUID.randomUUID() + "']::uuid[]";
+		assertThatThrownBy(() -> execute("UPDATE campaigns SET personalization_paper_ids = " + paperSelection + campaignWhere))
+				.isInstanceOf(SQLException.class);
+		execute("UPDATE campaigns SET personalization_recipient_limit = NULL, personalization_paper_ids = " + paperSelection + campaignWhere);
+		assertThatThrownBy(() -> execute("UPDATE campaigns SET personalization_recipient_limit = 1" + campaignWhere))
+				.isInstanceOf(SQLException.class);
+		execute("UPDATE campaigns SET personalization_paper_ids = NULL" + campaignWhere);
+
+		String recipientWhere = " WHERE id = '" + fixture.campaignRecipientId() + "'";
+		assertThat(queryLong("SELECT count(*) FROM campaign_recipients" + recipientWhere
+				+ " AND paper_abstract_snapshot IS NULL AND arxiv_id_snapshot IS NULL")).isEqualTo(1);
+		execute("UPDATE campaign_recipients SET paper_abstract_snapshot = 'Frozen public abstract', arxiv_id_snapshot = '2608.00001'" + recipientWhere);
+		assertThat(queryNames("SELECT paper_abstract_snapshot FROM campaign_recipients" + recipientWhere))
+				.containsExactly("Frozen public abstract");
+		assertThat(queryNames("SELECT arxiv_id_snapshot FROM campaign_recipients" + recipientWhere)).containsExactly("2608.00001");
+		assertThatThrownBy(() -> execute("UPDATE campaign_recipients SET arxiv_id_snapshot = repeat('x', 49)" + recipientWhere))
+				.isInstanceOf(SQLException.class);
 	}
 
 	@Test
@@ -260,8 +312,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(11);
-			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+			assertUpgradeToLatest(latest, schema);
 		} finally {
 			dropSchema(schema);
 		}
@@ -392,8 +443,7 @@ class FlywayMigrationTest {
 					.defaultSchema(schema)
 					.locations("classpath:db/migration")
 					.load();
-			assertThat(latest.migrate().migrationsExecuted).isEqualTo(3);
-			assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+			assertUpgradeToLatest(latest, schema);
 			try (Connection connection = connection(schema);
 				 var statement = connection.prepareStatement("""
 						SELECT from_name_snapshot, from_email_snapshot, reply_to_snapshot,
@@ -474,6 +524,53 @@ class FlywayMigrationTest {
 		}
 	}
 
+	private void assertUpgradeToLatest(Flyway latest, String schema) throws SQLException {
+		List<MigrationHistoryEntry> before = appliedMigrationHistory(schema);
+		// Capture the available inventory before migrate, independently of its result/history.
+		List<MigrationInfo> available = Arrays.stream(latest.info().all())
+				.filter(migration -> migration.getVersion() != null)
+				.toList();
+		List<MigrationHistoryEntry> expected = available.stream()
+				.map(migration -> new MigrationHistoryEntry(migration.getVersion().toString(), migration.getChecksum()))
+				.toList();
+		var highestAvailable = available.stream().map(MigrationInfo::getVersion).max(Comparable::compareTo).orElseThrow();
+		assertThat(expected.size()).isGreaterThan(before.size());
+
+		var upgrade = latest.migrate();
+		assertThat(upgrade.success).isTrue();
+		assertThat(upgrade.targetSchemaVersion).isEqualTo(highestAvailable.toString());
+		assertThat(upgrade.migrationsExecuted).isEqualTo(expected.size() - before.size());
+		assertThat(latest.info().current().getVersion()).isEqualTo(highestAvailable);
+		List<MigrationHistoryEntry> after = appliedMigrationHistory(schema);
+		assertThat(after).containsExactlyInAnyOrderElementsOf(expected);
+		assertThat(after.subList(0, before.size())).containsExactlyElementsOf(before);
+		assertThat(after).extracting(MigrationHistoryEntry::version).doesNotHaveDuplicates();
+		assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+
+		var repeatedUpgrade = latest.migrate();
+		assertThat(repeatedUpgrade.success).isTrue();
+		assertThat(repeatedUpgrade.migrationsExecuted).isZero();
+		assertThat(appliedMigrationHistory(schema)).containsExactlyElementsOf(after);
+		assertThat(latest.validateWithResult().validationSuccessful).isTrue();
+	}
+
+	private List<MigrationHistoryEntry> appliedMigrationHistory(String schema) throws SQLException {
+		List<MigrationHistoryEntry> history = new ArrayList<>();
+		try (Connection connection = connection(schema); var statement = connection.createStatement();
+			 ResultSet result = statement.executeQuery("""
+					SELECT version, checksum, success FROM flyway_schema_history
+					WHERE version IS NOT NULL ORDER BY installed_rank
+					""")) {
+			while (result.next()) {
+				assertThat(result.getBoolean("success")).isTrue();
+				history.add(new MigrationHistoryEntry(result.getString("version"), result.getObject("checksum", Integer.class)));
+			}
+		}
+		return history;
+	}
+
+	private record MigrationHistoryEntry(String version, Integer checksum) {}
+
 	private Flyway flyway() {
 		return Flyway.configure()
 				.dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
@@ -512,20 +609,23 @@ class FlywayMigrationTest {
 				"scheduled_at", "submitted_for_review_at", "approved_at", "approved_by", "rejected_at", "rejected_by",
 				"rejection_reason", "started_at", "completed_at", "canceled_at", "created_by", "updated_by", "created_at", "updated_at",
 				"generation_status", "generation_provider", "generation_model", "generation_job_id", "generation_requested_at",
+				"personalization_paper_ids", "personalization_recipient_limit",
+				"recipient_policy", "paper_contact_ids", "paper_contact_recipient_count",
 				"generation_completed_at", "generation_error_summary", "lock_version", "mailbox_account_id", "review_preflight_digest",
 				"review_preflight_at", "status_changed_at", "status_changed_by"));
 		assertThat(columnNames("campaign_recipients")).containsExactlyInAnyOrderElementsOf(Set.of(
 				"id", "campaign_id", "contact_id", "paper_id", "author_id", "email_ciphertext", "email_nonce", "email_hmac",
 				"email_domain", "author_name_snapshot", "paper_title_snapshot", "category_snapshot", "organization_snapshot", "confidence",
+				"paper_abstract_snapshot", "arxiv_id_snapshot",
 				"status", "exclusion_reason", "rendered_subject", "rendered_html", "rendered_text", "queued_at", "first_attempt_at",
 				"smtp_accepted_at", "final_failure_at", "first_open_at", "first_click_at", "created_at", "personalization_status",
 				"personalization_rationale", "personalization_error_code", "personalization_error_message", "personalization_attempts", "personalized_at",
 				"delivery_lease_hash", "delivery_lease_expires_at", "next_attempt_at", "attempt_count", "rfc_message_id", "replied_at",
-				"outcome_unknown_at", "outcome_unknown_reason"));
+				"outcome_unknown_at", "outcome_unknown_reason", "partner_invite_hold_reason"));
 		assertThat(columnNames("delivery_attempts")).containsExactlyInAnyOrderElementsOf(Set.of(
 				"id", "campaign_recipient_id", "smtp_account_id", "attempt_number", "idempotency_key", "status", "smtp_response_code",
 				"smtp_response_summary", "failure_category", "retryable", "started_at", "completed_at", "transport_stage",
-				"smtp_enhanced_status_code", "rfc_message_id", "outcome_unknown_reason"));
+				"smtp_enhanced_status_code", "rfc_message_id", "outcome_unknown_reason", "partner_preparation_pending", "smtp_started_at"));
 		assertThat(columnNames("recipient_delivery_cooldowns")).containsExactlyInAnyOrder("email_hmac", "last_smtp_accepted_at", "updated_at");
 		assertThat(columnNames("campaign_safety_runs")).containsExactlyInAnyOrder(
 				"id", "campaign_id", "smtp_account_id", "created_by", "recipient_limit", "status", "started_at", "completed_at",
@@ -539,7 +639,7 @@ class FlywayMigrationTest {
 		assertThat(columnNames("campaign_safety_attempts")).containsExactlyInAnyOrder(
 				"id", "safety_message_id", "attempt_number", "idempotency_key", "status", "transport_stage", "smtp_response_code",
 				"smtp_enhanced_status_code", "smtp_response_summary", "failure_category", "outcome_unknown_reason", "retryable",
-				"rfc_message_id", "started_at", "completed_at");
+				"rfc_message_id", "started_at", "completed_at", "smtp_started_at");
 		assertThat(columnNames("campaign_safety_links")).containsExactlyInAnyOrder(
 				"id", "safety_message_id", "target_url", "target_url_hash", "token_type", "token_hash", "expires_at", "created_at");
 		assertThat(columnNames("campaign_safety_events")).containsExactlyInAnyOrder(

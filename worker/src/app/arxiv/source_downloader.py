@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import sys
+from collections.abc import AsyncIterator, Awaitable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
@@ -11,6 +14,7 @@ from uuid import uuid4
 import httpx
 
 from app.arxiv.http import PermitLease, validate_official_endpoint
+from app.arxiv.source_errors import SourceUpstreamReason, SourceUpstreamTransientError
 
 _ARXIV_ID = re.compile(r"(?:[0-9]{4}\.[0-9]{4,5}|[A-Za-z0-9.-]{1,40}/[0-9]{7})")
 _REDIRECTS = {301, 302, 303, 307, 308}
@@ -82,13 +86,11 @@ class SourceDownloader:
             for attempt in range(self._maximum_retries + 1):
                 try:
                     return await self._download_attempt(url, target)
-                except (httpx.TimeoutException, httpx.NetworkError, _RetryableSourceError):
+                except SourceUpstreamTransientError:
                     target.unlink(missing_ok=True)
                     if attempt == self._maximum_retries:
                         raise
-                    await asyncio.sleep(
-                        min(8.0, 0.25 * (2**attempt)) + random.uniform(0.0, 0.2)
-                    )
+                    await asyncio.sleep(min(8.0, 0.25 * (2**attempt)) + random.uniform(0.0, 0.2))
         except Exception:
             target.unlink(missing_ok=True)
             raise
@@ -98,24 +100,16 @@ class SourceDownloader:
         url = initial_url
         for redirect_count in range(self._maximum_redirects + 1):
             await self._lease.await_permit()
-            async with self._client.stream(
-                "GET",
-                url,
-                headers={
-                    "Accept": (
-                        "application/x-eprint-tar, application/gzip, "
-                        "application/octet-stream"
-                    ),
-                    "User-Agent": self._user_agent,
-                },
-                follow_redirects=False,
-            ) as response:
+            async with _official_http_stream(self._client, url, self._user_agent) as response:
                 if response.status_code in {404, 410}:
                     raise SourceUnavailableError("arXiv Source is unavailable")
                 if response.status_code in _RETRYABLE:
-                    if response.status_code == 429:
-                        raise _RetryableSourceError("arXiv Source request was rate limited")
-                    raise _RetryableSourceError("arXiv Source service is temporarily unavailable")
+                    reason = (
+                        SourceUpstreamReason.RATE_LIMITED
+                        if response.status_code == 429
+                        else SourceUpstreamReason.UNAVAILABLE
+                    )
+                    raise SourceUpstreamTransientError(reason)
                 if response.status_code in _REDIRECTS:
                     if redirect_count >= self._maximum_redirects:
                         raise SourceDownloadSecurityError("Source redirect limit was exceeded")
@@ -146,7 +140,12 @@ class SourceDownloader:
                     raise SourceDownloadSecurityError("Source exceeded the configured size limit")
                 size = 0
                 with target.open("wb") as stream:
-                    async for chunk in response.aiter_bytes():
+                    chunks = response.aiter_bytes()
+                    while True:
+                        try:
+                            chunk = await _http_operation(anext(chunks))
+                        except StopAsyncIteration:
+                            break
                         size += len(chunk)
                         if size > self._maximum_bytes:
                             raise SourceDownloadSecurityError(
@@ -161,8 +160,43 @@ class SourceDownloader:
         raise SourceDownloadSecurityError("Source redirect limit was exceeded")
 
 
-class _RetryableSourceError(httpx.HTTPError):
-    pass
+async def _http_operation[T](operation: Awaitable[T]) -> T:
+    reason: SourceUpstreamReason
+    try:
+        return await operation
+    except httpx.TimeoutException:
+        reason = SourceUpstreamReason.TIMEOUT
+    except httpx.NetworkError:
+        reason = SourceUpstreamReason.NETWORK
+    # Raise outside the handler: public diagnostics retain neither raw cause nor context.
+    raise SourceUpstreamTransientError(reason)
+
+
+@asynccontextmanager
+async def _official_http_stream(
+    client: httpx.AsyncClient,
+    url: str,
+    user_agent: str,
+) -> AsyncIterator[httpx.Response]:
+    context = client.stream(
+        "GET",
+        url,
+        headers={
+            "Accept": ("application/x-eprint-tar, application/gzip, application/octet-stream"),
+            "User-Agent": user_agent,
+        },
+        follow_redirects=False,
+    )
+    response = await _http_operation(context.__aenter__())
+    try:
+        yield response
+    except BaseException:
+        # Closing HTTP resources must not replace or retag a caller-body failure.
+        with suppress(BaseException):
+            await context.__aexit__(*sys.exc_info())
+        raise
+    else:
+        await _http_operation(context.__aexit__(None, None, None))
 
 
 def _matches_source_header(path: Path, content_type: str) -> bool:

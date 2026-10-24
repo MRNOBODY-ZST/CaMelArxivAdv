@@ -131,7 +131,10 @@ public class CampaignDeliveryWorkerConfiguration {
 						safetyRepository, safetyPreparer,
 						beanFactory.getBean(ContactCrypto.class),
 						beanFactory.getBean(SmtpTransport.class)::sendDetailed,
-						beanFactory.getBean(Clock.class));
+						beanFactory.getBean(Clock.class),
+						new com.camel_hub.advertisement.campaign.partner.PartnerInviteOutboundFinalizer(
+								beanFactory.getBeanProvider(com.camel_hub.advertisement.campaign.partner.PartnerInviteService.class).getIfAvailable(),
+								beanFactory.getBean(ContactCrypto.class), beanFactory.getBean(Clock.class)));
 			});
 			registry.registerBeanDefinition("campaignDeliveryExecutor", executor);
 

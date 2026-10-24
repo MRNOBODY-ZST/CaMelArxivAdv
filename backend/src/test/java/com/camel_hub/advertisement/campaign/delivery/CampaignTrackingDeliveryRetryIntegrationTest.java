@@ -55,6 +55,49 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 	private static final String TRACKING_KEY = Base64.getEncoder().encodeToString(
 			"delivery-retry-tracking-key-32bytes".getBytes(StandardCharsets.UTF_8));
 
+	@Test void diagnosticSurvivesPreparationRollback() {
+		var fixture=eligibleTrackedRecipient();
+		sql("ALTER TABLE campaign_recipients ADD CONSTRAINT synthetic_body_rejection CHECK (rendered_html LIKE '%{{unsubscribe_url}}%')");
+		var tracking=new CampaignTrackingService(new CampaignTrackingRepository(databaseClient),
+			new MailTrackingProperties(true,"https://tracking.example.test",TRACKING_KEY,Duration.ofDays(30)),
+			new CampaignTrackingSigner(TRACKING_KEY),new MailOpenClassifier(),Clock.fixed(NOW,ZoneOffset.UTC),transactions);
+		AtomicInteger sends=new AtomicInteger();
+		try {
+			var executor=new CampaignDeliveryExecutor(repository(),tracking,contactCrypto,(account,message)->{sends.incrementAndGet();throw new AssertionError("SMTP");},Clock.fixed(NOW,ZoneOffset.UTC));
+			assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.PERMANENT_FAILURE);
+			assertThat(sends).hasValue(0);
+			assertThat(count("campaign_links")).isZero();assertThat(count("tracking_tokens")).isZero();
+			assertThat(text("SELECT rendered_html FROM campaign_recipients WHERE id='"+fixture.recipientId()+"'")).contains("{{unsubscribe_url}}");
+			var view=new CampaignReportingRepository(databaseClient).deliveries(fixture.campaignId(),0,20).blockFirst();
+			assertThat(view.preparationDiagnostic().stage()).isEqualTo(PreparationDiagnostic.PreparationStage.BODY_PERSIST);
+			assertThat(view.preparationDiagnostic().exceptionType()).isEqualTo(PreparationDiagnostic.SafeExceptionType.PERSISTENCE);
+			assertThat(view.preparationDiagnostic().traceRef()).isNotNull();
+			assertThat(view.smtpResponseSummary()).isNull();
+		} finally {sql("ALTER TABLE campaign_recipients DROP CONSTRAINT synthetic_body_rejection");}
+	}
+
+	@Test void actualSourceAndArtifactAndSigningBoundariesRetainSpecificStage() {
+		for (String seam : List.of("source", "artifact-sync", "artifact-reactive", "signing")) {
+			resetDatabase();var fixture=eligibleTrackedRecipient();
+			var trackingRepository=org.mockito.Mockito.spy(new CampaignTrackingRepository(databaseClient));
+			var signer=org.mockito.Mockito.spy(new CampaignTrackingSigner(TRACKING_KEY));
+			if(seam.equals("source")) sql("UPDATE campaign_recipients SET rendered_text=rendered_text || ' https://tracking.example.test/t/o/synthetic-private-token' WHERE id='"+fixture.recipientId()+"'");
+			if(seam.equals("artifact-sync")) org.mockito.Mockito.doThrow(new org.springframework.dao.DataAccessResourceFailureException("synthetic-secret"))
+				.when(trackingRepository).ensureLink(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
+			if(seam.equals("artifact-reactive")) org.mockito.Mockito.doReturn(reactor.core.publisher.Mono.error(new org.springframework.dao.DataAccessResourceFailureException("synthetic-secret")))
+				.when(trackingRepository).ensureLink(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
+			if(seam.equals("signing")) org.mockito.Mockito.doThrow(new IllegalStateException("synthetic-secret"))
+				.when(signer).issueUnsubscribe(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
+			var tracking=new CampaignTrackingService(trackingRepository,new MailTrackingProperties(true,"https://tracking.example.test",TRACKING_KEY,Duration.ofDays(30)),signer,new MailOpenClassifier(),Clock.fixed(NOW,ZoneOffset.UTC),transactions);
+			var executor=new CampaignDeliveryExecutor(repository(),tracking,contactCrypto,(account,message)->{throw new AssertionError("SMTP");},Clock.fixed(NOW,ZoneOffset.UTC));
+			assertThat(executor.pumpOnce().block()).isEqualTo(CampaignDeliveryExecutor.PumpResult.PERMANENT_FAILURE);
+			var diagnostic=new CampaignReportingRepository(databaseClient).deliveries(fixture.campaignId(),0,20).blockFirst().preparationDiagnostic();
+			assertThat(diagnostic.stage().name()).isEqualTo(seam.equals("source")?"SOURCE_VALIDATION":seam.equals("signing")?"TRACKING_RENDER":"ARTIFACT_PERSIST");
+			assertThat(diagnostic.exceptionType().name()).isEqualTo(seam.equals("source")?"VALIDATION":seam.equals("signing")?"CRYPTO":"PERSISTENCE");
+			assertThat(count("campaign_links")).isZero();assertThat(count("tracking_tokens")).isZero();
+		}
+	}
+
 	@Test
 	void realExecutorReusesFrozenBodiesCapabilitiesAndRfc8058HeadersAfterA450Retry() {
 		UUIDHolder fixture = eligibleTrackedRecipient();
@@ -372,8 +415,8 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("Frozen campaign capabilities are invalid");
+				.isInstanceOf(PreparationDiagnostic.PreparationFailure.class)
+				.satisfies(error -> assertThat(PreparationDiagnostic.original(error)).isInstanceOf(IllegalArgumentException.class).hasMessage("Frozen campaign capabilities are invalid"));
 		assertThat(frozenSnapshot(fixture.recipientId())).isEqualTo(before);
 		assertThat(count("tracking_tokens")).isEqualTo(3);
 	}
@@ -412,8 +455,8 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("Frozen campaign capabilities are invalid");
+				.isInstanceOf(PreparationDiagnostic.PreparationFailure.class)
+				.satisfies(error -> assertThat(PreparationDiagnostic.original(error)).isInstanceOf(IllegalArgumentException.class).hasMessage("Frozen campaign capabilities are invalid"));
 		assertThat(frozenSnapshot(fixture.recipientId())).isEqualTo(before);
 		assertThat(count("tracking_tokens")).isEqualTo(3);
 	}
@@ -440,8 +483,8 @@ class CampaignTrackingDeliveryRetryIntegrationTest extends CampaignDeliveryDatab
 		CampaignDeliveryRepository.ProductionClaim retry = delivery.claimNextProduction(clock.instant()).block();
 
 		assertThatThrownBy(() -> tracking.prepare(retry).block())
-				.isInstanceOf(IllegalArgumentException.class)
-				.hasMessage("Frozen campaign capabilities are invalid");
+				.isInstanceOf(PreparationDiagnostic.PreparationFailure.class)
+				.satisfies(error -> assertThat(PreparationDiagnostic.original(error)).isInstanceOf(IllegalArgumentException.class).hasMessage("Frozen campaign capabilities are invalid"));
 		assertThat(frozenSnapshot(fixture.recipientId())).isEqualTo(before);
 		assertThat(count("tracking_tokens")).isEqualTo(3);
 	}

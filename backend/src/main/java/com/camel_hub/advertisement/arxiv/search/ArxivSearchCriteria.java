@@ -1,15 +1,16 @@
 package com.camel_hub.advertisement.arxiv.search;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import java.time.LocalDate;
 import java.util.List;
 
 public record ArxivSearchCriteria(
 		List<String> categoryIds,
 		CategoryMode categoryMode,
-		LocalDate submittedFrom,
-		LocalDate submittedTo,
-		LocalDate updatedFrom,
-		LocalDate updatedTo,
+		@JsonFormat(shape = JsonFormat.Shape.STRING) LocalDate submittedFrom,
+		@JsonFormat(shape = JsonFormat.Shape.STRING) LocalDate submittedTo,
+		@JsonFormat(shape = JsonFormat.Shape.STRING) LocalDate updatedFrom,
+		@JsonFormat(shape = JsonFormat.Shape.STRING) LocalDate updatedTo,
 		String titleKeywords,
 		String abstractKeywords,
 		String authorKeywords,

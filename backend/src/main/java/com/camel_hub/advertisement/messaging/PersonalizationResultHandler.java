@@ -55,10 +55,18 @@ public final class PersonalizationResultHandler {
 			PersonalizationResultMessage message, CampaignRepository.ResultContext context
 	) {
 		PersonalizationResultMessage.Payload payload = message.payload();
+		if (com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.containsCapability(payload.rationale())) {
+			throw new IllegalArgumentException("Generated draft contains a private capability");
+		}
+		if (!payload.provider().equals(context.provider()) || !payload.model().equals(context.model())) {
+			return repository.storeFailed(message.campaignId(), message.recipientId(), message.jobId(),
+					"CONFIGURATION_MISMATCH", "Generated draft model does not match the queued configuration");
+		}
 		TemplateModels.PreparedTemplate prepared = templateEngine.prepare(new TemplateModels.TemplateDraft(
 				payload.subject(), context.fromName(), context.replyTo(), payload.html(), payload.text(), false));
 		if (!prepared.validation().valid()
-				|| !prepared.validation().variables().equals(Set.of("unsubscribe_url"))) {
+				|| !prepared.validation().variables().contains("unsubscribe_url")
+				|| !Set.of("unsubscribe_url", "partner_claim_url").containsAll(prepared.validation().variables())) {
 			throw new IllegalArgumentException("Generated draft did not pass the email safety policy");
 		}
 		var draft = new CampaignRepository.GeneratedDraft(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import SecretStr, ValidationError
@@ -39,11 +39,14 @@ class OpenAIEmailClient:
         api_key: SecretStr,
         model: str,
         base_url: str = "https://api.openai.com/v1",
+        *,
+        auth_scheme: Literal["x-api-key", "bearer"] = "bearer",
     ) -> None:
         self._http = http
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
+        self._auth_scheme = auth_scheme
 
     async def generate(
         self,
@@ -70,7 +73,11 @@ class OpenAIEmailClient:
             response = await self._http.post(
                 f"{self._base_url}/responses",
                 headers={
-                    "Authorization": f"Bearer {self._api_key.get_secret_value()}",
+                    **(
+                        {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
+                        if self._auth_scheme == "bearer"
+                        else {"x-api-key": self._api_key.get_secret_value()}
+                    ),
                     "Content-Type": "application/json",
                 },
                 json=request,

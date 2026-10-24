@@ -46,6 +46,60 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	@Test
+	void pausedInvitationHoldInvalidatesResumeSnapshotWaitingForCampaignLock() throws Exception {
+		UUID campaign=insertCampaign("RUNNING");
+		UUID recipient=insertEligibleRecipient(campaign,"paused-hold-race@research.test");
+		sql("UPDATE campaign_recipients SET rendered_text=rendered_text || ' {{partner_claim_url}}' WHERE id='"+recipient+"'");
+		var claim=firstRepository.claimNextProduction(NOW).block();
+		sql("UPDATE campaigns SET status='PAUSED' WHERE id='"+campaign+"'");
+		long version=integer("SELECT lock_version FROM campaigns WHERE id='"+campaign+"'");
+		CompletableFuture<Void> holdWritten=new CompletableFuture<>(), releaseHold=new CompletableFuture<>();
+		var holding=transactions.transactional(firstRepository.holdPartnerInvite(claim,"HELD",NOW).flatMap(held -> {
+			holdWritten.complete(null);
+			return reactor.core.publisher.Mono.fromFuture(releaseHold).thenReturn(held);
+		})).subscribeOn(Schedulers.boundedElastic()).toFuture();
+		try {
+			holdWritten.get(5,TimeUnit.SECONDS);
+			var workflow=new com.camel_hub.advertisement.campaign.CampaignWorkflowRepository(databaseClient);
+			var resuming=workflow.resume(campaign,version,ACTOR).subscribeOn(Schedulers.boundedElastic()).toFuture();
+			assertThat(awaitBlockedClaim()).isTrue();
+			releaseHold.complete(null);
+			assertThat(holding.get(5,TimeUnit.SECONDS)).isTrue();
+			assertThat(resuming.get(5,TimeUnit.SECONDS)).isNull();
+		} finally { releaseHold.complete(null); }
+		assertThat(text("SELECT status FROM campaigns WHERE id='"+campaign+"'")).isEqualTo("PAUSED");
+		assertThat(integer("SELECT lock_version FROM campaigns WHERE id='"+campaign+"'")).isEqualTo(version+1);
+	}
+
+	@ParameterizedTest
+	@MethodSource("partnerFenceContentionCases")
+	void eligibilityUsesTimeAfterEveryLockEvenWhenLeaseExpiresWhileWaiting(String table, boolean begin) throws Exception {
+		UUID campaign=insertCampaign("RUNNING");
+		UUID recipient=insertEligibleRecipient(campaign,"fence-wait@research.test");
+		sql("UPDATE campaign_recipients SET rendered_text=rendered_text || ' {{partner_claim_url}}' WHERE id='"+recipient+"'");
+		var claim=firstRepository.claimNextProduction(NOW).block();
+		var time=new java.util.concurrent.atomic.AtomicReference<java.time.Instant>(NOW);
+		var clock=org.mockito.Mockito.mock(java.time.Clock.class);
+		org.mockito.Mockito.when(clock.instant()).thenAnswer(ignored -> time.get());
+		UUID target=table.equals("campaigns") ? campaign : table.equals("campaign_recipients") ? recipient : claim.attemptId();
+		CompletableFuture<Boolean> checking;
+		try (Connection gate=DriverManager.getConnection(POSTGRES.getJdbcUrl(),POSTGRES.getUsername(),POSTGRES.getPassword())) {
+			gate.setAutoCommit(false);
+			try(var statement=gate.createStatement()) { statement.execute("SELECT id FROM "+table+" WHERE id='"+target+"' FOR UPDATE"); }
+			checking=(begin ? firstRepository.beginSmtp(claim,clock) : firstRepository.productionEligible(claim,clock))
+					.subscribeOn(Schedulers.boundedElastic()).toFuture();
+			assertThat(awaitBlockedClaim()).isTrue();
+			time.set(NOW.plus(DELIVERY_PROPERTIES.leaseDuration()).plusSeconds(1));
+			gate.commit();
+		}
+		assertThat(checking.get(5,TimeUnit.SECONDS)).isFalse();
+		assertThat(count("delivery_attempts WHERE id='"+claim.attemptId()+"' AND smtp_started_at IS NULL AND partner_preparation_pending")).isEqualTo(1);
+	}
+	static Stream<Arguments> partnerFenceContentionCases() {
+		return Stream.of("campaigns","campaign_recipients","delivery_attempts").flatMap(table -> Stream.of(Arguments.of(table,true),Arguments.of(table,false)));
+	}
+
+	@Test
 	void twoWorkersCanNeverClaimTheSameRecipient() throws Exception {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "one-worker@research.test");
@@ -249,6 +303,19 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	@Test
+	void paperContactPolicyRetainsAtomicSameEmailDeliveryReservation() throws Exception {
+		UUID first = insertCampaign("RUNNING");
+		UUID recipient = insertEligibleRecipient(first, "paper-same@research.test");
+		UUID second = insertCampaign("RUNNING");
+		cloneRecipientToCampaign(recipient, second);
+		sql("UPDATE campaigns SET recipient_policy = 'PAPER_CONTACT', paper_contact_ids = ARRAY['" + PAPER + "'::uuid]");
+		sql("UPDATE campaign_recipients SET author_id = NULL, author_name_snapshot = NULL, confidence = 'LOW'");
+		sql("UPDATE paper_author_contacts SET paper_author_id = NULL, confidence = 'LOW', human_verified = false, verification_status = 'UNVERIFIED'");
+		assertThat(concurrentClaims()).filteredOn(java.util.Objects::nonNull).hasSize(1);
+		assertThat(count("delivery_attempts")).isEqualTo(1);
+	}
+
+	@Test
 	void lateCompletionCannotOverwriteExpiredLeaseReconciliation() {
 		UUID campaignId = insertCampaign("RUNNING");
 		insertEligibleRecipient(campaignId, "late@research.test");
@@ -359,6 +426,28 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	}
 
 	@Test
+	void finalReservationRechecksPaperDeletionWhileClaimWaitsOnAccountLock() throws Exception {
+		UUID campaignId = insertCampaign("RUNNING");
+		UUID recipientId = insertEligibleRecipient(campaignId, "paper-deletion-race@research.test");
+		try (Connection gate = DriverManager.getConnection(
+				POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+			gate.setAutoCommit(false);
+			try (var statement = gate.createStatement()) {
+				statement.execute("SELECT id FROM smtp_accounts WHERE id = '" + SMTP + "' FOR UPDATE");
+			}
+			CompletableFuture<CampaignDeliveryRepository.ProductionClaim> claim = firstRepository
+					.claimNextProduction(NOW).subscribeOn(Schedulers.boundedElastic()).toFuture();
+			assertThat(awaitBlockedClaim()).isTrue();
+			sql("UPDATE papers SET deleted_at = TIMESTAMPTZ '" + NOW + "' WHERE id = '" + PAPER + "'");
+			gate.commit();
+
+			assertThat(claim.get(10, TimeUnit.SECONDS)).isNull();
+		}
+		assertThat(count("delivery_attempts")).isZero();
+		assertThat(recipientState(recipientId)).isEqualTo(new RecipientState("SUPPRESSED", "EVIDENCE_INVALID"));
+	}
+
+	@Test
 	void permanentBounceFenceCommitsBeforeSameAddressClaimCanReserveSmtp() throws Exception {
 		UUID originalCampaign = insertCampaign("RUNNING");
 		UUID bouncedRecipient = insertEligibleRecipient(originalCampaign, "shared-bounce@research.test");
@@ -466,7 +555,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	void controlLockAlsoPreventsConcurrentEligibilityReconciliation() throws Exception {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "reconcile-race@research.test");
-		sql("UPDATE paper_author_contacts SET human_verified = false WHERE contact_id = "
+		sql("UPDATE paper_author_contacts SET verification_status = 'REJECTED' WHERE contact_id = "
 				+ "(SELECT contact_id FROM campaign_recipients WHERE id = '" + recipientId + "')");
 		Integer reconciled;
 		try (Connection control = DriverManager.getConnection(
@@ -488,7 +577,7 @@ class CampaignDeliveryConcurrencyIntegrationTest extends CampaignDeliveryDatabas
 	void claimAndEligibilityReconciliationSettleWithoutLockOrderDeadlock() throws Exception {
 		UUID campaignId = insertCampaign("RUNNING");
 		UUID recipientId = insertEligibleRecipient(campaignId, "claim-reconcile@research.test");
-		sql("UPDATE paper_author_contacts SET human_verified = false WHERE contact_id = "
+		sql("UPDATE paper_author_contacts SET verification_status = 'REJECTED' WHERE contact_id = "
 				+ "(SELECT contact_id FROM campaign_recipients WHERE id = '" + recipientId + "')");
 		CountDownLatch subscribed = new CountDownLatch(2);
 		CompletableFuture<Void> release = new CompletableFuture<>();

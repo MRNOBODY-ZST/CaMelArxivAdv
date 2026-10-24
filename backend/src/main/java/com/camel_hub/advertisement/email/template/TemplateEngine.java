@@ -1,5 +1,7 @@
 package com.camel_hub.advertisement.email.template;
 
+import com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy;
+
 import jakarta.mail.internet.AddressException;
 import jakarta.mail.internet.InternetAddress;
 import org.jsoup.Jsoup;
@@ -27,8 +29,8 @@ public final class TemplateEngine {
 
 	public static final Set<String> ALLOWED_VARIABLES = Set.of(
 			"author_name", "first_name", "paper_title", "arxiv_id", "primary_category",
-			"paper_url", "organization", "unsubscribe_url");
-	private static final Set<String> URL_VARIABLES = Set.of("paper_url", "unsubscribe_url");
+			"paper_url", "organization", "unsubscribe_url", "partner_claim_url");
+	private static final Set<String> URL_VARIABLES = Set.of("paper_url", "unsubscribe_url", "partner_claim_url");
 	private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{\\s*([a-z_]+)\\s*}}");
 	private static final Pattern WHOLE_PLACEHOLDER = Pattern.compile("^\\{\\{\\s*([a-z_]+)\\s*}}$");
 	private static final Pattern BRACE = Pattern.compile("\\{\\{|}}");
@@ -72,6 +74,14 @@ public final class TemplateEngine {
 		String text = draft.autoGenerateText() || normalized(draft.textContent()).isEmpty()
 				? deriveText(html)
 				: draft.textContent().strip();
+		try {
+			PartnerContentPolicy.validate(subject, rawHtml, text);
+			if (fromName.contains("partner_claim_url") || PartnerContentPolicy.containsCapability(fromName)) {
+				throw new IllegalArgumentException();
+			}
+		} catch (IllegalArgumentException invalid) {
+			throw new TemplateValidationException("Partner activation content is invalid");
+		}
 
 		List<String> errors = new ArrayList<>();
 		List<String> warnings = new ArrayList<>();
@@ -116,7 +126,8 @@ public final class TemplateEngine {
 		if (prepared == null || !prepared.validation().valid()) {
 			throw new TemplateValidationException("Template must pass validation before rendering");
 		}
-		Map<String, String> safeValues = values == null ? Map.of() : Map.copyOf(values);
+		Map<String, String> safeValues = new LinkedHashMap<>(values == null ? Map.of() : values);
+		safeValues.put("partner_claim_url", PartnerContentPolicy.PREVIEW_URL);
 		for (String variable : prepared.validation().variables()) {
 			if (!safeValues.containsKey(variable) || safeValues.get(variable) == null) {
 				throw new TemplateValidationException("Missing template variable: " + variable);

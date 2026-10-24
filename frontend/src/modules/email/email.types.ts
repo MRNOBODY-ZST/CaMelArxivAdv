@@ -7,7 +7,7 @@ export type PreviewDevice = 'desktop' | 'mobile'
 
 export const TEMPLATE_VARIABLES = [
   'author_name', 'first_name', 'paper_title', 'arxiv_id', 'primary_category',
-  'paper_url', 'organization', 'unsubscribe_url',
+  'paper_url', 'organization', 'unsubscribe_url', 'partner_claim_url',
 ] as const
 export type TemplateVariable = (typeof TEMPLATE_VARIABLES)[number]
 

@@ -20,6 +20,11 @@ public interface CampaignSafetyOutboundPreparer {
 			String recipient, String subject, String html, String text, Map<String, String> headers
 	) {
 		public PreparedSafetyOutbound {
+			com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.validate(subject, html, text);
+			html = html.replace(com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.PLACEHOLDER,
+					com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.PREVIEW_URL);
+			text = text.replace(com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.PLACEHOLDER,
+					com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.PREVIEW_URL);
 			headers = headers == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(headers));
 		}
 

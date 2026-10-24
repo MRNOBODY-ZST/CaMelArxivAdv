@@ -31,13 +31,16 @@ public class CampaignController {
 	private final CampaignService service;
 	private final CampaignWorkflowService workflow;
 	private final CampaignPreflightService preflight;
+	private final CampaignRecipientContentService recipientContent;
 
 	public CampaignController(
-			CampaignService service, CampaignWorkflowService workflow, CampaignPreflightService preflight
+			CampaignService service, CampaignWorkflowService workflow, CampaignPreflightService preflight,
+			CampaignRecipientContentService recipientContent
 	) {
 		this.service = service;
 		this.workflow = workflow;
 		this.preflight = preflight;
+		this.recipientContent = recipientContent;
 	}
 
 	@GetMapping
@@ -81,6 +84,18 @@ public class CampaignController {
 	) {
 		return workflow.update(id, RequestContextSupport.actorId(principal), RequestContextSupport.context(exchange),
 				request.expectedLockVersion(), request.command());
+	}
+
+	@PutMapping("/{id}/recipients/{recipientId}/content")
+	@PreAuthorize("hasAuthority('campaign:create')")
+	Mono<CampaignRecipientContentService.EditResult> updateRecipientContent(
+			@PathVariable UUID id, @PathVariable UUID recipientId,
+			@Valid @RequestBody CampaignDtos.RecipientContentUpdateRequest request,
+			Principal principal, ServerWebExchange exchange
+	) {
+		return recipientContent.update(
+				id, recipientId, RequestContextSupport.actorId(principal), RequestContextSupport.context(exchange),
+				request.command());
 	}
 
 	@GetMapping("/{id}/preflight")
@@ -173,8 +188,16 @@ public class CampaignController {
 	@ResponseStatus(HttpStatus.ACCEPTED)
 	@PreAuthorize("hasAuthority('campaign:create')")
 	Mono<CampaignService.GenerationStart> startPersonalization(
-			@PathVariable UUID id, ServerWebExchange exchange
+			@PathVariable UUID id,
+			@Valid @RequestBody(required = false) CampaignPersonalizationRequest request,
+			ServerWebExchange exchange
 	) {
-		return service.startPersonalization(id, RequestContextSupport.context(exchange));
+		return request == null
+				? service.startPersonalization(id, RequestContextSupport.context(exchange))
+				: request.paperContactIds() != null
+						? service.startPaperContactPersonalization(id, RequestContextSupport.context(exchange), request.paperContactIds())
+				: request.recipientLimit() != null
+						? service.startPersonalization(id, RequestContextSupport.context(exchange), request.paperIds(), request.recipientLimit())
+						: service.startPersonalization(id, RequestContextSupport.context(exchange), request.paperIds());
 	}
 }

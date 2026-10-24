@@ -51,7 +51,8 @@ public final class CampaignPublicContentRedactor {
 	private boolean containsCapability(String value, boolean html) {
 		try {
 			return inspectionViews(value, html).stream().anyMatch(inspected ->
-					SIGNED_CAPABILITY.matcher(inspected).find()
+					com.camel_hub.advertisement.campaign.partner.PartnerContentPolicy.containsCapability(inspected)
+							|| SIGNED_CAPABILITY.matcher(inspected).find()
 							|| configuredCallbackPath != null && configuredCallbackPath.matcher(inspected).find());
 		}
 		catch (IllegalArgumentException overEncoded) {
